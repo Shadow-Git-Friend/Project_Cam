@@ -1,0 +1,113 @@
+\documentclass[12pt,a4paper]{report}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage{fontspec}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{indentfirst}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\setmainfont{Times New Roman}
+\doublespacing
+\setlength{\parindent}{1.25cm}
+\setlength{\parskip}{0pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\titleformat{\chapter}[hang]{\normalfont\bfseries\Large}{Chapter \thechapter}{1em}{}
+\titleformat{\section}[hang]{\normalfont\bfseries\large}{\thesection}{0.8em}{}
+\titleformat{\subsection}[hang]{\normalfont\bfseries\normalsize}{\thesubsection}{0.8em}{}
+
+\begin{document}
+
+\input{frontmatter/title_page}
+
+\clearpage
+\thispagestyle{empty}
+\chapter*{Declaration}
+\addcontentsline{toc}{chapter}{Declaration}
+\input{frontmatter/declaration}
+
+\clearpage
+\setcounter{page}{2}
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+\input{frontmatter/abstract}
+
+\clearpage
+\chapter*{Acknowledgements}
+\addcontentsline{toc}{chapter}{Acknowledgements}
+\input{frontmatter/acknowledgements}
+
+\clearpage
+\tableofcontents
+\clearpage
+\chapter*{List of Abbreviations}
+\addcontentsline{toc}{chapter}{List of Abbreviations}
+\input{frontmatter/abbreviations}
+\clearpage
+\listoftables
+\clearpage
+\listoffigures
+
+\clearpage
+\chapter{Introduction}
+\input{chapters/ch01}
+
+\clearpage
+\chapter{Literature and Technology Review}
+\input{chapters/ch02}
+
+\clearpage
+\chapter{Project\_Cam Repository Evolution and Cross-Folder Logic}
+\input{chapters/ch03}
+
+\clearpage
+\chapter{System Architecture and Mathematical Methodology}
+\input{chapters/ch04}
+
+\clearpage
+\chapter{Implementation Details and Engineering Decisions}
+\input{chapters/ch05}
+
+\clearpage
+\chapter{Experimental Protocols and Ground-Truth Methodology}
+\input{chapters/ch06}
+
+\clearpage
+\chapter{Results, Error Analysis, and Correction Strategy}
+\input{chapters/ch07}
+
+\clearpage
+\chapter{Toward Intelligent Launcher Control: Architecture, Ballistics, and Safety}
+\input{chapters/ch08}
+
+\clearpage
+\chapter{Conclusion and Future Research Directions}
+\input{chapters/ch09}
+
+\clearpage
+\chapter*{Bibliography/References}
+\addcontentsline{toc}{chapter}{Bibliography/References}
+\input{references/references_list}
+
+\appendix
+\clearpage
+\chapter{Required Manuscript Order}
+\input{appendices/appA_required_order}
+
+\clearpage
+\chapter{Formatting Checklist}
+\input{appendices/appB_formatting}
+
+\clearpage
+\chapter{Reproducibility Artifacts}
+\input{appendices/appC_reproducibility}
+
+\end{document}

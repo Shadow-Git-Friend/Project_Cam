@@ -1,0 +1,40 @@
+# Master Thesis Data Collection Guide
+## Pose-Guided Predictive Ballistics
+
+See full guide here: `~/.gemini/antigravity/brain/8adbed53-2db9-4c76-9344-f9b3411267b2/data_collection_guide.md`
+
+## Quick Reference
+
+### iPhone Settings
+- Resolution: 4K @ 60fps
+- Stabilization: OFF
+- Focus/Exposure: LOCKED
+
+### Camera Positions (4 cameras ideal)
+- 2 side cameras at 45° angle to kicker (4-6m away)
+- 2 back cameras behind kicker
+- Height: 1.2-1.5m (hip level)
+
+### Zone Grid (3x3 = 9 zones)
+```
+┌────┬────┬────┐
+│ 7  │ 8  │ 9  │ HIGH
+├────┼────┼────┤
+│ 4  │ 5  │ 6  │ MID
+├────┼────┼────┤
+│ 1  │ 2  │ 3  │ LOW
+└────┴────┴────┘
+LEFT  CENTER RIGHT
+```
+
+### Minimum Dataset
+- Pilot: 50 kicks
+- Training: 180 kicks (20/zone)
+- Final: 270+ kicks (30/zone)
+
+### Sync Method
+1. Start all cameras
+2. CLAP loudly in view of all cameras
+3. Wait 2 seconds
+4. Kick
+5. Stop cameras

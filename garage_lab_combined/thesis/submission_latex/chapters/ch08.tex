@@ -1,0 +1,308 @@
+\section{8.1 Target System Vision}
+The end goal is a closed-loop training system that accepts semantic commands and executes safe, accurate shots. Example command path:
+
+\texttt{"right shoulder" -> select target point -> compute launch solution -> fire -> verify hit/miss -> adapt next shot}
+
+This requires tight coupling between perception and actuation.
+
+\section{8.2 Functional Blocks}
+\subsection{Block A: Command Interface}
+\begin{itemize}
+  \item voice/text parser,
+  \item intent classification (body part vs zone target),
+  \item command validation and confirmation.
+\end{itemize}
+
+\subsection{Block B: Target Semantic Resolver}
+\begin{itemize}
+  \item map command token to 3D target in world frame,
+  \item estimate confidence of selected body joint,
+  \item gate on minimum confidence and camera support.
+\end{itemize}
+
+\subsection{Block C: Launcher Frame Transform}
+\begin{itemize}
+  \item transform target from world frame to launcher frame,
+  \item apply launcher pose calibration,
+  \item include static offsets (barrel origin, release point).
+\end{itemize}
+
+\subsection{Block D: Ballistics Solver}
+Given target point \((x\_t, y\_t, z\_t)\) in launcher frame and release constraints, solve for initial velocity magnitude \(v\_0\) and azimuth/elevation angles \((\phi, \theta)\). For simplified projectile model (without spin and strong drag):
+
+\[
+x(t)=v_0\cos\theta\cos\phi \cdot t,
+\]
+\[
+y(t)=v_0\cos\theta\sin\phi \cdot t,
+\]
+\[
+z(t)=v_0\sin\theta\cdot t - \frac{1}{2}gt^2.
+\]
+
+In practice, launcher-specific calibration tables and empirical correction are needed due to wheel dynamics, spin, and drag.
+
+\subsection{Block E: Actuation and Safety Controller}
+\begin{itemize}
+  \item send shot command,
+  \item enforce no-fire constraints,
+  \item require clear field and confidence threshold,
+  \item emergency stop integration.
+\end{itemize}
+
+\subsection{Block F: Visual Verification and Adaptation}
+\begin{itemize}
+  \item reconstruct actual trajectory,
+  \item compute impact/closest-approach to target,
+  \item update correction model for future shots.
+\end{itemize}
+
+\section{8.3 Why Perception Quality Directly Affects Safety}
+If 3D target estimate is wrong by 20-30 cm, a body-part-targeted shot can miss significantly and potentially create unsafe trajectories. Therefore, perception confidence gating is mandatory.
+
+Recommended no-fire conditions:
+\begin{itemize}
+  \item fewer than 3 cameras support target joint,
+  \item reprojection error above threshold,
+  \item rapid target uncertainty spikes,
+  \item second person detected in risk zone,
+  \item stale calibration flag.
+\end{itemize}
+
+\section{8.4 Integration Phases}
+\subsection{Table 8.1 Integration phases and exit criteria}
+\begin{verbatim}
+| Phase | Description | Exit criteria |
+|---|---|---|
+| P1 | Perception freeze and rigid GT qualification | rigid mean <= 60 mm, P95 <= 90 mm |
+| P2 | Command parser and target semantic binding | >95% command parsing accuracy in test set |
+| P3 | Ballistic solver in simulation | trajectory error < predefined tolerance |
+| P4 | HIL supervised firing tests | zero safety violations, logged verification |
+| P5 | Semi-autonomous training mode | stable performance across multi-session trials |
+\end{verbatim}
+
+\section{8.5 Voice Command Integration Notes}
+Voice recognition can be implemented as modular front end:
+\begin{itemize}
+  \item offline keyword spotting or online ASR,
+  \item strict vocabulary of target terms,
+  \item explicit confirmation step before fire command.
+\end{itemize}
+
+Because command errors are high-risk, a two-step interaction is preferred:
+\begin{enumerate}
+  \item system repeats interpreted target,
+  \item operator confirms.
+\end{enumerate}
+
+\section{8.6 Practical Engineering Constraints}
+\begin{itemize}
+  \item USB camera bandwidth and decode load can bottleneck live FPS.
+  \item GPU acceleration is required for robust near-real-time operation.
+  \item Camera mounts must be mechanically stable across sessions.
+  \item Calibration updates must be part of standard operating procedure.
+\end{itemize}
+
+\section{8.7 Ethical and Safety Considerations}
+The system should include:
+\begin{itemize}
+  \item operator override,
+  \item activity logging for all commands and shots,
+  \item explicit exclusion of bystanders,
+  \item transparent uncertainty signaling,
+  \item conservative default behavior under uncertainty.
+\end{itemize}
+
+A research prototype must never claim production safety without formal certification and controlled testing.
+
+\section{8.8 Expected Impact}
+If completed, this architecture can replace fixed-program training with adaptive, measurable drills. It can also reduce dependence on distributed physical sensors by using camera-defined target geometry and 3D event verification.
+
+
+\section{8.9 Launcher Dynamics Calibration Requirements}
+Even with perfect target coordinates, launcher output depends on wheel speed curves, spin-induced drift, release timing, and mechanical vibration. Therefore, ballistic planning should include empirical launcher calibration:
+\begin{itemize}
+  \item map command parameters to observed trajectory outcomes,
+  \item fit correction surfaces for speed and angle,
+  \item include uncertainty bounds in shot planning.
+\end{itemize}
+
+This calibration must be repeated after maintenance or hardware modifications.
+
+\section{8.10 Control Strategy Options}
+Three control strategies are feasible:
+
+\begin{enumerate}
+  \item Lookup-table control: fastest to deploy, uses pre-measured shot map.
+  \item Model-based control: uses projectile equations with calibrated corrections.
+  \item Hybrid adaptive control: starts with model/lookup and updates from visual feedback.
+\end{enumerate}
+
+For this project stage, the recommended path is model-based + empirical correction, then gradual adaptation.
+
+\section{8.11 Human Factors and User Experience}
+A practical training system must present clear operator feedback:
+\begin{itemize}
+  \item selected target and confidence score,
+  \item whether system is in safe-to-fire state,
+  \item reason for no-fire decisions,
+  \item post-shot hit/miss and distance-to-target metrics.
+\end{itemize}
+
+Transparent feedback improves trust and enables coaches to interpret system behavior.
+
+\section{8.12 Deployment Roadmap to Field Trials}
+A realistic near-term roadmap:
+\begin{enumerate}
+  \item lock mounts and finalize rigid GT campaign,
+  \item integrate command parser and target resolver,
+  \item calibrate launcher-to-world transform,
+  \item run low-energy supervised HIL shots,
+  \item evaluate hit statistics and safety logs,
+  \item expand to realistic training drills with controlled progression.
+\end{enumerate}
+
+This roadmap is feasible within phased research milestones and supports future publication-quality results.
+
+
+
+\section{8.13 Interface Definition Between Perception and Launcher Controller}
+A clean interface is recommended:
+
+Input to controller:
+\begin{itemize}
+  \item \texttt{target\_point\_world\_mm},
+  \item \texttt{target\_type} (joint/zone),
+  \item \texttt{confidence\_score},
+  \item \texttt{timestamp},
+  \item \texttt{uncertainty\_score},
+  \item \texttt{safety\_flags}.
+\end{itemize}
+
+Output from controller:
+\begin{itemize}
+  \item planned launch parameters,
+  \item fire/no-fire decision,
+  \item reason code,
+  \item post-shot feedback summary.
+\end{itemize}
+
+This explicit contract prevents hidden assumptions between software modules.
+
+\section{8.14 Progressive Safety Envelope}
+A progressive safety envelope should be implemented:
+\begin{enumerate}
+  \item simulation-only mode,
+  \item dry-run command mode (no firing),
+  \item low-energy supervised firing,
+  \item bounded autonomous mode.
+\end{enumerate}
+
+Each level should have quantitative pass/fail criteria.
+
+\section{8.15 Validation Campaign for Launcher Stage}
+A full launcher-stage validation campaign should include:
+\begin{itemize}
+  \item static target hit tests,
+  \item moving target tracking without firing,
+  \item supervised firing to large zones,
+  \item supervised firing to body-part proxies,
+  \item stress tests with occlusions and lighting shifts.
+\end{itemize}
+
+Each campaign must log confidence and no-fire decisions, not only successful hits.
+
+\section{8.16 Research Publication Opportunities}
+Potential publication directions after next stage:
+\begin{itemize}
+  \item practical robust extrinsics in constrained indoor arenas,
+  \item protocol-driven benchmarking for sports CV systems,
+  \item perception-aware safe actuation framework for training robotics.
+\end{itemize}
+
+The current thesis establishes the data and methods foundation for these outcomes.
+
+
+
+\section{8.17 Data Logging Requirements for Autonomous Mode}
+When launcher control is introduced, logs must include:
+\begin{itemize}
+  \item target command and parsed intent,
+  \item selected 3D target and confidence,
+  \item launch parameters sent,
+  \item pre-fire safety checks,
+  \item post-shot trajectory verification,
+  \item hit/miss and residual distance.
+\end{itemize}
+
+Such logs are essential for safety audits and model improvement.
+
+\section{8.18 Failure Recovery Strategy}
+Controller should define explicit recovery policies:
+\begin{itemize}
+  \item if perception confidence drops before fire: cancel shot,
+  \item if confidence drops after fire: mark low-confidence outcome,
+  \item if repeated uncertainty events occur: enter safe hold mode,
+  \item require operator acknowledgment to resume.
+\end{itemize}
+
+This state-machine approach prevents uncontrolled behavior.
+
+\section{8.19 Calibration-Aware Command Scheduling}
+Autonomous commands should be blocked when calibration age exceeds a threshold or when drift monitor flags inconsistency. Scheduling commands based on calibration health avoids accumulating hidden risk.
+
+\section{8.20 Human-in-the-Loop Training Progression}
+A recommended progression:
+\begin{enumerate}
+  \item coach-assisted command selection,
+  \item system proposes target and waits confirmation,
+  \item system executes low-energy shot,
+  \item coach reviews visual verification,
+  \item system updates adaptation parameters.
+\end{enumerate}
+
+This creates a safe transition from manual operation to increasing autonomy.
+
+\section{8.21 Ethical Communication in Stakeholder Reporting}
+It is important to communicate project status honestly:
+\begin{itemize}
+  \item perception system is validated with known limitations,
+  \item launcher autonomy is planned and partially architected,
+  \item safety-critical deployment requires additional testing.
+\end{itemize}
+
+This communication style aligns with research integrity and protects project credibility.
+
+\section{8.22 Chapter Summary}
+The architecture and control roadmap are technically grounded and immediately actionable for the next project phase. The design emphasizes measurable readiness and safety at every step.
+
+
+
+\section{8.23 Proposed Software Stack for Controller Integration}
+A practical software split is:
+\begin{itemize}
+  \item perception process (capture + inference + triangulation),
+  \item decision process (target resolution + safety gating),
+  \item control process (ballistic solve + actuator IO),
+  \item monitoring process (visualization + logs + alerts).
+\end{itemize}
+
+Inter-process communication can use lightweight message queues with timestamped packets.
+
+\section{8.24 Real-Time Validation Dashboard Requirements}
+Before autonomous mode, operators need a dashboard displaying:
+\begin{itemize}
+  \item current target and confidence,
+  \item camera participation per estimate,
+  \item calibration health flag,
+  \item no-fire reason codes,
+  \item recent hit/miss history.
+\end{itemize}
+
+This dashboard is crucial for supervised transition stages.
+
+\section{8.25 Human-in-the-Loop Ethics and Accountability}
+In mixed human-machine training, accountability should be explicit. The system should preserve logs linking each fire command to perception state and operator approvals. This enables post-event analysis and responsible use in training contexts.
+
+\section{8.26 Final Integration Perspective}
+The integration task is not blocked by unknown fundamentals; it is blocked by engineering hardening steps already identified by this thesis. This is a strong position for next-phase execution.

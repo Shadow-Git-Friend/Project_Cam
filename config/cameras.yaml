@@ -1,0 +1,36 @@
+cameras:
+  - name: Cam1
+    device: /dev/video0
+    width: 704
+    height: 576
+    fps: 25
+  - name: Cam2
+    device: /dev/video2
+    width: 704
+    height: 576
+    fps: 25
+  - name: Cam3
+    device: /dev/video4
+    width: 704
+    height: 576
+    fps: 25
+  - name: Cam4
+    device: /dev/video6
+    width: 704
+    height: 576
+    fps: 25
+
+# config/cameras.yaml
+
+# cameras:
+#   - name: "left"
+#     url: "rtsp://admin:ПАРОЛЬ@192.168.1.101:554/Streaming/Channels/102"   # ← замени пароль и IP
+#     width: 704
+#     height: 576
+#     fps: 25
+
+#   - name: "right"
+#     url: "rtsp://admin:ПАРОЛЬ@192.168.1.102:554/Streaming/Channels/102"   # ← замени пароль и IP
+#     width: 704
+#     height: 576
+#     fps: 25

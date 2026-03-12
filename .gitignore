@@ -1,0 +1,55 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Data and Outputs (Large)
+*.mp4
+*.avi
+render_output*/
+render_output/
+data/
+runs/
+Intrinsicsdec17/
+cal/*.json
+!cal/goal_config.json
+!cal/calibration_full.json
+
+# Project Specific
+*.zip
+*.json
+!motion_capture_data.json
+!plan
+!requirements.txt
+
+# IDE
+.vscode/
+.idea/
+
+# Local Capture / Archive Folders
+CAMERA1/
+CAMERA2/
+Camera Roll/
+output/
+pitch/
+garage-20260217T113109Z-3-001/
+
+# Garage Workspace Outputs
+GARAGE_CAMERAS/recordings/
+GARAGE_CAMERAS/sync_records/
+garage_lab_combined/output/
+garage_lab_combined/sync_frames/
+garage_lab_combined/synchronized_video/
+garage_lab_combined/cal/captures/
+garage_lab_combined/cal/captures_*/
+garage_lab_combined/cal/intrinsics_backup_*/
+garage_lab_combined/gt_eval/**/visualizations/
+
+# Binary Models / Media
+*.pt
+*.mkv
+*.mov
+*.webm
