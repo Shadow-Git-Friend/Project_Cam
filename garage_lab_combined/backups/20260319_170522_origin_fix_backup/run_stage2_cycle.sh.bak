@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PY="$ROOT/venv/bin/python"
+SESSION_STORE="$ROOT/garage_lab_combined/stage_person_cycle/.last_session"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  run_stage2_cycle.sh prep
+  run_stage2_cycle.sh terminal-a [--session <path>] [--udp-port <port>]
+  run_stage2_cycle.sh terminal-a-viz [--session <path>] [--udp-port <port>]
+  run_stage2_cycle.sh terminal-a-3d-mirror [--session <path>] [--udp-port <port>]
+  run_stage2_cycle.sh terminal-b [--mode aim|shoot] [--session <path>] [--udp-port <port>]
+  run_stage2_cycle.sh report [--mode aim|shoot] [--session <path>]
+
+Flow:
+  1) Terminal #1: run ... prep
+  2) Terminal #1: run ... terminal-a
+  3) Terminal #2: run ... terminal-b --mode shoot
+  4) In Terminal #2, type: start
+  5) During hold windows (if mode=shoot), type: shoot (manual protocol)
+  6) After cycle, type: home then quit
+  7) Run ... report --mode shoot
+EOF
+}
+
+resolve_session() {
+  local input_session="${1:-}"
+  if [[ -n "$input_session" ]]; then
+    echo "$input_session"
+    return
+  fi
+  if [[ -f "$SESSION_STORE" ]]; then
+    cat "$SESSION_STORE"
+    return
+  fi
+  echo ""  # caller handles
+}
+
+subcmd="${1:-}"
+shift || true
+
+session=""
+udp_port="5005"
+mode="shoot"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session)
+      session="$2"
+      shift 2
+      ;;
+    --udp-port)
+      udp_port="$2"
+      shift 2
+      ;;
+    --mode)
+      mode="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+case "$subcmd" in
+  prep)
+    session="$ROOT/garage_lab_combined/stage_person_cycle/sessions/$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$session"/{logs,reports}
+    echo "$session" > "$SESSION_STORE"
+    echo "[OK] SESSION=$session"
+    echo "[OK] Saved: $SESSION_STORE"
+    ;;
+
+  terminal-a)
+    session="$(resolve_session "$session")"
+    if [[ -z "$session" ]]; then
+      echo "[ERROR] No session found. Run: $0 prep"
+      exit 1
+    fi
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    echo "[INFO] Terminal A | SESSION=$session | UDP port=$udp_port | CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+    exec "$PY" "$ROOT/garage_lab_combined/scripts/live_4cam_arena_view.py" \
+      --high-performance \
+      --config "$ROOT/garage_lab_combined/config/cameras.yaml" \
+      --intrinsics-dir "$ROOT/garage_lab_combined/cal/intrinsics" \
+      --extrinsics "$ROOT/garage_lab_combined/cal/extrinsics/extrinsics_final.json" \
+      --dimensions "$ROOT/garage_lab_combined/cal/extrinsics/Dimensions.txt" \
+      --ball-device cuda:0 \
+      --pose-device cuda:0 \
+      --width 640 --height 360 --fps 30 \
+      --pose-every 4 --ball-every 1 \
+      --no-show-2d --no-show-3d \
+      --udp-target-host 127.0.0.1 \
+      --udp-target-port "$udp_port" \
+      --udp-target-joints right_knee,nose,body_center \
+      --udp-target-conf-min 0.50 \
+      --udp-target-cams-min 3
+    ;;
+
+  terminal-a-viz)
+    session="$(resolve_session "$session")"
+    if [[ -z "$session" ]]; then
+      echo "[ERROR] No session found. Run: $0 prep"
+      exit 1
+    fi
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    echo "[INFO] Terminal A (visual debug, fast 2D) | SESSION=$session | UDP port=$udp_port | CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+    exec "$PY" "$ROOT/garage_lab_combined/scripts/live_4cam_arena_view.py" \
+      --high-performance \
+      --config "$ROOT/garage_lab_combined/config/cameras.yaml" \
+      --intrinsics-dir "$ROOT/garage_lab_combined/cal/intrinsics" \
+      --extrinsics "$ROOT/garage_lab_combined/cal/extrinsics/extrinsics_final.json" \
+      --dimensions "$ROOT/garage_lab_combined/cal/extrinsics/Dimensions.txt" \
+      --ball-device cuda:0 \
+      --pose-device cuda:0 \
+      --width 640 --height 360 --fps 30 \
+      --pose-every 2 --ball-every 2 \
+      --show-2d --no-show-3d \
+      --udp-target-host 127.0.0.1 \
+      --udp-target-port "$udp_port" \
+      --udp-target-joints right_knee,nose,body_center \
+      --udp-target-conf-min 0.50 \
+      --udp-target-cams-min 3
+    ;;
+
+  terminal-a-3d-mirror)
+    session="$(resolve_session "$session")"
+    if [[ -z "$session" ]]; then
+      echo "[ERROR] No session found. Run: $0 prep"
+      exit 1
+    fi
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    echo "[INFO] Terminal A (3D mirrored debug) | SESSION=$session | UDP port=$udp_port | CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+    exec "$PY" "$ROOT/garage_lab_combined/scripts/live_4cam_arena_view.py" \
+      --high-performance \
+      --config "$ROOT/garage_lab_combined/config/cameras.yaml" \
+      --intrinsics-dir "$ROOT/garage_lab_combined/cal/intrinsics" \
+      --extrinsics "$ROOT/garage_lab_combined/cal/extrinsics/extrinsics_final.json" \
+      --dimensions "$ROOT/garage_lab_combined/cal/extrinsics/Dimensions.txt" \
+      --ball-device cuda:0 \
+      --pose-device cuda:0 \
+      --width 640 --height 360 --fps 30 \
+      --pose-every 4 --ball-every 4 \
+      --show-3d --no-show-2d \
+      --mirror-y-axis-3d \
+      --udp-target-host 127.0.0.1 \
+      --udp-target-port "$udp_port" \
+      --udp-target-joints right_knee,nose,body_center \
+      --udp-target-conf-min 0.50 \
+      --udp-target-cams-min 3
+    ;;
+
+  terminal-b)
+    session="$(resolve_session "$session")"
+    if [[ -z "$session" ]]; then
+      echo "[ERROR] No session found. Run: $0 prep"
+      exit 1
+    fi
+    shoot_flag="--shoot-enabled"
+    log_name="person_cycle_shoot.jsonl"
+    if [[ "$mode" == "aim" ]]; then
+      shoot_flag="--no-shoot-enabled"
+      log_name="person_cycle_aim.jsonl"
+    elif [[ "$mode" != "shoot" ]]; then
+      echo "[ERROR] --mode must be aim|shoot"
+      exit 1
+    fi
+    echo "[INFO] Terminal B | SESSION=$session | mode=$mode | log=$log_name"
+    exec "$PY" "$ROOT/garage_lab_combined/scripts/launcher_runtime_from_udp.py" \
+      --serial-port /dev/ttyUSB0 \
+      --launcher-x-mm 600 --launcher-y-mm 1560 --launcher-z-mm 500 \
+      --launcher-yaw-deg 0 \
+      --targets right_knee,nose,body_center \
+      --yaw-source-map right_knee:body_center \
+      --disable-zone-check \
+      --pre-aim-delay-sec-map right_knee:10,nose:10,body_center:10 \
+      --target-hold-sec-map right_knee:20,nose:20,body_center:20 \
+      --home-between-targets \
+      --home-wait-sec 0 \
+      --run-once-per-start \
+      --max-target-events 3 \
+      --min-conf 0.50 --min-cams 3 \
+      --stable-frames 10 --stable-window-sec 1.8 --stable-std-mm 15 \
+      --no-return-center-after-each-target \
+      --no-setzero-on-start \
+      --home-on-start --home-on-exit \
+      --fixed-speed-kmh 40 \
+      --velocity-to-rpm 68 \
+      --pitch-trim-deg -1.0 \
+      --yaw-trim-deg 0.0 \
+      --max-abs-angle-deg 40 \
+      --ignore-rpm-gate \
+      $shoot_flag \
+      --dry-run-log-jsonl "$session/logs/$log_name"
+    ;;
+
+  report)
+    session="$(resolve_session "$session")"
+    if [[ -z "$session" ]]; then
+      echo "[ERROR] No session found. Run: $0 prep"
+      exit 1
+    fi
+    log_name="person_cycle_shoot.jsonl"
+    out_dir="$session/reports/shoot"
+    if [[ "$mode" == "aim" ]]; then
+      log_name="person_cycle_aim.jsonl"
+      out_dir="$session/reports/aim"
+    elif [[ "$mode" != "shoot" ]]; then
+      echo "[ERROR] --mode must be aim|shoot"
+      exit 1
+    fi
+    mkdir -p "$out_dir"
+    "$PY" "$ROOT/garage_lab_combined/stage_person_cycle/analyze_person_cycle_metrics.py" \
+      --log "$session/logs/$log_name" \
+      --out-dir "$out_dir" \
+      --expected-sequence right_knee,nose,body_center
+    echo "[DONE] Report dir: $out_dir"
+    ;;
+
+  ""|-h|--help)
+    usage
+    ;;
+
+  *)
+    echo "Unknown subcommand: $subcmd"
+    usage
+    exit 1
+    ;;
+esac

@@ -64,10 +64,10 @@ This handoff is for the full `Project_Cam` repository, including:
 
 Fill in exact numbers before sharing:
 
-- Ball 3D mean error: `TODO`
-- Ball 3D P95 error: `TODO`
-- Joint-touch mean error: `TODO`
-- Throughput/FPS on target machine: `TODO`
+- Ball 3D mean error (static GT corrected): `95.17 mm`
+- Ball 3D P95 error (static GT corrected): `166.51 mm`
+- Joint-touch mean error (3D GT): `143.38 mm`
+- Throughput/FPS on target machine: `Target 15 FPS capture / 5 FPS inference (measured runtime benchmark TODO)`
 
 ## Main Folders To Read First
 

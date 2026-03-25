@@ -120,6 +120,17 @@ def load_extrinsics(path):
     return cams
 
 
+def build_viz_extrinsics(extr, swap_east_west=False):
+    if not swap_east_west:
+        return extr
+    if "camEast" not in extr or "camWest" not in extr:
+        return extr
+    swapped = dict(extr)
+    swapped["camEast"] = extr["camWest"]
+    swapped["camWest"] = extr["camEast"]
+    return swapped
+
+
 def undistort_points(pt, k, d):
     pts = np.array([[pt]], dtype=np.float64)
     und = cv2.undistortPoints(pts, k, d)
@@ -142,14 +153,6 @@ def triangulate_multi(observations, proj_mats):
     if abs(x[3]) < 1e-9:
         return None
     return x[:3] / x[3]
-
-
-def transform_world_point_y(world_pt, y_max, enabled=True):
-    if world_pt is None or not enabled:
-        return world_pt
-    out = np.array(world_pt, copy=True)
-    out[..., 1] = y_max - out[..., 1]
-    return out
 
 
 def flatten_predictions(preds):
@@ -220,7 +223,7 @@ def select_target_person(candidates, prev_state, conf_thresh, switch_area_ratio)
     return tracked
 
 
-def draw_arena_static(ax, dims, tags, extr, world_y_mirror=True):
+def draw_arena_static(ax, dims, tags, extr):
     x_max, y_max, z_max = dims["X"], dims["Y"], dims["Z"]
     corners = np.array(
         [
@@ -235,7 +238,6 @@ def draw_arena_static(ax, dims, tags, extr, world_y_mirror=True):
         ],
         dtype=np.float32,
     )
-    corners = transform_world_point_y(corners, y_max, enabled=world_y_mirror)
     floor = Poly3DCollection(
         [[corners[0], corners[1], corners[2], corners[3]]],
         alpha=0.07,
@@ -262,105 +264,54 @@ def draw_arena_static(ax, dims, tags, extr, world_y_mirror=True):
         ax.plot(*zip(corners[a], corners[b]), color="#6b6b6b", linewidth=1.0, alpha=0.7)
 
     for tag_id, pts in tags.items():
-        pts_vis = transform_world_point_y(pts, y_max, enabled=world_y_mirror)
-        poly = Poly3DCollection([pts_vis], alpha=0.28, facecolors="#53c4f5", edgecolors="#0c74a8")
+        poly = Poly3DCollection([pts], alpha=0.28, facecolors="#53c4f5", edgecolors="#0c74a8")
         ax.add_collection3d(poly)
-        c = pts_vis.mean(axis=0)
+        c = pts.mean(axis=0)
         ax.text(c[0], c[1], c[2], str(tag_id), color="#0c74a8", fontsize=6)
 
     cam_colors = {"camNorth": "red", "camEast": "green", "camSouth": "blue", "camWest": "orange"}
     for name, cam in extr.items():
-        pos = transform_world_point_y(cam["pos"], y_max, enabled=world_y_mirror)
+        pos = cam["pos"]
         fwd = cam["R"].T[:, 2]
-        if world_y_mirror:
-            fwd = fwd.copy()
-            fwd[1] = -fwd[1]
         col = cam_colors.get(name, "black")
         ax.scatter(pos[0], pos[1], pos[2], c=col, s=60, marker="^")
         ax.quiver(pos[0], pos[1], pos[2], fwd[0], fwd[1], fwd[2], length=500, color=col)
         ax.text(pos[0], pos[1], pos[2], name, color=col, fontsize=8)
 
 
-def draw_global_axes(ax, dims, world_y_mirror=True, axis_len_mm=800.0):
-    x_max, y_max, z_max = dims["X"], dims["Y"], dims["Z"]
-    axis_len_mm = float(max(100.0, min(axis_len_mm, x_max, y_max, z_max)))
-
-    o = transform_world_point_y(np.array([0.0, 0.0, 0.0], dtype=np.float32), y_max, enabled=world_y_mirror)
-    px = transform_world_point_y(np.array([axis_len_mm, 0.0, 0.0], dtype=np.float32), y_max, enabled=world_y_mirror)
-    py = transform_world_point_y(np.array([0.0, axis_len_mm, 0.0], dtype=np.float32), y_max, enabled=world_y_mirror)
-    pz = transform_world_point_y(np.array([0.0, 0.0, axis_len_mm], dtype=np.float32), y_max, enabled=world_y_mirror)
-
-    vx = px - o
-    vy = py - o
-    vz = pz - o
-
-    # X (green), Y (red), Z (blue) from a single global origin.
-    ax.quiver(o[0], o[1], o[2], vx[0], vx[1], vx[2], color="#3ecf4f", linewidth=2.5, arrow_length_ratio=0.08)
-    ax.quiver(o[0], o[1], o[2], vy[0], vy[1], vy[2], color="#ff3b3b", linewidth=2.5, arrow_length_ratio=0.08)
-    ax.quiver(o[0], o[1], o[2], vz[0], vz[1], vz[2], color="#3b82f6", linewidth=2.5, arrow_length_ratio=0.08)
-
-    ax.text(o[0], o[1], o[2], "O(0,0,0)", color="black", fontsize=9, weight="bold")
-    ax.text(px[0], px[1], px[2], "+X", color="#2ea043", fontsize=9, weight="bold")
-    ax.text(py[0], py[1], py[2], "+Y", color="#d7263d", fontsize=9, weight="bold")
-    ax.text(pz[0], pz[1], pz[2], "+Z", color="#1d4ed8", fontsize=9, weight="bold")
-
-
-def draw_live_scene(
-    ax,
-    dims,
-    tags,
-    extr,
-    ball_pt,
-    ball_traj,
-    joints,
-    frame_idx,
-    fps_est,
-    world_y_mirror=True,
-    invert_y_axis_display=False,
-    draw_global_axes_flag=True,
-    global_axis_len_mm=800.0,
-    view_elev=22.0,
-    view_azim=-58.0,
-):
+def draw_live_scene(ax, dims, tags, extr, ball_pt, ball_traj, joints, frame_idx, fps_est):
     ax.cla()
     x_max, y_max, z_max = dims["X"], dims["Y"], dims["Z"]
     ax.set_facecolor("#f7f7f7")
     ax.grid(True, color="#c0c0c0", linewidth=0.6, alpha=0.6)
     ax.set_box_aspect([x_max, y_max, z_max])
-    draw_arena_static(ax, dims, tags, extr, world_y_mirror=world_y_mirror)
-    if draw_global_axes_flag:
-        draw_global_axes(ax, dims, world_y_mirror=world_y_mirror, axis_len_mm=global_axis_len_mm)
+    draw_arena_static(ax, dims, tags, extr)
 
     if len(ball_traj) >= 2:
-        tr = transform_world_point_y(np.array(ball_traj, dtype=np.float32), y_max, enabled=world_y_mirror)
+        tr = np.array(ball_traj, dtype=np.float32)
         ax.plot(tr[:, 0], tr[:, 1], tr[:, 2], c="#f4b400", linewidth=2.2, alpha=0.9)
 
     if ball_pt is not None and np.isfinite(ball_pt).all():
-        ball_vis = transform_world_point_y(ball_pt, y_max, enabled=world_y_mirror)
-        ax.scatter(ball_vis[0], ball_vis[1], ball_vis[2], c="#f4b400", s=110, edgecolors="white", linewidths=1.0)
+        ax.scatter(ball_pt[0], ball_pt[1], ball_pt[2], c="#f4b400", s=110, edgecolors="white", linewidths=1.0)
 
     if joints is not None:
-        joints_vis = transform_world_point_y(joints, y_max, enabled=world_y_mirror)
-        valid = np.isfinite(joints_vis[:, 0])
+        valid = np.isfinite(joints[:, 0])
         for s, e in CONNECTIONS:
             if valid[s] and valid[e]:
-                p1, p2 = joints_vis[s], joints_vis[e]
+                p1, p2 = joints[s], joints[e]
                 ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], c="#111111", linewidth=2.2)
         for j in range(17):
             if valid[j]:
-                ax.scatter(joints_vis[j, 0], joints_vis[j, 1], joints_vis[j, 2], c="#222222", s=20, edgecolors="white", linewidths=0.5)
+                ax.scatter(joints[j, 0], joints[j, 1], joints[j, 2], c="#222222", s=20, edgecolors="white", linewidths=0.5)
 
     ax.set_xlim(0, x_max)
-    if invert_y_axis_display:
-        ax.set_ylim(y_max, 0)
-    else:
-        ax.set_ylim(0, y_max)
+    ax.set_ylim(0, y_max)
     ax.set_zlim(0, z_max)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.set_zlabel("Z (mm)")
     ax.set_title("Live 4-Cam Garage: Arena + Ball + Skeleton")
-    ax.view_init(elev=float(view_elev), azim=float(view_azim))
+    ax.view_init(elev=22, azim=-58)
     ax.text2D(0.02, 0.02, f"Frame: {frame_idx} | FPS: {fps_est:.2f}", transform=ax.transAxes, fontsize=10, color="#444444")
 
 
@@ -426,21 +377,9 @@ def main():
     ap.add_argument("--fourcc", default="MJPG")
     ap.add_argument("--buffer-size", type=int, default=1)
     ap.add_argument("--ball-conf", type=float, default=0.4)
-    ap.add_argument(
-        "--track-ball",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable ball detection/triangulation. Disable for higher FPS when only skeleton is needed.",
-    )
     ap.add_argument("--pose", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--pose-conf", type=float, default=0.45)
     ap.add_argument("--pose-every", type=int, default=None, help="Run pose once every N frames (default: 2)")
-    ap.add_argument(
-        "--joint-stale-frames",
-        type=int,
-        default=None,
-        help="Hide triangulated joints if not updated for this many frames (default: pose_every*3).",
-    )
     ap.add_argument("--switch-area-ratio", type=float, default=1.6)
     ap.add_argument("--ema-alpha", type=float, default=0.35, help="Smoothing factor for 3D points")
     ap.add_argument("--trail-len", type=int, default=20)
@@ -450,38 +389,11 @@ def main():
     ap.add_argument("--show-3d", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--show-2d", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument(
-        "--world-y-mirror",
+        "--swap-east-west-3d",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Mirror outputs by Y axis (y' = Ymax - y) for 3D/UDP. Default keeps original world frame.",
+        help="Swap camEast/camWest only in 3D visualization (triangulation is unchanged).",
     )
-    ap.add_argument(
-        "--display-world-y-mirror",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override Y-mirror for 3D display only (if unset, follows --world-y-mirror).",
-    )
-    ap.add_argument(
-        "--udp-world-y-mirror",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override Y-mirror for UDP output only (if unset, follows --world-y-mirror).",
-    )
-    ap.add_argument(
-        "--invert-y-axis-display",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Invert Y axis ticks in 3D plot only (display: Ymax..0). Does not change triangulation or UDP.",
-    )
-    ap.add_argument(
-        "--draw-global-axes",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Draw a single global coordinate triad from O(0,0,0).",
-    )
-    ap.add_argument("--global-axis-len-mm", type=float, default=900.0, help="Global axes length in mm for visualization.")
-    ap.add_argument("--view-elev", type=float, default=22.0, help="3D camera elevation angle.")
-    ap.add_argument("--view-azim", type=float, default=-58.0, help="3D camera azimuth angle.")
     ap.add_argument("--max-runtime-sec", type=float, default=0.0, help="0 = infinite")
     ap.add_argument(
         "--udp-target-host",
@@ -533,15 +445,6 @@ def main():
     args.pose_every = max(1, int(args.pose_every))
     args.viz_every = max(1, int(args.viz_every))
     args.mosaic_every = max(1, int(args.mosaic_every))
-    if args.joint_stale_frames is None:
-        args.joint_stale_frames = max(3, args.pose_every * 3)
-    else:
-        args.joint_stale_frames = max(1, int(args.joint_stale_frames))
-
-    display_world_y_mirror = (
-        args.world_y_mirror if args.display_world_y_mirror is None else args.display_world_y_mirror
-    )
-    udp_world_y_mirror = args.world_y_mirror if args.udp_world_y_mirror is None else args.udp_world_y_mirror
 
     udp_sock = None
     udp_target_addr = None
@@ -571,7 +474,7 @@ def main():
             udp_joint_indices_needed.add(idx)
     triangulated_joint_indices = list(range(17)) if args.show_3d else sorted(udp_joint_indices_needed)
 
-    ball_needed = args.track_ball and (args.show_3d or args.show_2d)
+    ball_needed = args.show_3d or args.show_2d
     pose_needed = args.show_2d or bool(triangulated_joint_indices)
     if args.high_performance:
         print(
@@ -580,34 +483,8 @@ def main():
             f"ball_every={args.ball_every} pose_every={args.pose_every} "
             f"viz_every={args.viz_every} mosaic_every={args.mosaic_every}"
         )
-    if not args.track_ball:
-        print("[INFO] Ball tracking disabled (--no-track-ball).")
-    print(
-        f"[INFO] World Y-mirror effective: display={'ON' if display_world_y_mirror else 'OFF'} "
-        f"udp={'ON' if udp_world_y_mirror else 'OFF'}"
-    )
-    if args.invert_y_axis_display:
-        print("[INFO] Y-axis display inversion enabled (3D labels only): Ymax..0")
-    if args.draw_global_axes:
-        print(
-            "[INFO] Global triad enabled: O(0,0,0) +X +Y +Z "
-            f"(len={float(args.global_axis_len_mm):.0f} mm)"
-        )
-
-    use_cuda = ("cuda" in str(args.pose_device).lower()) or ("cuda" in str(args.ball_device).lower())
-    if use_cuda:
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.backends.cudnn.benchmark = True
-                try:
-                    torch.set_float32_matmul_precision("high")
-                except Exception:
-                    pass
-                print("[INFO] CUDA optimization enabled: cudnn.benchmark=1")
-        except Exception:
-            pass
+    if args.swap_east_west_3d:
+        print("[INFO] 3D visualization camera swap enabled: camEast <-> camWest")
 
     cams_cfg = load_cameras(args.config)
     active_cams = []
@@ -623,6 +500,7 @@ def main():
         k, d = load_intrinsics(Path(args.intrinsics_dir) / f"{cam}_intrinsics.json")
         intr[cam] = {"K": k, "D": d}
     extr = load_extrinsics(args.extrinsics)
+    extr_viz = build_viz_extrinsics(extr, swap_east_west=args.swap_east_west_3d)
     dims, tags = parse_dimensions(args.dimensions)
     proj = {cam: extr[cam]["P"] for cam, _ in active_cams if cam in extr}
 
@@ -676,15 +554,11 @@ def main():
 
     pose_state = {cam: None for cam, _ in active_cams}
     per_cam_pose_state = {}
-    pose_lock_active = False
-    pose_reacquire_every = max(1, min(args.pose_every, 2))
-    pose_select_conf = max(0.2, args.pose_conf - 0.10)
     ball_boxes_state = {}
     ball_state = None
     joints_state = np.full((17, 3), np.nan, dtype=np.float32)
     joints_conf_state = np.zeros((17,), dtype=np.float32)
     joints_cam_state = np.zeros((17,), dtype=np.int32)
-    joint_last_seen_frame = np.full((17,), -10_000_000, dtype=np.int64)
     ball_traj = deque(maxlen=args.trail_len)
 
     frame_idx = 0
@@ -758,8 +632,7 @@ def main():
 
             per_cam_pose = per_cam_pose_state.copy()
             joints_3d_now = {}
-            pose_every_eff = args.pose_every if pose_lock_active else pose_reacquire_every
-            run_pose = pose_infer is not None and (frame_idx % pose_every_eff == 0)
+            run_pose = pose_infer is not None and (frame_idx % args.pose_every == 0)
             if run_pose:
                 try:
                     res_list = list(pose_infer(frame_batch, return_vis=False, batch_size=len(frame_batch)))
@@ -782,7 +655,7 @@ def main():
                     selected = select_target_person(
                         candidates=cands,
                         prev_state=pose_state[cam],
-                        conf_thresh=pose_select_conf,
+                        conf_thresh=args.pose_conf,
                         switch_area_ratio=args.switch_area_ratio,
                     )
                     pose_state[cam] = selected
@@ -794,9 +667,6 @@ def main():
                         per_cam_pose_state.pop(cam, None)
 
                 per_cam_pose = per_cam_pose_state.copy()
-                has_pose_lock = len(per_cam_pose_curr) >= 2
-                force_pose_snap = has_pose_lock and not pose_lock_active
-                pose_lock_active = has_pose_lock
 
                 for j in triangulated_joint_indices:
                     obs = {}
@@ -816,7 +686,6 @@ def main():
                         pt = triangulate_multi(obs, proj)
                         if pt is not None:
                             joints_3d_now[j] = pt
-                            joint_last_seen_frame[j] = frame_idx
                             joints_conf_state[j] = float(np.mean(obs_scores)) if obs_scores else 0.0
                             joints_cam_state[j] = int(len(obs))
                         else:
@@ -827,14 +696,8 @@ def main():
                         joints_conf_state[j] = 0.0
 
                 for j, pt in joints_3d_now.items():
-                    prev = None if force_pose_snap else (joints_state[j] if np.isfinite(joints_state[j]).all() else None)
+                    prev = joints_state[j] if np.isfinite(joints_state[j]).all() else None
                     joints_state[j] = ema_update(prev, pt, alpha=args.ema_alpha)
-
-            for j in triangulated_joint_indices:
-                if frame_idx - int(joint_last_seen_frame[j]) > args.joint_stale_frames:
-                    joints_state[j] = np.nan
-                    joints_conf_state[j] = 0.0
-                    joints_cam_state[j] = 0
 
             if udp_sock is not None and udp_target_addr is not None and udp_target_joint_pairs:
                 joints_payload = {}
@@ -855,11 +718,10 @@ def main():
                         cams = int(joints_cam_state[idx])
                     if conf < args.udp_target_conf_min or cams < args.udp_target_cams_min:
                         continue
-                    pt_udp = transform_world_point_y(pt, dims["Y"], enabled=udp_world_y_mirror)
                     joints_payload[name] = {
-                        "x_mm": float(pt_udp[0]),
-                        "y_mm": float(pt_udp[1]),
-                        "z_mm": float(pt_udp[2]),
+                        "x_mm": float(pt[0]),
+                        "y_mm": float(pt[1]),
+                        "z_mm": float(pt[2]),
                         "conf": conf,
                         "cams": cams,
                     }
@@ -880,18 +742,12 @@ def main():
                     ax=ax,
                     dims=dims,
                     tags=tags,
-                    extr=extr,
+                    extr=extr_viz,
                     ball_pt=ball_state,
                     ball_traj=list(ball_traj),
                     joints=joints_state.copy(),
                     frame_idx=frame_idx,
                     fps_est=fps_est,
-                    world_y_mirror=display_world_y_mirror,
-                    invert_y_axis_display=args.invert_y_axis_display,
-                    draw_global_axes_flag=args.draw_global_axes,
-                    global_axis_len_mm=args.global_axis_len_mm,
-                    view_elev=args.view_elev,
-                    view_azim=args.view_azim,
                 )
                 plt.pause(0.001)
                 if fig is not None and not plt.fignum_exists(fig.number):

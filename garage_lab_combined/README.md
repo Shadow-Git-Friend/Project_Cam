@@ -151,3 +151,105 @@ python garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py \
   --min-point-error-px 6 \
   --sigma-scale 1.2
 ```
+
+## Send 3D Joint Targets to RoboLauncher (BLE)
+Bridge world-frame 3D joints (`process_4cam_to_3d.py` output) to launcher commands.
+
+Firmware command format used:
+- `set v h wl wr`
+- `shoot`
+- `reload`
+- `stop`
+
+Install BLE client once:
+```bash
+./venv/bin/pip install bleak
+```
+
+Dry-run first (prints commands, no BLE write):
+```bash
+./venv/bin/python garage_lab_combined/scripts/bridge_pose_to_launcher_ble.py \
+  --motion-json garage_lab_combined/output/smoke_20260305_183122/motion_capture_data_fixed_1.json \
+  --joint right_shoulder \
+  --launcher-x-mm 5000 --launcher-y-mm 1500 --launcher-z-mm 900 \
+  --launcher-yaw-deg 180 \
+  --print-frames
+```
+
+Then live BLE write:
+```bash
+./venv/bin/python garage_lab_combined/scripts/bridge_pose_to_launcher_ble.py \
+  --motion-json garage_lab_combined/output/smoke_20260305_183122/motion_capture_data_fixed_1.json \
+  --joint right_shoulder \
+  --launcher-x-mm 5000 --launcher-y-mm 1500 --launcher-z-mm 900 \
+  --launcher-yaw-deg 180 \
+  --no-dry-run \
+  --ble-device RoboLauncher
+```
+
+Notes:
+- Angles are clamped to firmware limits (`[-30, 30]` deg).
+- Use `--v-offset-deg` / `--h-offset-deg` for mechanical zero bias.
+- Use `--fire-once` only after aiming is verified.
+
+## Live Cameras -> UDP Targets -> Launcher Serial
+Use this when your friend/controller script expects 3D target points and converts them to launcher commands.
+
+1) Start live 4-cam with UDP target stream:
+```bash
+./venv/bin/python garage_lab_combined/scripts/live_4cam_arena_view.py \
+  --config garage_lab_combined/config/cameras.yaml \
+  --intrinsics-dir garage_lab_combined/cal/intrinsics \
+  --extrinsics garage_lab_combined/cal/extrinsics/extrinsics_final_20260309_162025.json \
+  --dimensions garage_lab_combined/cal/extrinsics/Dimensions.txt \
+  --udp-target-host 127.0.0.1 \
+  --udp-target-port 5005 \
+  --udp-target-joints right_knee,right_hip,left_shoulder
+```
+
+2) Start launcher runtime controller (state machine + safety gates):
+```bash
+./venv/bin/python garage_lab_combined/scripts/launcher_runtime_from_udp.py \
+  --serial-port /dev/ttyUSB0 \
+  --launcher-yaw-deg 0 \
+  --launcher-x-mm 600 --launcher-y-mm 1560 --launcher-z-mm 500 \
+  --targets right_knee,right_hip,left_shoulder \
+  --zone-csv garage_lab_combined/gt_eval/joint_tuning_20260310_124311/trials_joint_81_mm.csv \
+  --no-shoot-enabled \
+  --dry-run-log-jsonl garage_lab_combined/output/blm_logs/aim_decisions.jsonl
+```
+
+One-terminal static-point mode (no UDP sender needed):
+```bash
+./venv/bin/python garage_lab_combined/scripts/launcher_runtime_from_udp.py \
+  --serial-port /dev/ttyUSB0 \
+  --launcher-yaw-deg 0 \
+  --launcher-x-mm 600 --launcher-y-mm 1560 --launcher-z-mm 500 \
+  --targets left_shoulder \
+  --static-target-x-mm 4600 --static-target-y-mm 2100 --static-target-z-mm 2200 \
+  --static-target-joint left_shoulder \
+  --max-target-events 1 \
+  --no-return-center-after-each-target \
+  --no-shoot-enabled
+```
+
+Default homing behavior in runtime:
+- on start: `set 0 0 0 0`
+- on graceful exit (`Ctrl+C`/`quit`): `set 0 0 0 0`
+
+Operator commands in launcher terminal:
+- `start` -> start sequence
+- `home` -> send `set 0 0 0 0` immediately
+- `estop` -> emergency stop latch
+- `clear` -> clear E-STOP latch
+- `status` -> print state
+- `quit` -> exit
+
+`--dry-run-log-jsonl` fields (one line per target decision):
+- `timestamp`
+- `input_joint_name`
+- `raw_world_xyz_mm`
+- `transformed_launcher_xyz`
+- `calculated_pitch_yaw_v`
+- `decision` (`OK`, `OUT_OF_RANGE`, `LOW_CONFIDENCE`, `ESTOP`)
+- `execution_time_ms`

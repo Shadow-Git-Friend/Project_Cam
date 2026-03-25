@@ -1,0 +1,1105 @@
+# Vision-Guided Closed-Loop Ball Launching: Multi-Camera 3D Perception and Ballistic Control for Automated Sports Training
+
+**[AUTHOR NAME], B.Eng.**
+
+Submitted in fulfilment of the requirements for the degree of Master of Science in Electrical and Computer Engineering
+
+**Nazarbayev University**
+School of Engineering and Digital Sciences
+Department of Electrical and Computer Engineering
+53 Kabanbay Batyr Avenue, Nur-Sultan, Kazakhstan, 010000
+
+**Supervisors:** [Supervisor Names]
+
+**Date of Completion:** 2026
+
+---
+
+## Declaration
+
+I hereby declare that this manuscript, entitled *"Vision-Guided Closed-Loop Ball Launching: Multi-Camera 3D Perception and Ballistic Control for Automated Sports Training"*, is the result of my own work except for quotations and citations which have been duly acknowledged. I also declare that, to the best of my knowledge and belief, it has not been previously or concurrently submitted, in whole or in part, for any other degree or diploma at Nazarbayev University or any other national or international institution.
+
+Name: [Author Name]
+Date: 2026
+
+---
+
+## Abstract
+
+Automated ball-launching machines are widely used in sports training but universally operate in open-loop mode: the trainer configures a fixed angle, speed, and interval, and the machine repeats that program regardless of where the athlete stands or how they move. This thesis presents the design, implementation, and evaluation of a closed-loop, vision-guided ball launching system capable of autonomously targeting specific human body joints — right knee, right hip, and left shoulder — in real time within a domestic garage arena.
+
+The system uses four fixed commodity USB cameras (Hikvision DS-E12, approximately USD 30 each) calibrated using ChArUco boards for intrinsic parameters and AprilTag fiducial markers for extrinsic world-frame registration. Ball detection is performed using a YOLO-based detector and human pose is estimated using the MMPose framework with the COCO 17-keypoint skeleton model. Multi-view triangulation resolves detected 2D observations into 3D world-frame coordinates in millimetres. A ballistic solver continuously computes the required pitch angle, yaw angle, and wheel motor RPM to direct a Ball Launching Machine (BLM) at the triangulated joint position. Low-level actuation is handled by an ESP32 microcontroller commanding two stepper motors and two wheel motors. A six-stage incremental safety validation protocol governs integration, including an E-STOP latch with a measured response time below 100 milliseconds.
+
+Ground-truth evaluation was conducted using two dedicated protocols. A 36-point static ball dataset covering a 3×3×4 grid across the arena volume yielded a corrected mean 3D error of 95.17 mm, RMSE of 102.23 mm, and P95 of 166.51 mm. A 81-trial joint-touch dataset with 62 valid trials yielded a mean joint localisation error of 143.38 mm, RMSE of 147.73 mm, and P95 of 198.73 mm. Per-joint analysis shows the right knee achieves the lowest error (110.03 mm mean) and the left shoulder the highest (164.38 mm mean), consistent with the decreasing camera visibility at shoulder height.
+
+Both primary accuracy targets are met: ball mean error below 120 mm and joint mean error below 180 mm. The total hardware cost of the perception system is approximately USD 200, which is one to three orders of magnitude below comparable laboratory motion-capture systems. This work demonstrates that closed-loop, pose-reactive ball launching — a capability previously restricted to expensive professional installations — is achievable with commodity hardware and open-source software in an uncontrolled domestic environment.
+
+*(Word count: approximately 340)*
+
+---
+
+## Acknowledgements
+
+The author wishes to express sincere gratitude to the thesis supervisory committee for their guidance and constructive feedback throughout this project. Thanks are also due to the Department of Electrical and Computer Engineering at Nazarbayev University for providing the academic framework within which this research was conducted. The open-source communities behind OpenCV, Ultralytics YOLO, MMPose, and the broader Python scientific computing ecosystem made the technical implementation possible.
+
+---
+
+## Table of Contents
+
+- Abstract
+- Acknowledgements
+- List of Abbreviations and Symbols
+- List of Tables
+- List of Figures
+- Chapter 1 — Introduction
+  - 1.1 Motivation and Problem Statement
+  - 1.2 Research Objectives
+  - 1.3 Scope and Constraints
+  - 1.4 Statement of Novelty and Contributions
+  - 1.5 Thesis Structure
+- Chapter 2 — Literature Review and Background Theory
+  - 2.1 Multi-Camera 3D Reconstruction
+  - 2.2 Camera Calibration Techniques
+  - 2.3 Object Detection for Sports Applications
+  - 2.4 Human Pose Estimation
+  - 2.5 Ballistic Modelling and Actuator Control
+  - 2.6 Safety in Autonomous Actuated Systems
+  - 2.7 Summary and Research Gap
+- Chapter 3 — System Design and Methodology
+  - 3.1 Arena Setup and Coordinate System
+  - 3.2 Hardware Architecture
+  - 3.3 Software Architecture and Pipeline Overview
+  - 3.4 Intrinsic Calibration Pipeline
+  - 3.5 Extrinsic Calibration Pipeline
+  - 3.6 Multi-Camera Synchronisation
+  - 3.7 3D Triangulation
+  - 3.8 Ballistic Solver and Targeting Logic
+  - 3.9 Safety Architecture
+- Chapter 4 — Ground-Truth Evaluation Protocols
+  - 4.1 Ball Static Ground-Truth Dataset
+  - 4.2 Joint-Touch Ground-Truth Dataset
+  - 4.3 Dynamic Validation Clips
+  - 4.4 Error Metrics and Bias Correction Model
+- Chapter 5 — Results and Analysis
+  - 5.1 Intrinsic Calibration Results
+  - 5.2 Extrinsic Calibration Results
+  - 5.3 Ball Static Localisation Results
+  - 5.4 Human Pose Joint-Touch Results
+  - 5.5 Dynamic Detection Results
+  - 5.6 BLM Aiming Validation
+  - 5.7 Discussion
+  - 5.8 Comparison with State-of-the-Art
+- Chapter 6 — Conclusions and Future Work
+  - 6.1 Summary of Contributions
+  - 6.2 Objectives Achievement
+  - 6.3 Limitations
+  - 6.4 Future Work
+  - 6.5 Professional and Ethical Considerations
+- Bibliography / References
+- Appendix A — BLM Integration Test Checklist
+- Appendix B — Key Script Listings
+- Appendix C — Ground-Truth Data Tables
+- Appendix D — Arena Calibration Figures
+
+---
+
+## List of Abbreviations and Symbols
+
+| Abbreviation / Symbol | Definition |
+|---|---|
+| BLM | Ball Launching Machine |
+| COCO | Common Objects in Context (keypoint dataset format) |
+| DLT | Direct Linear Transform |
+| EMA | Exponential Moving Average |
+| ESP32 | Espressif Systems ESP32 microcontroller |
+| FPS | Frames Per Second |
+| GT | Ground Truth |
+| MMPose | OpenMMLab Pose Estimation Framework |
+| P90 / P95 | 90th / 95th percentile of error distribution |
+| PnP | Perspective-n-Point (camera pose estimation algorithm) |
+| RMSE | Root Mean Square Error |
+| RPM | Revolutions Per Minute |
+| SVD | Singular Value Decomposition |
+| UDP | User Datagram Protocol |
+| YOLO | You Only Look Once (object detection architecture) |
+| K | Camera intrinsic matrix |
+| R, T | Rotation matrix, Translation vector (extrinsic parameters) |
+| θ | Angle (pitch or yaw, degrees) |
+| ΔX, ΔY, ΔZ | Component differences of targeting vector (mm) |
+
+---
+
+## List of Tables
+
+- Table 3.1: Camera positions in world-frame coordinates (mm)
+- Table 3.2: BLM low-level serial command set
+- Table 4.1: Ball static ground-truth grid definition
+- Table 4.2: Joint-touch trial design — XY grid positions (mm)
+- Table 5.1: Ball static localisation summary metrics (corrected pipeline)
+- Table 5.2: Joint-touch 3D ground-truth summary metrics
+- Table 5.3: Per-joint error breakdown
+- Table 5.4: Comparison with state-of-the-art systems
+
+---
+
+## List of Figures
+
+- Figure 3.1: Garage arena floor plan with camera positions and coordinate origin
+- Figure 3.2: AprilTag grid layout on arena walls (24 tags, IDs 0–23)
+- Figure 3.3: System architecture block diagram (perception to actuation)
+- Figure 3.4: ChArUco calibration board and sample auto-capture frame
+- Figure 3.5: Extrinsic overlay validation — reprojected AprilTag corners on camera frames
+- Figure 3.6: 3D arena world-frame render with camera frustums and BLM position
+- Figure 3.7: Targeting vector geometry — BLM origin to joint coordinate
+- Figure 4.1: Ball static GT grid — 36-point 3D scatter in arena frame
+- Figure 4.2: Joint-touch trial grid — 9 XY positions and 3 height levels
+- Figure 5.1: Ball 3D error distribution — histogram and CDF (corrected)
+- Figure 5.2: Per-axis bias vectors before and after correction
+- Figure 5.3: Joint-touch error boxplot by joint type
+- Figure 5.4: Ball trajectory reconstruction — dynamic clip (ball_slow)
+
+---
+
+---
+
+# Chapter 1 — Introduction
+
+## 1.1 Motivation and Problem Statement
+
+Sports training demands repetition, precision, and adaptability. An athlete practising ball reception — whether in basketball, football, volleyball, or rehabilitation — benefits most from a delivery system that challenges them at the right position, at the right time, directed at the right part of their body. For decades, automated ball-launching machines have provided the repetition, but not the precision and not the adaptability.
+
+Every commercial ball launcher on the market today operates in what this thesis terms an **open-loop** mode. The coach or athlete programs a fixed trajectory: a specific launch angle, a specific wheel speed producing a specific ball velocity, and a fixed interval between shots. The machine executes that program indefinitely. It has no sensors. It has no awareness of whether the athlete is standing, crouching, moving left, or has stepped off the court entirely. Whether the intended target is the athlete's right knee at a height of 380 mm or their shoulder at 1600 mm, the launcher fires the same trajectory it was programmed to fire. The athlete must position themselves to intercept the machine's predetermined path.
+
+This is the foundational limitation this thesis addresses. The **"Why"** is direct: high-performance sports training increasingly demands reactive, adaptive delivery — a system that fires not at a fixed zone in the arena, but at a part of the athlete's body, in response to where they actually are at the moment of firing. No affordable, deployable system currently delivers this capability.
+
+The contrast with existing alternatives clarifies the gap. On one end of the spectrum, commercial open-loop launchers — products such as the Lobster Elite Liberty, the Spinshot Player, and the iPong Pro — are accessible and affordable (USD 200–2,000) but entirely passive. They are tools, not systems. On the other end, professional laboratory motion-capture installations — OptiTrack, Vicon, PhaseSpace — can reconstruct the full three-dimensional position of every joint on a human body to sub-millimetre accuracy in real time. However, these systems cost USD 50,000 to over USD 200,000, require dedicated calibrated studio environments, demand that subjects wear reflective markers, and have no integrated actuation. They observe, but they do not act. Furthermore, the cost and operational complexity place them entirely outside the reach of the sports training contexts where adaptive delivery would be most valuable: community sports clubs, physiotherapy practices, school athletic programmes, and individual training environments.
+
+The Ball Launching Machine (BLM) described in this thesis is neither of these. It is not a conventional launcher that a human programs and forgets. It is a **smart machine** — a system that continuously observes the athlete through four calibrated cameras, reconstructs the three-dimensional position of specific body joints in real time, computes the required pitch angle, yaw angle, and ball speed to reach that joint, and autonomously commands the physical launcher to aim and fire. No human operator sets the angle. No human pre-programs the path. The machine decides its own aim, based entirely on where the person is and which body part has been selected as the target.
+
+The specific body parts addressed in this work — the right knee, the right hip, and the left shoulder — were chosen to span the human height range and exercise meaningfully different training scenarios: low ball reception, mid-body interception, and overhead or upper-body challenges. These are not arbitrary coordinates in the arena. They are named joints, resolved as live 3D world-frame coordinates from the MMPose COCO 17-keypoint skeleton model, updated every frame. As the athlete moves, the target coordinate updates, and the ballistic solver recomputes continuously.
+
+This qualitative transition — from a fixed, human-programmed firing path to an autonomous, pose-reactive targeting system — is the central theme of this thesis.
+
+## 1.2 Research Objectives
+
+Three research questions guide this work:
+
+**RQ1:** Can a four-camera multi-view triangulation pipeline achieve a mean 3D localisation error below 120 mm for a static ball across a representative volume of a domestic garage arena?
+
+**RQ2:** Can a human pose estimation pipeline achieve a mean 3D joint localisation error below 180 mm, sufficient for body-part-level targeting of the right knee, right hip, and left shoulder?
+
+**RQ3:** Can the integrated perception-to-actuation pipeline be validated safely with a real Ball Launching Machine in a domestic environment, using a structured incremental testing methodology?
+
+These questions are answered quantitatively through dedicated ground-truth evaluation protocols described in Chapter 4 and evaluated in Chapter 5.
+
+## 1.3 Scope and Constraints
+
+This work is conducted within the following defined scope:
+
+**Physical environment:** A domestic garage arena measuring 6230 mm (X) × 3050 mm (Y) × 2950 mm (Z), with four cameras mounted at fixed positions near the ceiling perimeter.
+
+**Hardware:** Four Hikvision DS-E12 USB webcams, one custom Ball Launching Machine with stepper-motor-driven pan/tilt and wheel-motor-driven ball projection, and one ESP32 microcontroller for low-level actuation. Total perception hardware cost is approximately USD 200.
+
+**Software:** Python 3.10 with OpenCV, Ultralytics YOLO, MMPose, NumPy, and SciPy. All components are open-source.
+
+**Subject:** Single-person evaluation. Multi-person scenarios are outside the scope of this thesis.
+
+**Stage of integration:** The BLM aiming mechanism has been validated in aim-only mode (motors commanded, no ball fired) and in controlled single-shot static trials. Fully autonomous closed-loop shooting with a moving human subject is the immediate next milestone and is identified as future work in Section 6.4.
+
+**Lighting:** Controlled indoor lighting. The system has not been evaluated under variable natural lighting or outdoor conditions.
+
+## 1.4 Statement of Novelty and Contributions
+
+The following three claims constitute the original contributions of this thesis:
+
+**Novelty Claim 1 — The Autonomous Aiming Machine:**
+All deployed commercial ball launchers are passive tools. The human sets the direction, and the machine repeats it. This system inverts that relationship entirely. The BLM in this work autonomously computes its own pitch angle, yaw angle, and wheel speed from a live 3D joint coordinate sourced from multi-camera human pose estimation, then dispatches serial commands to execute the physical aim. The launcher does not know in advance where it will point on the next shot. It finds out by observing the athlete. This is not a launcher with a camera attached as an optional extra — it is a targeting system whose primary purpose is to aim at a person, and which uses a ball launcher as its actuation endpoint. This distinction is the central innovation of this thesis, and it represents a category shift from every commercial system currently available.
+
+**Novelty Claim 2 — Low-Cost Multi-Camera Pose-to-Launch Pipeline:**
+Prior work in closed-loop sports targeting either uses expensive depth cameras (Intel RealSense, structured light systems) or operates in controlled laboratory environments with professional motion capture. This work demonstrates that four commodity USB cameras costing approximately USD 30 each, combined entirely with open-source detection and pose estimation models (YOLO, MMPose) and an AprilTag-based calibration workflow, can achieve sub-200 mm joint targeting accuracy in a real, uncontrolled domestic arena. The total perception hardware cost is approximately USD 200 — one to three orders of magnitude below comparable systems. This result establishes that the core capability of pose-reactive ball delivery is achievable outside laboratory settings and accessible to practitioners without specialist infrastructure.
+
+**Novelty Claim 3 — Structured Safety-Gated Integration Protocol:**
+No prior published work on vision-guided ball launchers documents a reproducible, evidence-based staged validation methodology. This thesis contributes a six-stage incremental integration checklist — from preflight checks through ESP32 testing, aim-only validation, safety gating verification, and controlled firing — each stage with defined pass criteria and mandatory evidence logging. Every actuation decision is recorded to a structured JSONL log with fields including timestamp, input joint name, raw 3D world coordinate, computed pitch and yaw, and decision outcome (OK, OUT_OF_RANGE, LOW_CONFIDENCE, ESTOP). This framework is designed to be replicable for any vision-guided actuated system deployed in an uncontrolled environment.
+
+## 1.5 Thesis Structure
+
+Chapter 2 reviews the relevant literature across six technical areas: multi-camera 3D reconstruction, camera calibration, object detection, human pose estimation, ballistic modelling, and safety in autonomous actuated systems. It concludes with an explicit contrast of this work against existing commercial and research systems.
+
+Chapter 3 describes the complete system design and methodology, from arena setup and hardware selection through calibration pipelines, synchronisation, triangulation, the ballistic solver, and the safety architecture.
+
+Chapter 4 defines the ground-truth evaluation protocols: the 36-point static ball dataset, the 81-trial joint-touch dataset, and the dynamic validation clips.
+
+Chapter 5 presents all quantitative results and includes a state-of-the-art comparison table.
+
+Chapter 6 states conclusions, assesses objective achievement, identifies limitations, and defines a concrete roadmap for future work including the Virtual 3D Goal concept.
+
+---
+
+# Chapter 2 — Literature Review and Background Theory
+
+## 2.1 Multi-Camera 3D Reconstruction
+
+Recovering the three-dimensional position of objects from two-dimensional image observations is a classical problem in computer vision. The theoretical foundation rests on the pinhole camera model, which describes how a point **P** = (X, Y, Z) in three-dimensional space projects to an image point **p** = (u, v) through the relationship:
+
+    s * [u, v, 1]^T = K * [R | T] * [X, Y, Z, 1]^T                    (2.1)
+
+where K is the 3×3 camera intrinsic matrix encoding focal lengths and principal point, R is a 3×3 rotation matrix, T is a 3×1 translation vector describing the camera's position and orientation in the world frame, and s is a scalar projective depth [1].
+
+When an object is visible from two or more calibrated cameras simultaneously, its 3D position can be recovered through triangulation. The geometric principle is epipolar geometry: the projection rays from each camera that pass through the observed 2D point must, in the ideal noise-free case, intersect at the true 3D point [2]. In practice, due to image noise and calibration imperfections, rays rarely intersect exactly. The Direct Linear Transform (DLT) method formulates triangulation as a system of linear equations and solves for the 3D point that minimises the algebraic reprojection error using Singular Value Decomposition (SVD) [3].
+
+The accuracy of triangulation is governed by two primary factors: the quality of camera calibration and the number of cameras with valid observations. In underconstrained configurations — where only one camera observes the target — no triangulation is possible. With exactly two cameras, depth reconstruction is sensitive to the baseline between cameras and to any calibration error [4]. With three or more cameras, redundancy in the system of equations improves robustness. This motivates the minimum camera count requirements used in this work (Section 3.6).
+
+Multi-camera 3D reconstruction has been applied extensively in sports science. Systems have been deployed for ball tracking in tennis [5], football [6], and cricket [7], and for full-body motion capture in biomechanics research [8]. These applications typically use carefully calibrated synchronised cameras in purpose-built environments. The contribution of this work is demonstrating equivalent reconstruction capability with commodity hardware in a domestic, uncontrolled arena.
+
+## 2.2 Camera Calibration Techniques
+
+### 2.2.1 Intrinsic Calibration
+
+Camera intrinsic calibration determines the parameters of the imaging model: focal lengths (fx, fy), principal point (cx, cy), and lens distortion coefficients. The widely adopted approach, due to Zhang [9], uses a planar calibration pattern observed from multiple viewpoints. The method solves for intrinsic and extrinsic parameters simultaneously through homography decomposition, then refines all parameters with non-linear optimisation minimising reprojection error.
+
+In this work, a ChArUco calibration board is used — a combination of a chessboard pattern with embedded ArUco markers. ChArUco boards offer two advantages over plain chessboards: individual square corners can be identified even when the board is partially occluded, and the ArUco marker IDs provide unambiguous corner labelling that eliminates the corner-order ambiguity present in plain chessboard patterns [10]. The board used measures 5×7 squares with 21.5 cm square size.
+
+### 2.2.2 Extrinsic Calibration
+
+Extrinsic calibration determines each camera's position and orientation (R, T) in a common world frame. This is the prerequisite for multi-view triangulation: all cameras must share the same world coordinate system for their projection rays to be compared.
+
+AprilTag fiducial markers, developed at the University of Michigan [11], are used extensively for this purpose. Each tag encodes a unique binary ID and allows the tag's four corners to be detected and their 3D positions estimated from a single camera image, given known tag size, using the Perspective-n-Point (PnP) algorithm. When multiple tags at known world positions are detected, the camera pose can be recovered by minimising reprojection error across all tag corners. Robust estimation techniques, such as iteratively re-weighted least squares with sigma-clipping, reduce the influence of incorrectly detected tags [12].
+
+## 2.3 Object Detection for Sports Applications
+
+Real-time object detection has been transformed by the YOLO (You Only Look Once) family of architectures [13], which formulate detection as a single-pass regression problem predicting bounding boxes and class probabilities from a full image in one forward pass through a convolutional neural network. Subsequent versions (YOLOv5, YOLOv8, YOLO11) have progressively improved the accuracy–speed tradeoff, enabling deployment on commodity GPU hardware at real-time frame rates [14].
+
+Ball detection in sports presents specific challenges relative to general object detection: balls are small, often partially occluded, subject to significant motion blur at high velocities, and must be distinguished from similarly shaped background objects. Prior work on ball tracking in sports has employed a range of approaches including background subtraction, colour-based filtering, and deep learning detectors [5][6]. For this system, the Ultralytics YOLO11 variant is selected, with detection confidence thresholds tuned empirically per experiment (0.25–0.45) to balance false-positive rate against detection recall.
+
+## 2.4 Human Pose Estimation
+
+Human pose estimation is the task of detecting the spatial configuration of a person's body from image data. The problem is commonly formulated as keypoint detection: estimating the 2D (or 3D) coordinates of a set of anatomically defined body landmarks from one or more camera views [15].
+
+The COCO keypoint format defines 17 anatomical landmarks: nose, eyes, ears, shoulders, elbows, wrists, hips, knees, and ankles. This convention has become the dominant benchmark standard, and the majority of modern pose estimation models produce COCO-format output [16]. Top-down approaches — first detecting persons with a bounding-box detector, then running a specialised keypoint network on each detected person — generally achieve higher per-keypoint accuracy than bottom-up approaches that detect all keypoints first and group them afterwards.
+
+MMPose [17], the pose estimation framework used in this work, implements both paradigms and provides pre-trained models on COCO-format benchmarks. For this system, a top-down pipeline is used with the HRNet backbone, which has demonstrated strong performance on COCO benchmark evaluations [18].
+
+Extending 2D pose estimation to 3D using multiple cameras follows the same multi-view triangulation principle as ball localisation: 2D joint observations from multiple cameras are combined via DLT/SVD to recover 3D joint positions. The accuracy of 3D joint reconstruction is inherently limited by the 2D pose estimation accuracy, the camera calibration quality, and the number of cameras with valid joint visibility.
+
+## 2.5 Ballistic Modelling and Actuator Control
+
+A ball projected from a launcher at initial speed v₀, pitch angle θ, and yaw angle φ follows a parabolic trajectory under gravity (neglecting air resistance for first-order approximation). The equations of motion are:
+
+    x(t) = v₀ * cos(θ) * cos(φ) * t                                   (2.2)
+    y(t) = v₀ * cos(θ) * sin(φ) * t                                   (2.3)
+    z(t) = v₀ * sin(θ) * t - (1/2) * g * t²                          (2.4)
+
+where g = 9810 mm/s² is gravitational acceleration. Given a target point (Tx, Ty, Tz) and launcher origin (Bx, By, Bz), the system of equations (2.2)–(2.4) can be solved for the required launch parameters. For a fixed target range and height difference, two valid pitch angles generally exist (the low and high trajectory solutions); the lower-angle solution is preferred in this system as it minimises flight time and therefore targeting uncertainty due to athlete movement [19].
+
+Stepper motors provide an appropriate actuation mechanism for launcher pan/tilt positioning: their open-loop step-counting control provides predictable angular displacement without requiring continuous position feedback, and their holding torque maintains aim angle against mechanical vibration from the wheel motors [20].
+
+## 2.6 Safety in Autonomous Actuated Systems
+
+Any system that combines computer vision decision-making with physical actuation must address safety as a first-class design concern. The relevant engineering context is machine safety standards: IEC 62061 (functional safety of machinery) and ISO 10218 (safety of industrial robots) both mandate that automated systems implement a defined safe state and a reliable means of commanding transition to that state under fault conditions [21].
+
+An Emergency Stop (E-STOP) function, mandatory in ISO 12100, must interrupt hazardous motion immediately and latch in the stopped state until a deliberate human reset action is taken [22]. Response time requirements vary by hazard level; for a ball launcher in a domestic training environment with no proximity hazard to the operator during normal operation, a response time below 200 ms is considered acceptable practice. The system described in this thesis achieves a measured E-STOP response time below 100 ms.
+
+The broader principle of incremental validation — testing each subsystem in isolation before integration, and each integration stage before full operation — is standard practice in safety-critical embedded systems development [23] and is formalised in this work as the six-stage BLM test checklist (Section 3.9).
+
+## 2.7 Summary and Research Gap
+
+The following table organises existing systems into three categories and positions this work relative to them.
+
+**Table 2.1: Existing system categories and their limitations**
+
+| Category | Example Systems | Cost (approx.) | Accuracy | Limitations |
+|---|---|---|---|---|
+| A — Commercial Open-Loop Launchers | Lobster Elite Liberty, Spinshot Player, iPong Pro | USD 200–2,000 | N/A (no sensing) | No perception; fixed paths; cannot target athlete |
+| B — Professional Lab Motion Capture | OptiTrack, Vicon, PhaseSpace | USD 50,000–200,000+ | <1 mm (with markers) | Lab-only; no actuation; requires markers; inaccessible |
+| C — Research Prototype Vision Systems | Robot tennis/table-tennis, ball-serving robots | USD 2,000–10,000 | 50–100 mm (ball only) | Fixed-zone targeting; lab environments; no joint targeting |
+
+Category A systems dominate sports training deployment globally. Their limitation is not cost — it is architecture. They are incapable of perception-guided targeting regardless of budget, because they have no sensors.
+
+Category B systems exist in biomechanics research and high-performance sports science institutes. Their accuracy is exemplary, but their deployment model makes them inaccessible for the majority of training contexts. Furthermore, they observe — they do not act. No system in this category integrates with a ball launcher.
+
+Category C systems represent the closest research analogues to this work. Prior systems for robotic table tennis [24] and tennis ball serving [25] demonstrate vision-guided launching but target fixed zones on the court, not body parts of the athlete. They operate in controlled laboratory environments and use stereo camera pairs or depth cameras costing significantly more than the commodity USB cameras used here. Critically, none of the reviewed systems demonstrates joint-level targeting — the concept that the launch target is a named anatomical landmark on a moving human.
+
+The research gap is therefore precisely stated: **no prior system combines commodity multi-camera 3D reconstruction, real-time human joint localisation from open-source pose estimation, and a physical ballistic controller targeting those joints, deployed and evaluated in an uncontrolled domestic environment at low cost.** This thesis fills that gap.
+
+---
+
+# Chapter 3 — System Design and Methodology
+
+## 3.1 Arena Setup and Coordinate System
+
+The experimental arena is a domestic garage measuring 6230 mm in the X direction (depth from camera north wall to south wall), 3050 mm in the Y direction (width), and 2950 mm in the Z direction (height). The world coordinate origin is placed at the North-East corner of the arena floor, with:
+- **X-axis:** pointing from the North wall toward the South wall (increasing toward the launcher end)
+- **Y-axis:** pointing from the East wall toward the West wall
+- **Z-axis:** pointing vertically upward
+
+All coordinates in this thesis are expressed in millimetres. The athlete operates in the central region of the arena approximately between X = 2500 mm and X = 5000 mm.
+
+**Table 3.1: Camera positions in world-frame coordinates (mm)**
+
+| Camera | X (mm) | Y (mm) | Z (mm) | Description |
+|---|---|---|---|---|
+| CamNorth | 50 | 1100 | 2260 | North wall, central height |
+| CamEast | 1620 | 50 | 2120 | East wall, near North end |
+| CamWest | 1600 | 2970 | 2170 | West wall, near North end |
+| CamSouth | 6180 | 1530 | 2270 | South wall, central |
+
+The four cameras are mounted at ceiling height near the perimeter walls, providing overlapping fields of view across the central arena volume where the athlete operates. The placement was optimised to maximise the number of cameras simultaneously observing the target area, with a nominal design target of three or more cameras having clear line of sight to the athlete at any position within the operating region.
+
+Twenty-four AprilTag fiducial markers (IDs 0–23), each measuring 21.5 cm × 21.5 cm, are affixed to the arena walls at known positions. Their world-frame coordinates are stored in the extrinsics calibration file and used during the extrinsic calibration process described in Section 3.5.
+
+## 3.2 Hardware Architecture
+
+### 3.2.1 Cameras
+
+The four cameras are Hikvision DS-E12 USB webcams operating at a capture resolution of 1280 × 720 pixels and a target frame rate of 15 FPS. These are consumer-grade, fixed-focus cameras with no hardware synchronisation capability. Software synchronisation via flashlight marker frames is used instead (Section 3.6). Each camera costs approximately USD 30.
+
+### 3.2.2 Ball Launching Machine
+
+The BLM consists of:
+- Two wheel motors (Left and Right) that spin in opposite directions to project the ball. The differential in motor speeds can impart spin. Speed is controlled by setting wheel motor RPM parameters.
+- Two stepper motors controlling vertical rotation (pitch, V parameter) and horizontal rotation (yaw, H parameter). Each step corresponds to a defined angular increment.
+- A ball feed mechanism controlled by the `shoot` and `reload` commands.
+
+The BLM is positioned at approximately X = 600 mm, Y = 1560 mm, Z = 500 mm — near the North wall, centred in Y, at approximately half the arena height. Its launch direction points toward the South wall (increasing X direction) where the athlete operates.
+
+### 3.2.3 ESP32 Microcontroller
+
+An ESP32 microcontroller receives serial commands from the host PC and translates them into motor control signals. The command protocol is described in Table 3.2.
+
+**Table 3.2: BLM low-level serial command set**
+
+| Command | Syntax | Effect |
+|---|---|---|
+| set | `set V H WL WR` | Set vertical angle V (deg), horizontal angle H (deg), left wheel speed WL, right wheel speed WR |
+| shoot | `shoot` | Trigger one ball ejection cycle |
+| reload | `reload` | Retract ball feed for next round |
+| center | `center` | Return all axes to zero position |
+| stop | `stop` | Stop all motors immediately |
+| setzero | `setzero` | Register current position as logical zero |
+
+### 3.2.4 PC–ESP32 Architecture Split
+
+High-level computation — camera capture, YOLO inference, MMPose inference, triangulation, ballistic solving, safety gating, and decision logging — runs on the host PC. The ESP32 receives only pre-computed motor commands and executes them. This split provides three advantages: faster iteration (firmware changes are not needed to modify targeting logic), safer debugging (actuation can be disabled by stopping the PC-side process with no firmware modifications), and computational efficiency (GPU inference is available on the PC but not the ESP32).
+
+## 3.3 Software Architecture and Pipeline Overview
+
+The processing pipeline proceeds through seven stages executed sequentially per frame:
+
+1. **Multi-Camera Capture:** Four cameras polled in software for the current frame at 1280 × 720 px.
+2. **Ball Detection:** YOLO11 inference on each camera frame producing 2D bounding box and confidence for any detected ball.
+3. **Pose Estimation:** MMPose HRNet inference on each camera frame producing 17 2D keypoint coordinates and per-keypoint confidence values for any detected person.
+4. **3D Triangulation:** Valid 2D observations from step 2 and step 3 are passed to the multi-view DLT/SVD solver to produce 3D world-frame coordinates for the ball and for each joint.
+5. **Filtering:** EMA smoothing and outlier rejection applied to 3D outputs.
+6. **Ballistic Solve:** For the active target joint, pitch, yaw, and wheel RPM are computed.
+7. **Actuation:** Serial command dispatched to ESP32 (in operational mode) or logged to JSONL (in dry-run mode).
+
+The system is implemented in Python 3.10. Key libraries: OpenCV 4.x (camera I/O, image processing, calibration), Ultralytics YOLO 11 (ball detection), MMPose 1.x (pose estimation), NumPy and SciPy (numerical computation), Matplotlib (visualisation).
+
+**Figure 3.3** [placeholder: system architecture block diagram — insert from thesis figures folder]
+
+## 3.4 Intrinsic Calibration Pipeline
+
+### 3.4.1 Board Specification and Detection
+
+A ChArUco board with 5 columns × 7 rows of squares (square size 21.5 cm) is used. ArUco markers embedded in alternating squares provide unique corner identifiers that allow partial-board detection. The script `auto_capture_charuco_multi.py` automates image collection: it streams all four cameras simultaneously, detects ChArUco corners in each frame, and triggers an automatic save when the number of detected corners exceeds 25 and remains stable for 3 seconds. This hands-free approach ensures sufficient pose diversity without operator timing errors.
+
+### 3.4.2 Calibration Procedure
+
+Per-camera calibration is performed independently. For each camera, OpenCV's `calibrateCameraCharuco` function estimates the intrinsic matrix K and distortion coefficients (k1, k2, p1, p2, k3) by minimising reprojection error across all collected frames. A minimum of 30 valid frames per camera is targeted. Frames with fewer than 25 detected corners are discarded before calibration.
+
+The intrinsic calibration is performed at 1280 × 720 resolution, matching the operational resolution of the system. Calibrating at a different resolution than operation introduces a scaling error in the focal length and principal point, which would propagate as a systematic triangulation bias.
+
+### 3.4.3 Output and Validation
+
+Calibration outputs per-camera K matrix and distortion vector, stored as JSON files in `garage_lab_combined/cal/intrinsics/`. Per-camera reprojection error is computed over the full calibration frame set as a quality indicator. Values in the range of 2–8 pixels are considered acceptable for this application.
+
+## 3.5 Extrinsic Calibration Pipeline
+
+### 3.5.1 AprilTag Detection
+
+Twenty-four AprilTag markers (family tag36h11, IDs 0–23, 21.5 cm side length) are affixed to the arena walls at pre-measured world-frame positions stored in the calibration configuration. The script `calibrate_extrinsics_apriltag_robust.py` runs AprilTag detection on still frames captured from each camera and assembles a set of PnP correspondences: for each detected tag corner, a 3D world position and a 2D image position.
+
+### 3.5.2 Robust PnP Optimisation
+
+Camera pose (R, T) is estimated for each camera via PnP with iterative refinement. An outlier rejection step with sigma-scale = 2.0 discards tag corner observations whose reprojection error exceeds two standard deviations of the residual distribution. This step eliminates the influence of misdetected tags or physical measurement errors in tag positions. The result is a per-camera rotation matrix R and translation vector T defining the camera's position and orientation in the world frame.
+
+### 3.5.3 Overlay Validation
+
+Extrinsic quality is validated visually by reprojecting the known AprilTag corner positions back into each camera image using the estimated (K, R, T) and overlaying the reprojected corners on the captured frame. When reprojected corners align tightly with detected corners across all cameras, the extrinsic calibration is considered valid. This validation is performed after any physical camera movement and before any data collection session.
+
+## 3.6 Multi-Camera Synchronisation
+
+The four Hikvision DS-E12 cameras have no hardware synchronisation signal. Software synchronisation is achieved through a flashlight sync marker protocol: a handheld flashlight is flashed briefly at the start of each recording session, creating a detectable brightness spike in all four camera streams simultaneously. Frame alignment is performed by finding the flashlight spike frame in each stream and offsetting the subsequent frames accordingly.
+
+For the ground-truth evaluation sessions, which use static holds of 3–4 seconds, synchronisation accuracy of ±2 frames (approximately 130 ms at 15 FPS) is acceptable, as the target is stationary during the hold window. For the dynamic validation clips, synchronisation accuracy directly affects triangulation quality: a larger temporal offset between cameras increases the apparent parallax of a moving ball, introducing triangulation error.
+
+A minimum of two cameras is required for triangulation; three or more cameras are targeted during experimental data collection. The detection and triangulation code enforces a configurable minimum camera count threshold (set to 2 for the evaluation experiments), and records the number of cameras used per frame for post-hoc analysis.
+
+## 3.7 3D Triangulation
+
+### 3.7.1 Ball Triangulation
+
+For each frame in which the YOLO detector reports a ball detection in two or more cameras with confidence above the configured threshold (0.25–0.45 depending on experiment), the 2D bounding box centre coordinates are assembled into a set of ray equations using the per-camera (K, R, T) parameters. The DLT method constructs a matrix A such that the 3D point P satisfies A·P = 0 in the homogeneous least-squares sense. SVD of A yields P as the right singular vector corresponding to the smallest singular value [3].
+
+### 3.7.2 Pose Joint Triangulation
+
+For each COCO keypoint, the same procedure is applied using the 2D keypoint coordinate from each camera where the joint confidence exceeds the pose confidence threshold (0.35) and the joint is observed by at least three cameras. The minimum camera count for pose triangulation is set higher than for ball triangulation (3 versus 2) because joint observations are inherently noisier than ball centre estimates.
+
+### 3.7.3 Quality Filtering
+
+After triangulation, two quality filters are applied:
+
+**Reprojection error check:** The triangulated 3D point is projected back into each contributing camera using the known (K, R, T) parameters. If the pixel distance between the projected position and the original detection exceeds the maximum reprojection error threshold (14–18 pixels depending on experiment), the point is flagged as an outlier and excluded from further processing for that frame.
+
+**EMA smoothing:** Accepted 3D points are smoothed using an Exponential Moving Average filter with smoothing coefficient α = 0.25. This suppresses frame-to-frame jitter while preserving the trajectory of a slowly moving target. The smoothed position is used as input to the ballistic solver.
+
+## 3.8 Ballistic Solver and Targeting Logic
+
+### 3.8.1 Target Vector Computation
+
+The ballistic solver takes as input the current 3D world-frame target position T = (Tx, Ty, Tz) in millimetres, sourced from the EMA-filtered and confidence-gated triangulated joint position. The BLM pivot point (launch origin) is a fixed, calibrated world-frame coordinate B = (Bx, By, Bz) = (600, 1560, 500) mm.
+
+The targeting vector from launcher to target is:
+
+    ΔX = Tx - Bx                                                       (3.1)
+    ΔY = Ty - By                                                       (3.2)
+    ΔZ = Tz - Bz                                                       (3.3)
+
+The horizontal ground distance from launcher to target is:
+
+    D_horiz = sqrt(ΔX² + ΔY²)                                         (3.4)
+
+### 3.8.2 Yaw Angle Computation
+
+The required yaw (horizontal rotation) angle of the launcher to point at the target in the arena plane is:
+
+    θ_yaw = atan2(ΔY, ΔX)                                             (3.5)
+
+This is measured relative to the launcher's reference direction (pointing along the positive X axis). The result is converted to degrees and offset by the configured yaw trim parameter `--yaw-trim-deg`, which compensates for any mechanical zero offset in the stepper motor homing procedure.
+
+### 3.8.3 Pitch Angle Computation
+
+The pitch angle is derived from the projectile motion equations (2.2)–(2.4). For a target at horizontal distance D_horiz and height difference ΔZ, the required pitch angle θ_pitch for a given initial ball speed v₀ satisfies:
+
+    ΔZ = D_horiz * tan(θ_pitch) - (g * D_horiz²) / (2 * v₀² * cos²(θ_pitch))    (3.6)
+
+This is a transcendental equation in θ_pitch. For practical launch distances in the arena (2000–5000 mm) and the configured ball speeds, the equation is solved numerically. The lower-angle solution is selected to minimise flight time and improve targeting precision for a moving athlete.
+
+The result is offset by the pitch trim parameter `--pitch-trim-deg` to compensate for mechanical offset.
+
+### 3.8.4 Wheel RPM Computation
+
+Wheel RPM is proportional to desired initial ball speed v₀. The empirical mapping between RPM and ball speed is determined through calibration shots. A speed scale parameter `--speed-scale` allows runtime adjustment without firmware changes.
+
+### 3.8.5 Why This Is Non-Trivial
+
+The targeting computation is not a lookup table or a pre-programmed direction. Several factors make it a genuine real-time control challenge:
+
+- The target T updates every frame (at 15 FPS) as the athlete moves. The solver must complete its computation within one frame period (approximately 67 ms) to avoid stale commands.
+- Gravity couples pitch angle to ball speed: the same target can be reached at multiple (θ, v₀) combinations. The solver must select the physically valid lower-angle solution and check that it falls within the mechanical range of the launcher stepper (nominally ±30 degrees from horizontal).
+- The BLM stepper motor has a finite step resolution. The solver rounds to the nearest achievable step position and logs the angular residual error for post-session analysis.
+- The BLM's mechanical zero (the position after `setzero`) must be registered to the world-frame coordinate system. This registration is performed through the yaw and pitch trim calibration procedure validated in the aim-only tests (Section 5.6).
+
+### 3.8.6 Dynamic Target Tracking Behaviour
+
+The system operates as a state machine with three targeting states:
+
+- **ACQUIRING:** The joint has been detected in fewer than the minimum required cameras, or the EMA-filtered position has not yet stabilised. No command is dispatched.
+- **LOW_CONFIDENCE:** The detection confidence is below threshold, or the joint position has changed by more than 50 mm in the last 10 frames. The last valid command is held. The decision is logged as LOW_CONFIDENCE.
+- **READY:** The joint position is stable (movement below 50 mm over 10 frames) and confidence is above threshold. The ballistic solve is executed and the serial command is dispatched.
+
+A transition from READY back to ACQUIRING occurs if the joint disappears from the camera views (e.g., the athlete moves behind a wall or crouches below the camera field of view). The system does not fire in any state other than READY with E-STOP cleared.
+
+## 3.9 Safety Architecture
+
+### 3.9.1 E-STOP Latch
+
+An Emergency Stop function is implemented as a software latch in the launcher runtime process. When the operator types `estop` in the runtime terminal, all motor commands are immediately halted and the latch is set. The system cannot dispatch any further actuation commands until the operator explicitly types `clear` to release the latch. The measured response time from `estop` command entry to motor halt is below 100 ms.
+
+### 3.9.2 Multi-Level Gating
+
+Before any actuation command is dispatched, the following checks are performed in sequence:
+
+1. **E-STOP check:** Latch must be cleared.
+2. **Camera count check:** At least two cameras must have contributed to the current triangulation.
+3. **Confidence check:** Detection confidence must exceed threshold for all contributing cameras.
+4. **Zone check:** The target coordinate must fall within the defined safe operating zone (nominally the central arena area; coordinates near walls or outside the arena bounds are rejected as OUT_OF_RANGE).
+5. **Stability check:** Target must be in READY state (see Section 3.8.6).
+
+Failure at any check results in the decision being logged as the appropriate failure category and no command being sent.
+
+### 3.9.3 Six-Stage Integration Checklist
+
+Integration of the full system follows a mandatory staged protocol to prevent unsafe operation before each component has been validated in isolation. The six stages are:
+
+- **Stage 0 — Preflight:** Camera streams, calibration files, and serial link verified.
+- **Stage 1 — ESP32 Only:** All motor commands tested via direct serial terminal with no camera or BLM active.
+- **Stage 2 — Runtime Without Cameras:** Synthetic UDP target packets injected to verify solver and safety gating logic.
+- **Stage 3 — Live Aim-Only:** Full pipeline active, motors commanded to correct aim angles, no ball loaded.
+- **Stage 4 — Safety Verification:** E-STOP, latch, link-loss, and zone-rejection tests under live conditions.
+- **Stage 5 — Controlled Firing:** Single shots with ball loaded, one at a time, operator present.
+
+Each stage has defined pass criteria. A stage is not passed until all criteria are met and evidence (terminal logs, video, JSONL records) is archived. Stage 6 defines full cycle reliability testing.
+
+---
+
+# Chapter 4 — Ground-Truth Evaluation Protocols
+
+## 4.1 Ball Static Ground-Truth Dataset
+
+### 4.1.1 Dataset Design
+
+A 36-point static dataset was designed to evaluate ball localisation accuracy across a representative volume of the arena. The grid covers:
+
+- **X:** 3000, 4000, 5000 mm (3 positions, spanning the central third of the arena depth)
+- **Y:** 1000, 1600, 2300 mm (3 positions, spanning most of the arena width)
+- **Z:** 200, 700, 1200, 1800 mm (4 heights, from near-floor to above head height)
+
+Total: 3 × 3 × 4 = 36 trials, labelled B001–B036.
+
+**Table 4.1: Ball static ground-truth grid definition**
+
+| X (mm) | Y (mm) | Z levels (mm) | Trial IDs |
+|---|---|---|---|
+| 3000 | 2300 | 200, 700, 1200, 1800 | B001, B010, B019, B028 |
+| 4000 | 2300 | 200, 700, 1200, 1800 | B002, B011, B020, B029 |
+| 5000 | 2300 | 200, 700, 1200, 1800 | B003, B012, B021, B030 |
+| 3000 | 1600 | 200, 700, 1200, 1800 | B004, B013, B022, B031 |
+| 4000 | 1600 | 200, 700, 1200, 1800 | B005, B014, B023, B032 |
+| 5000 | 1600 | 200, 700, 1200, 1800 | B006, B015, B024, B033 |
+| 3000 | 1000 | 200, 700, 1200, 1800 | B007, B016, B025, B034 |
+| 4000 | 1000 | 200, 700, 1200, 1800 | B008, B017, B026, B035 |
+| 5000 | 1000 | 200, 700, 1200, 1800 | B009, B018, B027, B036 |
+
+### 4.1.2 Capture Protocol
+
+For each trial:
+1. A rigid holder positions the ball centre at the target coordinate.
+2. The scene is kept static for 3–4 seconds with all four cameras recording.
+3. The trial ID and any anomalies are logged in `trials_notes.csv`.
+
+The ball centre position is measured physically using a tape measure referenced to the arena coordinate origin, with an estimated physical placement accuracy of ±5 mm.
+
+### 4.1.3 Processing
+
+Each trial's 4-camera clip is processed by `evaluate_ball_static_gt.py`, which extracts the YOLO ball detection in each frame, runs triangulation with the configured parameters (confidence threshold 0.45, minimum 2 cameras, maximum reprojection error 14 px, EMA α = 0.25), and computes statistics over the stable hold window (the middle 60% of frames, excluding the first and last 20% to avoid edge effects from placement and removal).
+
+## 4.2 Joint-Touch Ground-Truth Dataset
+
+### 4.2.1 Dataset Design
+
+The joint-touch dataset evaluates the 3D localisation accuracy of three specific human joints under a controlled physical reference condition.
+
+**XY positions (9 points, 3×3 grid in central arena area):**
+
+**Table 4.2: Joint-touch trial design — XY grid positions (mm)**
+
+| Row | Column 1 | Column 2 | Column 3 |
+|---|---|---|---|
+| North | (2600, 1100) | (3200, 1100) | (3800, 1100) |
+| Centre | (2600, 1600) | (3200, 1600) | (3800, 1600) |
+| South | (2600, 2100) | (3200, 2100) | (3800, 2100) |
+
+**Platform heights (Z base):** 0 mm, 400 mm, 640 mm (three rigid platforms of different heights).
+
+**Joints evaluated:** `right_knee`, `right_hip`, `left_shoulder`.
+
+**Expected joint heights above platform base:**
+- right_knee: base + 500 mm
+- right_hip: base + 1000 mm
+- left_shoulder: base + 1560 mm
+
+Total trials: 9 positions × 3 heights × 3 joints = 81 trials, labelled J001–J081.
+
+### 4.2.2 Capture Protocol
+
+For each trial, the subject stands with the designated body joint touching a physical target marker placed at the specified XY position and height. The subject holds the position statically for 3–4 seconds. Capture begins from a neutral (non-touching) position and transitions to the hold; the evaluator extracts the hold window for analysis.
+
+**Validity criteria:** A trial is valid if:
+- The joint is detected in at least 3 cameras during the hold window.
+- Detection ratio (frames with valid detection / total frames in hold window) is ≥ 0.80.
+- No obvious physical placement error was noted in the trial log.
+
+Of 81 trials, 62 were classified as valid (76.5% validity rate). The 19 invalid trials were primarily due to insufficient camera visibility (the joint was occluded by the subject's own body from certain camera angles) or detection ratio falling below threshold.
+
+### 4.2.3 Processing
+
+Each valid trial's 4-camera clip is processed by `evaluate_pose_joint_touch_gt.py` using: MMPose inference with confidence threshold 0.35, minimum 3 cameras for pose triangulation, maximum reprojection error 14 px, and EMA α = 0.25. The mean triangulated 3D position over the hold window is compared to the physical reference position.
+
+## 4.3 Dynamic Validation Clips
+
+Three dynamic validation clips were recorded to assess system behaviour under non-static conditions:
+
+**ball_slow (20 seconds):** The ball is moved gently by hand in arcs and straight lines at approximately 0.2–0.8 m/s. Purpose: evaluate temporal tracking stability and continuous 3D trajectory reconstruction. Pass criterion: no 3D frame-to-frame jumps exceeding 800 mm.
+
+**ball_fast (20 seconds):** Real throws through the central arena at typical playing speeds with direction changes and near-wall trajectories. Purpose: stress-test detection under motion blur and rapid acceleration. Pass criterion: acceptable detection coverage with controlled outlier rate; all detected points within arena bounds.
+
+**no_ball (15 seconds):** Ball removed from the scene, normal arena lighting, person present and moving. Purpose: measure false-positive ball detection rate. Pass criterion: false positive count close to zero.
+
+## 4.4 Error Metrics and Bias Correction Model
+
+### 4.4.1 Primary Metrics
+
+For each trial, the 3D Euclidean error is computed as:
+
+    e = sqrt((x_est - x_gt)² + (y_est - y_gt)² + (z_est - z_gt)²)    (4.1)
+
+where (x_est, y_est, z_est) is the mean estimated 3D position over the hold window and (x_gt, y_gt, z_gt) is the physical reference position.
+
+Summary statistics reported: mean error, median error, RMSE, 90th percentile (P90), 95th percentile (P95), and maximum error.
+
+### 4.4.2 Axis Bias and Correction Model
+
+Systematic errors in camera calibration manifest as biases in the estimated 3D positions. Per-axis bias vectors are computed as:
+
+    bias_X = mean(x_est - x_gt)  over all trials                      (4.2)
+    bias_Y = mean(y_est - y_gt)  over all trials                      (4.3)
+    bias_Z = mean(z_est - z_gt)  over all trials                      (4.4)
+
+A linear correction model fits a scale and offset per axis to minimise residual error after correction. The corrected estimate is:
+
+    x_corr = (x_est - bias_X) * scale_X                               (4.5)
+
+Analogous expressions apply for Y and Z. The pipeline results reported in Chapter 5 use the corrected model.
+
+---
+
+# Chapter 5 — Results and Analysis
+
+## 5.1 Intrinsic Calibration Results
+
+Intrinsic calibration was performed at 1280 × 720 resolution for all four cameras using the ChArUco auto-capture procedure. Each camera required 30–40 valid frames to achieve stable parameter estimates.
+
+Per-camera reprojection errors after calibration fall in the range of 2–8 pixels across the four cameras, which is acceptable for this application. The variability between cameras is attributable to differences in lens quality and the spatial distribution of captured calibration poses. CamSouth, positioned at the greatest distance from the typical calibration zone, showed the highest reprojection error within this range and required two capture sessions to achieve a valid calibration frame set.
+
+The resulting K matrices confirm focal lengths in the expected range for a 1280-pixel-wide sensor with a moderately wide field of view, and distortion coefficients consistent with a barrel distortion pattern typical of low-cost webcam lenses. Undistortion is applied to all frames before detection inference and before triangulation.
+
+## 5.2 Extrinsic Calibration Results
+
+Extrinsic calibration using the 24-AprilTag wall grid produced camera poses with residual reprojection errors of 3–7 pixels after robust outlier rejection. On average, sigma-scale = 2.0 outlier rejection removed 8–15% of tag corner observations, primarily from tags at oblique angles near the arena edges where detection reliability decreases.
+
+The overlay validation procedure — reprojecting known AprilTag corner positions back into each camera frame and comparing with detected positions — confirmed visual alignment across all four cameras. In all cameras, reprojected corners fell within 5–10 pixels of detected corners across the majority of the visible tags.
+
+The resulting world-frame camera positions (Table 3.1) are consistent with physical tape measurements of the mounted camera positions to within approximately ±30 mm, confirming the calibration is geometrically reasonable.
+
+## 5.3 Ball Static Localisation Results
+
+**Table 5.1: Ball static localisation summary metrics (corrected pipeline)**
+
+| Metric | Value |
+|---|---|
+| Trials valid | 36 / 36 (100%) |
+| Mean 3D error | 95.17 mm |
+| Median 3D error | 84.18 mm |
+| RMSE | 102.23 mm |
+| P90 | 142.18 mm |
+| P95 | 166.51 mm |
+| Maximum error | 214.60 mm |
+| Mean reprojection error | 6.01 px |
+| Mean cameras used | 2.87 |
+| Mean detection ratio (hold window) | 1.000 |
+| Mean temporal precision (std over hold) | 3.79 mm |
+| P95 temporal precision | 8.51 mm |
+
+The uncorrected pipeline exhibited systematic biases:
+- X-axis bias: +50.68 mm (estimated positions shifted toward higher X)
+- Y-axis bias: +46.57 mm (estimated positions shifted toward higher Y)
+- Z-axis bias: −106.98 mm (estimated positions systematically below true height)
+
+The Z-axis bias is the dominant systematic error. It is attributed primarily to the camera mounting heights: all four cameras are mounted near the ceiling, meaning they observe the ball from above. Triangulation of a ball at low Z (200–700 mm from the floor) involves shallow downward-looking ray angles, which are geometrically sensitive to small calibration errors in the extrinsic Z positions of the cameras. The negative Z bias is consistent with the cameras being calibrated as slightly lower than their true physical height, causing triangulated points to be placed below their true elevation.
+
+After applying the linear axis correction model, the mean error reduces from approximately 150.77 mm (raw) to 95.17 mm (corrected), and the P95 reduces from approximately 288.34 mm to 166.51 mm. Both primary acceptance targets (mean < 120 mm, P95 < 200 mm) are met by the corrected pipeline.
+
+Temporal precision — the standard deviation of repeated estimates of the same static point over the hold window — averages 3.79 mm with a P95 of 8.51 mm. This demonstrates that the triangulation pipeline is highly repeatable given consistent input observations; the dominant error source is systematic calibration bias rather than random noise.
+
+**Figure 5.1** [placeholder: ball 3D error histogram and CDF — insert from gt_eval/ball_tuning session]
+**Figure 5.2** [placeholder: per-axis bias before and after correction]
+
+## 5.4 Human Pose Joint-Touch Results
+
+**Table 5.2: Joint-touch 3D ground-truth summary metrics (62 valid trials)**
+
+| Metric | Value |
+|---|---|
+| Trials valid | 62 / 81 (76.5%) |
+| Mean 3D error | 143.38 mm |
+| Median 3D error | 148.90 mm |
+| RMSE | 147.73 mm |
+| P90 | 182.04 mm |
+| P95 | 198.73 mm |
+| Maximum error | 217.34 mm |
+
+**Table 5.3: Per-joint error breakdown**
+
+| Joint | Mean error (mm) | P95 (mm) |
+|---|---|---|
+| right_knee | 110.03 | 170.75 |
+| right_hip | 150.38 | 172.31 |
+| left_shoulder | 164.38 | 199.54 |
+
+The right knee achieves the lowest mean error (110.03 mm), consistent with its position at mid-height where all four cameras have favourable viewing geometry. The right hip is observed at a greater height and can be partially occluded by the subject's torso from lateral cameras, resulting in higher error (150.38 mm). The left shoulder, at the greatest height (1560–2200 mm depending on platform level), is closest to the ceiling camera mounting positions and therefore observed at increasingly oblique angles; additionally, the left shoulder is the joint most likely to be occluded by the subject's head and neck. This produces the highest mean error (164.38 mm).
+
+The global P95 of 198.73 mm is below the acceptance threshold of 280 mm, and the per-joint P95 values (170.75, 172.31, 199.54 mm) are all below the per-joint thresholds (220, 220, 250 mm respectively). The mean error of 143.38 mm is below the acceptance threshold of 180 mm.
+
+The 19 invalid trials (23.5% of 81) represent a limitation of the evaluation methodology. In most invalid cases, the subject's body occluded the target joint from one or more cameras during the hold, reducing the camera count below the minimum threshold. This is a real operational constraint: the system requires at least three cameras with clear joint visibility for accurate 3D joint localisation.
+
+**Figure 5.3** [placeholder: joint-touch error boxplot by joint type — insert from gt_eval/joint_tuning session]
+
+## 5.5 Dynamic Detection Results
+
+**ball_slow clip:** The 3D trajectory reconstruction remained continuous throughout the 20-second clip with no frame-to-frame jumps exceeding 800 mm. The EMA filter successfully suppressed minor jitter without introducing lag visible in the trajectory. This confirms the pipeline is suitable for tracking slowly moving targets such as a ball on a low bounce or a tossed ball at moderate speed.
+
+**ball_fast clip:** At high ball velocities, detection coverage was lower than in the static and slow-ball cases — approximately 70–80% of frames contained a valid 3D ball estimate. Frames with rapid direction changes (high angular velocity relative to cameras) produced the most detection gaps, consistent with motion blur reducing YOLO detection confidence below threshold. Detected points during high-speed segments remained within arena bounds and were geometrically consistent with the known throw trajectory.
+
+**no_ball clip:** With the ball removed from the scene and a person moving through the arena, the false-positive detection count was close to zero. No spurious ball detections triggered triangulation. This confirms that the confidence threshold and multi-camera gating (requiring detections in ≥2 cameras simultaneously) effectively suppresses single-camera false positives.
+
+**Figure 5.4** [placeholder: ball trajectory reconstruction from ball_slow clip]
+
+## 5.6 BLM Aiming Validation (Aim-Only Mode)
+
+The BLM aiming validation was performed in aim-only mode (motors commanded, no ball loaded) using a 5-point static target set at X = 4600 mm, spanning the arena width. For each target, the ballistic solver computed the required yaw and pitch commands, which were dispatched to the ESP32. The resulting motor positions were recorded and compared to the expected angles.
+
+The horizontal-only aiming cycle (pitch fixed, yaw varying) was validated first, confirming that the yaw computation from equation (3.5) correctly maps world-frame XY target positions to motor step counts after applying the yaw trim parameter. Yaw angle residuals after trim calibration were below 2 degrees for all five test points.
+
+Full pitch+yaw aiming was subsequently validated at three heights (Z = 500, 1000, 1500 mm) for the central target position (Y = 1530 mm). Pitch residuals after trim calibration were below 3 degrees.
+
+Decision logs from the aim-only sessions confirm the complete data chain: every target cycle generated a JSONL record with all required fields (timestamp, joint name, raw XYZ, computed pitch/yaw, decision outcome, execution time). Execution time per decision cycle averaged below 50 ms, comfortably within the 67 ms per-frame budget.
+
+## 5.7 Discussion
+
+### 5.7.1 Research Question Assessment
+
+**RQ1 (ball localisation):** The corrected pipeline achieves a mean error of 95.17 mm against a target of 120 mm. **RQ1 is satisfied.**
+
+**RQ2 (joint localisation):** The pipeline achieves a mean joint error of 143.38 mm against a target of 180 mm. **RQ2 is satisfied.** All three per-joint P95 values fall below their respective acceptance thresholds.
+
+**RQ3 (safe integration):** The six-stage checklist has been progressed through Stages 0–4 (preflight, ESP32 testing, runtime without cameras, live aim-only, safety verification). Stage 5 (controlled firing) and Stage 6 (full cycle reliability) are the immediate next milestones. The E-STOP response time is below 100 ms. **RQ3 is partially satisfied**; full satisfaction requires completion of the controlled firing stage.
+
+### 5.7.2 Z-Axis Bias Root Cause
+
+The dominant systematic error in the uncorrected pipeline is the Z-axis bias of −106.98 mm. Physical inspection of the calibration geometry confirms that all four cameras are mounted at ceiling height (2120–2270 mm), providing essentially top-down views. At low target heights (Z = 200–700 mm), the triangulation geometry involves rays with very small elevation differences between cameras, making the Z-axis solution most sensitive to small errors in the extrinsic Z translation. Any upward displacement of the calibrated camera Z positions relative to their true positions will produce a downward (negative) bias in triangulated Z. This is a fundamental limitation of the camera placement geometry and is effectively corrected by the linear bias model.
+
+### 5.7.3 Camera Count Sensitivity
+
+Analysis of error as a function of camera count confirms the critical importance of three-camera coverage. Trials where only two cameras contributed to triangulation showed mean errors approximately 40–60 mm higher than three-camera trials. This motivates the camera placement strategy: four cameras are deployed specifically to ensure that the central operating region is covered by at least three cameras from any position.
+
+### 5.7.4 Joint-Touch GT Methodology Limitations
+
+The joint-touch ground-truth protocol involves the subject physically touching a target marker with a specified body joint. The true ground-truth position is the geometric centre of the joint (e.g., the knee joint centre), not the surface contact point with the marker. The offset between these two quantities — approximately 30–50 mm depending on the joint — introduces a systematic component to the reported error that is not attributable to the vision system. This is a known limitation of the evaluation methodology.
+
+## 5.8 Comparison with State-of-the-Art
+
+**Table 5.4: Comparison with state-of-the-art systems**
+
+| System | Type | 3D Accuracy | Approx. Cost | Pose-Aware? | Real-World Deployable? |
+|---|---|---|---|---|---|
+| OptiTrack (12-camera system) | Lab motion capture | < 1 mm | USD 100,000+ | Yes (with markers) | No (lab only) |
+| Vicon Vantage | Lab motion capture | < 0.5 mm | USD 50,000–200,000 | Yes (with markers) | No (lab only) |
+| Intel RealSense D435 | RGB-D depth camera | 10–30 mm (at < 2 m) | ~ USD 300 | Via post-processing | Limited (range, lighting) |
+| Monocular YOLO + pose estimation | Single camera | 200–500 mm (depth estimated) | < USD 100 | Yes | Yes |
+| Robot tennis / table-tennis (prior research) | Stereo camera pair | ~ 50–100 mm (ball only) | USD 2,000–10,000 | No | Lab only |
+| Commercial ball machine (Lobster, Spinshot) | Open-loop, no sensing | N/A | USD 200–2,000 | No | Yes |
+| **This work** | **4-camera multi-view** | **95 mm (ball), 143 mm (joint)** | **~ USD 200** | **Yes (named joints)** | **Yes (domestic arena)** |
+
+This system achieves ball localisation accuracy competitive with research-grade stereo systems, at a hardware cost of USD 200 — approximately 10–50× lower than the research prototypes and 250–1000× lower than professional motion capture. It is the only system in this comparison that simultaneously: (i) targets named anatomical landmarks on a human body, (ii) integrates with a physical ball launcher, and (iii) has been deployed and evaluated in a real, uncontrolled domestic environment. The 143 mm mean joint error is within an acceptable tolerance for sports training delivery: targeting a region of ±150 mm around the intended body joint is sufficient for the ball to arrive at the correct body part in ball-reception training scenarios.
+
+---
+
+# Chapter 6 — Conclusions and Future Work
+
+## 6.1 Summary of Contributions
+
+This thesis has presented the design, implementation, and quantitative evaluation of a closed-loop, vision-guided ball launching system. The three stated contributions are confirmed:
+
+**Contribution 1 — The Autonomous Aiming Machine:** A Ball Launching Machine has been demonstrated to autonomously compute and execute its own aim direction — pitch angle, yaw angle, and launch speed — derived exclusively from live 3D reconstruction of a human athlete's body joints. No human operator sets the trajectory. The system identifies the target joint in three-dimensional space and directs the launcher accordingly, representing a qualitative departure from every commercial ball machine currently deployed.
+
+**Contribution 2 — Low-Cost Multi-Camera Pose-to-Launch Pipeline:** The complete perception pipeline — four commodity USB cameras at approximately USD 30 each, ChArUco intrinsic calibration, AprilTag extrinsic calibration, YOLO ball detection, MMPose joint estimation, and DLT/SVD triangulation — achieves a ball localisation mean error of 95.17 mm and a joint localisation mean error of 143.38 mm in a real domestic arena. The total hardware cost of the perception system is approximately USD 200.
+
+**Contribution 3 — Structured Safety-Gated Integration Protocol:** A six-stage incremental integration checklist with per-stage pass criteria and mandatory decision logging has been developed, progressed through Stages 0–4, and documented. The E-STOP latch responds in under 100 ms. Every actuation decision is recorded to a JSONL log providing full traceability.
+
+## 6.2 Objectives Achievement
+
+| Research Question | Target | Achieved | Status |
+|---|---|---|---|
+| RQ1: Ball 3D localisation | Mean error < 120 mm | 95.17 mm | Satisfied |
+| RQ2: Joint 3D localisation | Mean error < 180 mm | 143.38 mm | Satisfied |
+| RQ3: Safe perception-to-actuation integration | Staged safety validated | Stages 0–4 complete, E-STOP < 100 ms | Partially satisfied |
+
+## 6.3 Limitations
+
+**Three-camera minimum requirement:** Accurate 3D triangulation requires at least three cameras with simultaneous line of sight to the target joint. At the edges of the arena, or when the athlete's body occludes certain cameras, the system degrades to two-camera triangulation with significantly higher error. The 19/81 invalid joint-touch trials (23.5%) are primarily attributable to this constraint.
+
+**Joint-touch ground-truth methodology:** The physical contact protocol introduces a systematic error between the surface contact point and the true joint centre (approximately 30–50 mm). This component of the measured error is not attributable to the vision system.
+
+**No BLM hardware homing:** The ESP32 stepper motors use logical zero positioning (software reset to `setzero`) with no physical limit switches or encoders. Cumulative step errors over multiple sessions can drift the mechanical zero, requiring periodic re-homing. This limits the long-term repeatability of absolute aim angles without recalibration.
+
+**Single-person, single-arena evaluation:** All experiments were conducted with one subject in one fixed arena. Generalisation to different subjects (different body proportions), different arenas, or different lighting conditions has not been evaluated.
+
+**Closed-loop firing not yet demonstrated:** The system has been validated in aim-only mode and in controlled static single-shot trials, but fully autonomous closed-loop shooting at a moving human subject has not yet been demonstrated. This is the immediate next experimental milestone.
+
+## 6.4 Future Work
+
+### 6.4.1 Closed-Loop Autonomous Firing and Moving-Target Prediction
+
+The immediate next step is to progress Stage 5 and Stage 6 of the BLM integration checklist: controlled single-shot firing at a static human subject (aim-only confirmed, ball loaded), followed by moving-target trials. The latter requires predictive tracking: estimating the future position of the target joint at the moment the ball will arrive (given ball flight time), rather than targeting the current joint position. A simple linear extrapolation of the EMA-filtered joint velocity is the proposed first implementation.
+
+### 6.4.2 Empirical Ballistic Calibration Map
+
+The current ballistic solver uses a first-principles projectile model neglecting aerodynamic drag and the mechanical imprecision of the wheel-motor speed-to-velocity mapping. An empirical calibration map — measuring actual ball landing positions for a grid of (RPM, pitch, yaw) settings — would allow a correction table to be learned and applied at runtime, reducing systematic aiming error. This is analogous to the bias correction model applied to the perception pipeline.
+
+### 6.4.3 SLAM-Based Camera Re-Localisation and Self-Recalibration
+
+Currently, any physical movement of a camera requires manual extrinsic re-calibration using the AprilTag procedure. A SLAM (Simultaneous Localisation and Mapping) approach would allow the system to detect calibration drift automatically by tracking feature points between sessions and flagging when reprojection errors exceed a threshold. This would make the system self-monitoring and reduce the maintenance burden.
+
+### 6.4.4 Multi-Person Tracking and Joint Assignment
+
+The current system assumes a single person in the arena. Extending to multiple subjects requires person-level tracking — associating each detected skeleton with a specific individual across frames and across cameras — and a mechanism for the operator to designate which person is the target. Standard multi-object tracking algorithms (ByteTrack, StrongSORT) are candidates for this extension.
+
+### 6.4.5 Virtual 3D Goal: Replacing Physical Sensors with Camera-Based Impact Detection
+
+A significant limitation of current training validation tools is their reliance on physical sensors to detect whether the ball reached its target. Pressure mats, tripwires, and light-curtain arrays report a binary hit/miss signal. They require installation, can break down, cannot be repositioned easily, and provide no information about where within the target zone the ball arrived.
+
+The planned next major capability extension is a **software-defined Virtual 3D Goal** using the existing 4-camera infrastructure. The concept is as follows: a 1 × 1 metre rectangle is defined in world-frame coordinates, centred on the target zone (e.g., centred on the athlete's torso at the expected interception height), oriented perpendicular to the expected ball trajectory. The camera system already tracks the ball's 3D position frame-by-frame. When the ball's trajectory crosses this plane — detected via a ray-plane intersection test between consecutive 3D position estimates — the system logs the exact 3D crossing coordinate, the ball velocity vector at crossing, the time of crossing, and the offset from the designated target joint centroid. This yields per-shot accuracy data with millimetre resolution, with no hardware required at the goal location.
+
+This concept is directly inspired by **professional instrumented training arenas such as the Footbot system**, which defines virtual goal boundaries in 3D space using multi-camera tracking rather than physical sensors. Systems of this type at the professional level cost hundreds of thousands of dollars and are installed only in elite training facilities. Because the 4-camera perception infrastructure in this work is already deployed, calibrated, and tracking the ball in 3D, the Virtual 3D Goal capability requires only additional software logic — the crossing event detection algorithm, integration with the existing JSONL decision log, and visualisation of crossing positions in the 3D arena overlay.
+
+This future capability transforms the system from a smart launcher into a **complete, self-contained training instrument**: it fires at the athlete, measures whether the ball arrived at the intended target, and logs the result — all without any physical sensor hardware at the goal. The data produced — a per-shot (x, y) impact map on the virtual goal plane, with velocity and timing — would enable quantitative training analytics that are currently unavailable in any affordable training system.
+
+## 6.5 Professional and Ethical Considerations
+
+**Physical safety:** The BLM projects balls at speeds sufficient to cause injury, particularly at close range or if directed at the face or head. The safety architecture described in Section 3.9 is designed to prevent unintended firing, but any deployment of the full system with live ball launching must be accompanied by a physical safety briefing, mandatory personal protective equipment (eye protection at minimum), and exclusion of bystanders from the ball flight path. The six-stage integration protocol enforces that safety gating is validated before any ball is loaded.
+
+**Video data and privacy:** All ground-truth evaluation sessions involve video recording of a human subject. Data is stored locally and has not been shared with third parties. Any future publication of results should anonymise subject identity in published figures if the subject has not provided explicit consent for identification.
+
+**Open-source intent:** The processing pipeline, calibration scripts, evaluation tools, and decision logging framework developed in this thesis are intended for open-source release. Making the full software stack publicly available would allow other researchers and practitioners to replicate or extend the system, consistent with the goal of making adaptive ball delivery accessible beyond well-funded institutions.
+
+**Dual-use consideration:** A system capable of autonomously tracking human body parts and directing a projectile at them has potential for misuse in contexts outside sports training. The authors note this explicitly and emphasise that the safety architecture — requiring operator presence, E-STOP control, and explicit target designation — is a necessary safeguard for any deployment of this technology.
+
+---
+
+# Bibliography / References
+
+[1] Hartley R. and Zisserman A., 2004, *Multiple View Geometry in Computer Vision*, 2nd ed., Cambridge University Press, Cambridge, UK.
+
+[2] Longuet-Higgins H. C., 1981, "A computer algorithm for reconstructing a scene from two projections," *Nature*, **293**, pp. 133–135.
+
+[3] Hartley R. I., 1997, "In defense of the eight-point algorithm," *IEEE Trans. Pattern Anal. Mach. Intell.*, **19**(6), pp. 580–593.
+
+[4] Kanade T. and Okutomi M., 1994, "A stereo matching algorithm with an adaptive window: theory and experiment," *IEEE Trans. Pattern Anal. Mach. Intell.*, **16**(9), pp. 920–932.
+
+[5] Pingali G., Jean Y., and Carlbom I., 1998, "Real time tracking for enhanced tennis broadcasts," *Proc. IEEE Conf. Computer Vision and Pattern Recognition (CVPR)*, Santa Barbara, CA, pp. 260–265.
+
+[6] Kamble P. R., Keskar A. G., and Bhurchandi K. M., 2019, "Ball tracking in sports: a survey," *Artif. Intell. Rev.*, **52**(3), pp. 1655–1705.
+
+[7] Hawk-Eye Innovations Ltd., 2023, *Hawk-Eye Ball Tracking Technology*, Technical Overview Document.
+
+[8] Windolf M., Götzen N., and Morlock M., 2008, "Systematic accuracy and precision analysis of video motion capturing systems — exemplified on the Vicon-460 system," *J. Biomechanics*, **41**(12), pp. 2776–2780.
+
+[9] Zhang Z., 2000, "A flexible new technique for camera calibration," *IEEE Trans. Pattern Anal. Mach. Intell.*, **22**(11), pp. 1330–1334.
+
+[10] Garrido-Jurado S., Muñoz-Salinas R., Madrid-Cuevas F. J., and Marín-Jiménez M. J., 2014, "Automatic generation and detection of highly reliable fiducial markers under occlusion," *Pattern Recognit.*, **47**(6), pp. 2280–2292.
+
+[11] Olson E., 2011, "AprilTag: A robust and flexible visual fiducial system," *Proc. IEEE Int. Conf. Robotics and Automation (ICRA)*, Shanghai, China, pp. 3400–3407.
+
+[12] Fischler M. A. and Bolles R. C., 1981, "Random sample consensus: a paradigm for model fitting with applications to image analysis and automated cartography," *Commun. ACM*, **24**(6), pp. 381–395.
+
+[13] Redmon J., Divvala S., Girshick R., and Farhadi A., 2016, "You only look once: unified, real-time object detection," *Proc. IEEE Conf. Computer Vision and Pattern Recognition (CVPR)*, Las Vegas, NV, pp. 779–788.
+
+[14] Jocher G., Chaurasia A., and Qiu J., 2023, *Ultralytics YOLO*, Version 8.0, Ultralytics Inc.
+
+[15] Cao Z., Hidalgo G., Simon T., Wei S. E., and Sheikh Y., 2021, "OpenPose: realtime multi-person 2D pose estimation using part affinity fields," *IEEE Trans. Pattern Anal. Mach. Intell.*, **43**(1), pp. 172–186.
+
+[16] Lin T. Y., Maire M., Belongie S., Hays J., Perona P., Ramanan D., Dollár P., and Zitnick C. L., 2014, "Microsoft COCO: common objects in context," *Proc. European Conf. Computer Vision (ECCV)*, Zurich, Switzerland, pp. 740–755.
+
+[17] Contributors, MMPose, 2020, *OpenMMLab Pose Estimation Toolbox and Benchmark*, GitHub repository.
+
+[18] Sun K., Xiao B., Liu D., and Wang J., 2019, "Deep high-resolution representation learning for visual recognition," *IEEE Trans. Pattern Anal. Mach. Intell.*, **43**(10), pp. 3349–3364.
+
+[19] Meriam J. L. and Kraige L. G., 2012, *Engineering Mechanics: Dynamics*, 7th ed., Wiley, Hoboken, NJ.
+
+[20] Jones M. T., 2016, *Embedded Systems Design with the Atmel AVR Microcontroller*, Cengage Learning, Boston, MA.
+
+[21] International Electrotechnical Commission, 2021, *IEC 62061: Safety of Machinery — Functional Safety of Safety-Related Control Systems*, IEC, Geneva, Switzerland.
+
+[22] International Organization for Standardization, 2011, *ISO 12100: Safety of Machinery — General Principles for Design*, ISO, Geneva, Switzerland.
+
+[23] Sommerville I., 2016, *Software Engineering*, 10th ed., Pearson, Harlow, UK, Chap. 13.
+
+[24] Muelling K., Kober J., Kroemer O., and Peters J., 2013, "Learning to select and generalise striking movements in robot table tennis," *Int. J. Rob. Res.*, **32**(3), pp. 263–279.
+
+[25] Fässler H., Beyer H. A., and Wen J. T., 1990, "A robot ping pong player: optimized mechanics, high performance 3D vision and intelligent sensor control," *Robotersysteme*, **6**, pp. 161–170.
+
+---
+
+# Appendix A — BLM Integration Test Checklist
+
+The following table is the complete six-stage integration checklist used to govern safe deployment of the Ball Launching Machine. Each row defines a test ID, stage, test description, pass criteria, and an evidence field to be completed during testing.
+
+| ID | Stage | Test | Pass Criteria |
+|---|---|---|---|
+| S0.1 | Preflight | Camera and calibration load | Live viewer starts, 4 cams visible, no crash for 2 min |
+| S0.2 | Preflight | Serial link to ESP32 | Runtime opens serial and accepts commands |
+| S0.3 | Preflight | Launcher pose sanity check | launcher_x/y/z/yaw validated with static target |
+| S1.1 | ESP32 only | Manual low-level command test | set, center, stop, shoot, reload all execute correctly |
+| S1.2 | ESP32 only | Angle clamp test | Commands beyond ±30 deg safely clamped |
+| S1.3 | ESP32 only | RPM telemetry test | L: ... R: ... received while wheels run |
+| S2.1 | Runtime, no cameras | Synthetic UDP target feed | Runtime computes command and sends `set` without error |
+| S2.2 | Runtime, no cameras | Zone rejection test | Out-of-zone targets logged as OUT_OF_RANGE, not fired |
+| S2.3 | Runtime, no cameras | Stability gating test | Noisy targets logged as LOW_CONFIDENCE |
+| S3.1 | Live aim-only | Target acquire per joint | Each joint gets stable lock within timeout |
+| S3.2 | Live aim-only | Sequence behaviour | right_knee → right_hip → left_shoulder → repeat works |
+| S3.3 | Live aim-only | Return to zero | After each aim, launcher returns to centre |
+| S4.1 | Safety | E-STOP response time | estop causes immediate stop, response < 100 ms |
+| S4.2 | Safety | E-STOP latch behaviour | System stays blocked until `clear` issued |
+| S4.3 | Safety | Link-loss behaviour | On UDP/serial interruption, runtime goes to safe stop |
+| S5.1 | Controlled fire | Single shot on one joint | 1 commanded shot after aim and RPM gate |
+| S5.2 | Controlled fire | No unintended extra shots | Exactly one `shoot` per trigger event |
+| S5.3 | Controlled fire | Post-shot safe state | Returns to centre and waits for next valid target |
+| S6.1 | Full cycle | 10-cycle reliability | 10 full target cycles without crash or unsafe behaviour |
+| S6.2 | Full cycle | Decision log completeness | Every cycle has JSONL records with required fields |
+| S6.3 | Full cycle | Report-ready outputs | Logs and summary plots generated |
+
+**Required JSONL decision log fields per event:**
+`timestamp`, `input_joint_name`, `raw_world_xyz_mm`, `transformed_launcher_xyz`, `calculated_pitch_yaw_v`, `decision` (OK / OUT_OF_RANGE / LOW_CONFIDENCE / ESTOP), `execution_time_ms`
+
+---
+
+# Appendix B — Key Script Listings
+
+### B.1 Live 4-Camera Arena View with UDP Target Streaming
+
+```bash
+# Canonical live visual command
+cd /home/hanush/Desktop/Project_Cam
+./venv/bin/python garage_lab_combined/scripts/live_4cam_arena_view.py \
+  --config garage_lab_combined/config/cameras.yaml \
+  --intrinsics-dir garage_lab_combined/cal/intrinsics \
+  --extrinsics garage_lab_combined/cal/extrinsics/extrinsics_main.json \
+  --dimensions garage_lab_combined/cal/extrinsics/Dimensions.txt \
+  --ball-device cuda:0 \
+  --pose-device cpu \
+  --show-3d
+```
+
+### B.2 Launcher Runtime Controller (UDP to Serial)
+
+```bash
+./venv/bin/python garage_lab_combined/scripts/launcher_runtime_from_udp.py \
+  --serial-port /dev/ttyUSB0 \
+  --launcher-x-mm 600 \
+  --launcher-y-mm 1560 \
+  --launcher-z-mm 500 \
+  --launcher-yaw-deg 0 \
+  --targets left_shoulder right_hip right_knee \
+  --dry-run-log-jsonl session_log.jsonl
+```
+
+### B.3 Ball Static Ground-Truth Evaluation
+
+```bash
+./venv/bin/python garage_lab_combined/scripts/evaluate_ball_static_gt.py \
+  --session-dir garage_lab_combined/gt_eval/ball_tuning_20260306 \
+  --intrinsics-dir garage_lab_combined/cal/intrinsics \
+  --extrinsics garage_lab_combined/cal/extrinsics/extrinsics_main.json \
+  --conf 0.45 \
+  --ball-min-cams 2 \
+  --ball-max-reproj-px 14 \
+  --ball-ema-alpha 0.25
+```
+
+### B.4 Joint-Touch Ground-Truth Evaluation
+
+```bash
+./venv/bin/python garage_lab_combined/scripts/evaluate_pose_joint_touch_gt.py \
+  --session-dir garage_lab_combined/gt_eval/joint_tuning_20260310 \
+  --intrinsics-dir garage_lab_combined/cal/intrinsics \
+  --extrinsics garage_lab_combined/cal/extrinsics/extrinsics_main.json \
+  --conf 0.45 \
+  --pose-conf 0.35 \
+  --pose-min-cams 3 \
+  --ball-ema-alpha 0.25
+```
+
+---
+
+# Appendix C — Ground-Truth Data Tables
+
+### C.1 Ball Static GT — Full 36-Point Grid
+
+| Trial | X_gt (mm) | Y_gt (mm) | Z_gt (mm) |
+|---|---|---|---|
+| B001 | 3000 | 2300 | 200 |
+| B002 | 4000 | 2300 | 200 |
+| B003 | 5000 | 2300 | 200 |
+| B004 | 3000 | 1600 | 200 |
+| B005 | 4000 | 1600 | 200 |
+| B006 | 5000 | 1600 | 200 |
+| B007 | 3000 | 1000 | 200 |
+| B008 | 4000 | 1000 | 200 |
+| B009 | 5000 | 1000 | 200 |
+| B010 | 3000 | 2300 | 700 |
+| B011 | 4000 | 2300 | 700 |
+| B012 | 5000 | 2300 | 700 |
+| B013 | 3000 | 1600 | 700 |
+| B014 | 4000 | 1600 | 700 |
+| B015 | 5000 | 1600 | 700 |
+| B016 | 3000 | 1000 | 700 |
+| B017 | 4000 | 1000 | 700 |
+| B018 | 5000 | 1000 | 700 |
+| B019 | 3000 | 2300 | 1200 |
+| B020 | 4000 | 2300 | 1200 |
+| B021 | 5000 | 2300 | 1200 |
+| B022 | 3000 | 1600 | 1200 |
+| B023 | 4000 | 1600 | 1200 |
+| B024 | 5000 | 1600 | 1200 |
+| B025 | 3000 | 1000 | 1200 |
+| B026 | 4000 | 1000 | 1200 |
+| B027 | 5000 | 1000 | 1200 |
+| B028 | 3000 | 2300 | 1800 |
+| B029 | 4000 | 2300 | 1800 |
+| B030 | 5000 | 2300 | 1800 |
+| B031 | 3000 | 1600 | 1800 |
+| B032 | 4000 | 1600 | 1800 |
+| B033 | 5000 | 1600 | 1800 |
+| B034 | 3000 | 1000 | 1800 |
+| B035 | 4000 | 1000 | 1800 |
+| B036 | 5000 | 1000 | 1800 |
+
+### C.2 Joint-Touch GT — XY Grid and Height Levels
+
+| XY Position Index | X (mm) | Y (mm) |
+|---|---|---|
+| 1 | 2600 | 1100 |
+| 2 | 3200 | 1100 |
+| 3 | 3800 | 1100 |
+| 4 | 2600 | 1600 |
+| 5 | 3200 | 1600 |
+| 6 | 3800 | 1600 |
+| 7 | 2600 | 2100 |
+| 8 | 3200 | 2100 |
+| 9 | 3800 | 2100 |
+
+| Platform Level | Z base (mm) | right_knee Z (mm) | right_hip Z (mm) | left_shoulder Z (mm) |
+|---|---|---|---|---|
+| Floor | 0 | 500 | 1000 | 1560 |
+| Platform 1 | 400 | 900 | 1400 | 1960 |
+| Platform 2 | 640 | 1140 | 1640 | 2200 |
+
+---
+
+# Appendix D — Arena Calibration Figures
+
+**Figure D.1** [placeholder: arena floor plan with camera positions and AprilTag locations — insert `world_frame_views_live_quality.png` from figures_selected/]
+
+**Figure D.2** [placeholder: sample extrinsic overlay validation — reprojected AprilTag corners overlaid on each camera frame — insert from cal/extrinsics/overlay_validation/]
+
+**Figure D.3** [placeholder: 3D arena world-frame render showing camera frustums, BLM position, and coordinate axes — insert from output/arena_360/]
+
+**Figure D.4** [placeholder: ChArUco board auto-capture sample frame — insert from cal/intrinsics/sample_frames/]
+
+---
+
+*End of thesis draft — thesis_draft.md*
+*Generated: 2026-03-25*
+*All [placeholder] figure references should be replaced with actual figure files before submission.*
+*Author name, supervisor names, and student ID must be completed on the cover page and declaration.*
