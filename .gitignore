@@ -24,6 +24,11 @@ cal/*.json
 !motion_capture_data.json
 !plan
 !requirements.txt
+!garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/**/*.json
+!garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/**/*.csv
+!garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/**/*.md
+!Parallel_working/output/ablation_results/*.json
+!Parallel_working/output/prediction_results/*.json
 
 # IDE
 .vscode/
@@ -50,6 +55,12 @@ garage_lab_combined/gt_eval/**/visualizations/
 
 # Binary Models / Media
 *.pt
+*.engine
+*.onnx
 *.mkv
 *.mov
 *.webm
+bus.jpg
+
+# Parallel working outputs (test recordings, ablation frames)
+Parallel_working/output/

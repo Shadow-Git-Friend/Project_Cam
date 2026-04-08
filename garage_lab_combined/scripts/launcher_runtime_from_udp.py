@@ -93,6 +93,40 @@ def load_zone_by_joint(
     return out
 
 
+def load_correction_model(path: str) -> Optional[Dict]:
+    """Load a GT correction model JSON (from evaluate_ball_static_gt.py output)."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[WARN] Could not load correction model {path}: {e}")
+        return None
+
+
+def apply_correction(xyz_mm: np.ndarray, model: Dict, mode: str = "linear") -> np.ndarray:
+    """Apply GT correction model to estimated 3D position.
+
+    Modes:
+        'bias'   — subtract global mean bias:  corrected = estimated + bias_add
+        'linear' — per-axis linear fit:  corrected_axis = a * estimated_axis + b
+        'none'   — passthrough (no correction)
+    """
+    if mode == "none" or model is None:
+        return xyz_mm
+    xyz = np.array(xyz_mm, dtype=np.float64)
+    if mode == "bias":
+        bias = model.get("global_bias_add_mm", {})
+        xyz[0] += bias.get("x", 0.0)
+        xyz[1] += bias.get("y", 0.0)
+        xyz[2] += bias.get("z", 0.0)
+    elif mode == "linear":
+        linear = model.get("axis_linear_gt_from_est", {})
+        for i, ax in enumerate(["x", "y", "z"]):
+            if ax in linear:
+                xyz[i] = linear[ax]["a"] * xyz[i] + linear[ax]["b"]
+    return xyz
+
+
 def point_in_zone(x_mm: float, y_mm: float, z_mm: float, zone: Dict[str, float], margin_mm: float = 0.0) -> bool:
     return (
         zone["x_min"] - margin_mm <= x_mm <= zone["x_max"] + margin_mm
@@ -193,6 +227,53 @@ def speed_from_distance(
 ) -> float:
     v = base_mps + slope_mps_per_m * distance_m
     return max(min_mps, min(max_mps, v))
+
+
+def load_correction_model(path: str) -> Optional[dict]:
+    """Load a GT correction model JSON (from evaluate_ball_static_gt.py).
+
+    Returns dict with 'bias' (3,) and 'linear' {axis: {a, b}} or None.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        print(f"[WARN] correction model not found: {path}")
+        return None
+    with open(p) as f:
+        data = json.load(f)
+    model = {
+        "bias": np.array([
+            data["global_bias_add_mm"]["x"],
+            data["global_bias_add_mm"]["y"],
+            data["global_bias_add_mm"]["z"],
+        ], dtype=np.float64),
+    }
+    if "axis_linear_gt_from_est" in data:
+        model["linear"] = data["axis_linear_gt_from_est"]
+    return model
+
+
+def apply_correction(xyz_mm: np.ndarray, model: Optional[dict], mode: str = "linear") -> np.ndarray:
+    """Apply GT correction model to a 3D position.
+
+    Modes:
+        'bias'   — simple additive bias correction
+        'linear' — per-axis linear fit (gt = a*est + b)
+        'none'   — pass-through
+    """
+    if model is None or mode == "none":
+        return xyz_mm
+    xyz = np.array(xyz_mm, dtype=np.float64)
+    if mode == "bias":
+        return xyz + model["bias"]
+    if mode == "linear" and "linear" in model:
+        lin = model["linear"]
+        for i, ax in enumerate(["x", "y", "z"]):
+            if ax in lin:
+                xyz[i] = lin[ax]["a"] * xyz[i] + lin[ax]["b"]
+        return xyz
+    return xyz + model["bias"]
 
 
 def parse_joint_float_map(spec: str) -> Dict[str, float]:
@@ -401,6 +482,19 @@ def main():
     )
     ap.add_argument("--zone-margin-mm", type=float, default=0.0)
 
+    ap.add_argument(
+        "--correction-model",
+        default="",
+        help="Path to GT correction model JSON (from evaluate_ball_static_gt.py). "
+             "Corrects systematic bias in 3D triangulation.",
+    )
+    ap.add_argument(
+        "--correction-mode",
+        choices=["none", "bias", "linear"],
+        default="linear",
+        help="Correction mode: 'none'=disabled, 'bias'=additive offset, 'linear'=per-axis linear fit (default)",
+    )
+
     ap.add_argument("--launcher-x-mm", type=float, default=600.0)
     ap.add_argument("--launcher-y-mm", type=float, default=1560.0)
     ap.add_argument("--launcher-z-mm", type=float, default=500.0)
@@ -584,11 +678,31 @@ def main():
         default="",
         help="If set, write one JSON line per target decision for reporting",
     )
+    ap.add_argument(
+        "--correction-model",
+        default="",
+        help="Path to GT correction model JSON (from evaluate_ball_static_gt.py). "
+             "Default: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_ball/correction_model.json",
+    )
+    ap.add_argument(
+        "--correction-mode",
+        choices=["none", "bias", "linear"],
+        default="none",
+        help="Correction mode: 'none' = no correction, 'bias' = global mean offset, "
+             "'linear' = per-axis linear fit (most accurate)",
+    )
 
     args = ap.parse_args()
 
     if serial is None:
         raise RuntimeError("pyserial is not installed. Install: ./venv/bin/pip install pyserial")
+
+    # Load correction model if specified
+    correction_model = load_correction_model(args.correction_model) if args.correction_model else None
+    if correction_model is not None:
+        print(f"[OK] Correction model loaded ({args.correction_mode}): bias={correction_model['bias']}")
+    elif args.correction_mode != "none":
+        print("[INFO] No correction model — using raw triangulated positions")
 
     target_order = [x.strip() for x in args.targets.split(",") if x.strip()]
     if not target_order:
@@ -651,6 +765,19 @@ def main():
 
     buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
     launcher_xyz = np.array([args.launcher_x_mm, args.launcher_y_mm, args.launcher_z_mm], dtype=np.float64)
+
+    # Load correction model
+    correction_model = None
+    if args.correction_mode != "none":
+        model_path = args.correction_model or \
+            "garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_ball/correction_model.json"
+        correction_model = load_correction_model(model_path)
+        if correction_model is not None:
+            print(f"[OK] Correction model loaded: {model_path} (mode={args.correction_mode})")
+            bias = correction_model.get("global_bias_add_mm", {})
+            print(f"     Bias: X={bias.get('x',0):.1f} Y={bias.get('y',0):.1f} Z={bias.get('z',0):.1f} mm")
+        else:
+            print(f"[WARN] Correction model not found at {model_path}, running uncorrected")
 
     started = False
     estop = False
@@ -746,6 +873,7 @@ def main():
         decision: str,
         joint_name: Optional[str] = None,
         raw_world_xyz_mm: Optional[np.ndarray] = None,
+        corrected_world_xyz_mm: Optional[np.ndarray] = None,
         transformed_launcher_xyz: Optional[dict] = None,
         calculated_pitch_yaw_v: Optional[dict] = None,
         execution_time_ms: Optional[float] = None,
@@ -757,6 +885,8 @@ def main():
             "timestamp": time.time(),
             "input_joint_name": joint_name,
             "raw_world_xyz_mm": raw_world_xyz_mm.tolist() if isinstance(raw_world_xyz_mm, np.ndarray) else raw_world_xyz_mm,
+            "corrected_world_xyz_mm": corrected_world_xyz_mm.tolist() if isinstance(corrected_world_xyz_mm, np.ndarray) else corrected_world_xyz_mm,
+            "correction_mode": args.correction_mode,
             "transformed_launcher_xyz": transformed_launcher_xyz,
             "calculated_pitch_yaw_v": calculated_pitch_yaw_v,
             "decision": decision,
@@ -935,6 +1065,9 @@ def main():
                 continue
 
             xyz_mm, conf_mean, cams_min, std_mm = stable
+            # Apply GT correction model to compensate systematic extrinsics bias
+            xyz_mm_raw = xyz_mm.copy()
+            xyz_mm = apply_correction(xyz_mm, correction_model, mode=args.correction_mode)
             calc_t0 = time.perf_counter()
             x_lat_m, y_fwd_m, dz_m = world_to_launcher_xy_delta(
                 target_xyz_mm=xyz_mm,
@@ -970,7 +1103,7 @@ def main():
                         f"fallback={yaw_source_fallback_reason}"
                     )
                 else:
-                    source_xyz_mm = source_stable[0]
+                    source_xyz_mm = apply_correction(source_stable[0], correction_model, mode=args.correction_mode)
                     x_lat_src_m, y_fwd_src_m, _ = world_to_launcher_xy_delta(
                         target_xyz_mm=source_xyz_mm,
                         launcher_xyz_mm=launcher_xyz,
@@ -1024,7 +1157,8 @@ def main():
                 log_decision(
                     decision="OUT_OF_RANGE",
                     joint_name=joint,
-                    raw_world_xyz_mm=xyz_mm,
+                    raw_world_xyz_mm=xyz_mm_raw,
+                    corrected_world_xyz_mm=xyz_mm,
                     transformed_launcher_xyz={
                         "x_lateral_m": x_lat_m,
                         "y_forward_m": y_fwd_m,
@@ -1062,7 +1196,8 @@ def main():
                 log_decision(
                     decision="OUT_OF_RANGE",
                     joint_name=joint,
-                    raw_world_xyz_mm=xyz_mm,
+                    raw_world_xyz_mm=xyz_mm_raw,
+                    corrected_world_xyz_mm=xyz_mm,
                     transformed_launcher_xyz={
                         "x_lateral_m": x_lat_m,
                         "y_forward_m": y_fwd_m,
@@ -1172,7 +1307,8 @@ def main():
                         log_decision(
                             decision="HOLD_SUMMARY",
                             joint_name=joint,
-                            raw_world_xyz_mm=xyz_mm,
+                            raw_world_xyz_mm=xyz_mm_raw,
+                            corrected_world_xyz_mm=xyz_mm,
                             execution_time_ms=0.0,
                             extra={
                                 "hold_requested_sec": hold_sec,
@@ -1216,7 +1352,8 @@ def main():
             log_decision(
                 decision="OK",
                 joint_name=joint,
-                raw_world_xyz_mm=xyz_mm,
+                raw_world_xyz_mm=xyz_mm_raw,
+                corrected_world_xyz_mm=xyz_mm,
                 transformed_launcher_xyz={
                     "x_lateral_m": x_lat_m,
                     "y_forward_m": y_fwd_m,

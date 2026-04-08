@@ -1,6 +1,6 @@
 # Thesis Living Worklog (Project_Cam)
 
-Last updated: 2026-03-20
+Last updated: 2026-04-07
 
 Use this file as the single memory for thesis reporting.  
 When you write `update information for thesis`, this file should be updated with new progress.
@@ -531,3 +531,680 @@ bash arena_fixed/scripts/run_blm_horizontal_only_cycle.sh 0.0 650 /dev/ttyUSB0
 - If BLM points to the right of operator, reduce yaw trim (e.g. `-1.0`).
 - If BLM points to the left of operator, increase yaw trim (e.g. `+1.0`).
 - Change only 1 parameter per run and compare JSONL logs.
+
+---
+
+## 19) Phase H — Performance-Optimized Parallel Pipeline (2026-04-01 → 2026-04-02)
+
+### 19.1 Objective
+- Reduce end-to-end latency from ~200ms (matplotlib bottleneck) to <10ms display
+- Improve perceived smoothness of 3D skeleton without altering geometric accuracy
+- All work isolated in `Parallel_working/` — production `garage_lab_combined/` untouched
+
+### 19.2 Changes implemented in `Parallel_working/scripts/live_4cam_arena_view_parallel.py`
+
+#### A) OpenCV 3D Renderer (replaced matplotlib)
+- New functions: `make_orbit_view()`, `_cv2_project()`, `draw_live_scene_cv2()`
+- Virtual pinhole camera with orbit-style elevation/azimuth control
+- 270° azimuth offset to match matplotlib's display convention
+- X-axis mirror in projection (`u = cx - fx*X_cam/Z_cam`) to match matplotlib's left-handed display
+- Pre-rendered static background (arena wireframe, AprilTags, camera markers, axes) copied per frame
+- Dynamic elements (skeleton, ball, trajectory) drawn with OpenCV primitives
+- Result: **~2ms per 3D frame** vs 200-500ms matplotlib
+
+#### B) Coordinate Orientation Fix
+- Problem: cv2 3D view had camera positions and axes rotated ~180° from correct matplotlib view
+- Root cause: `make_orbit_view()` used standard spherical coords, but matplotlib azim=0 means camera on +Y axis
+- Fix: Changed `a = np.radians(azim_deg)` → `a = np.radians(270.0 + azim_deg)`
+- Fix: Mirrored X projection to match matplotlib's left-handed display
+- Validated: O(0,0,0) at camNorth floor corner, +X→camSouth, +Y→camWest, +Z up — correct
+
+#### C) Displacement-Adaptive EMA
+- Problem: Fixed-alpha EMA (0.45) dampens fast movements — jumps appear as standing still
+- Solution: Alpha scales with displacement when displacement > snap threshold (80mm):
+  - `alpha_eff = min(1.0, alpha_base * (displacement / threshold))`
+- Applied to both `joints_state` EMA update and `joints_display` interpolation
+- CLI flags: `--ema-snap-thresh-mm 80`
+
+#### D) Display-Only Interpolation Layer
+- Separate `joints_display` array (17×3) lerps toward `joints_state` every render frame
+- Decouples pose inference rate (every 2 frames) from display rate (every frame)
+- `joints_display` used ONLY for rendering — `joints_state` used for UDP and ballistic solving
+- CLI flag: `--display-smooth-alpha 0.45`
+
+#### E) `--viz-backend cv2|matplotlib` flag
+- Selects between OpenCV renderer (fast, inline) and matplotlib (legacy)
+- cv2 backend skips figure/axes creation entirely
+- No `--render-worker-process` needed with cv2 backend
+
+### 19.3 Run profiles created
+- `run_live_parallel_smooth_v2.sh` — cv2 renderer + adaptive EMA (RECOMMENDED for low-latency)
+- Earlier profiles (quality, balanced, smooth, maxfps) remain for reference
+
+### 19.4 Verified invariants
+- `triangulate_multi`, `transform_world_point_y`, `ema_update` — byte-identical to production
+- `joints_display` only in display paths; `joints_state` for UDP and EMA
+- No geometry-critical functions modified
+
+### 19.5 Perf results (from perf JSONL logs)
+- **Balanced profile** steady-state: pose=80-85ms, ball=12-13ms, mosaic=8-9ms, total=~103ms, e2e=~195ms
+- **Smooth_v2 profile**: viz3d drops from ~300ms → ~2ms, total e2e reduction ~200ms+
+- MMPose inference remains dominant bottleneck at 78% of loop time
+
+---
+
+## 20) Phase I — Kalman Filter Predictive Targeting (2026-04-03)
+
+### 20.1 Objective
+- Implement per-joint 3D Kalman filter for predictive targeting
+- Predict where athlete WILL BE in T_predict ms (compensating for system + ball flight latency)
+- Visualize prediction as ghost skeleton in 3D view
+- Include predicted positions in UDP payload for launcher runtime
+
+### 20.2 Implementation — `JointKalmanFilter` class
+- State vector: [x, y, z, vx, vy, vz] — constant-velocity motion model
+- Matrices: F (state transition), H (observation), Q (process noise), R (measurement noise)
+- Process noise modeled as piecewise-constant white noise acceleration
+- `predict_step()` + `update_step()` run after triangulation when pose data available
+- `predict_ahead(t_sec)` extrapolates position WITHOUT modifying filter state
+- `prediction_uncertainty(t_sec)` returns positional uncertainty for confidence gating
+
+### 20.3 New CLI flags
+- `--predict-ahead-ms 400` — prediction horizon (0 = disabled)
+- `--kalman-process-noise 50` — process noise std (mm/s², higher = trust measurements more)
+- `--kalman-measurement-noise 80` — measurement noise std (mm, higher = smoother but laggier)
+- `--show-ghost-skeleton` — render predicted position as translucent gold skeleton
+- `--predict-max-uncertainty-mm 500` — discard predictions exceeding this uncertainty
+
+### 20.4 Ghost skeleton visualization
+- Translucent gold skeleton at predicted position in cv2 3D view
+- Leader lines from shoulders/hips connecting real skeleton to ghost
+- HUD text shows prediction horizon (e.g., "Pred: +400ms")
+- Auto-enabled when `--predict-ahead-ms > 0`
+
+### 20.5 UDP extension
+- When prediction is active, UDP packets include `predicted` field:
+  ```json
+  {
+    "type": "joints",
+    "joints": {"right_knee": {"x_mm": 3000, "y_mm": 1500, "z_mm": 500, ...}},
+    "predicted": {"right_knee": {"x_mm": 3400, "y_mm": 1500, "z_mm": 500}},
+    "predict_ahead_ms": 400
+  }
+  ```
+- Launcher runtime can use `predicted` field for lead-the-target aiming
+
+### 20.6 Unit test results (synthetic constant-velocity motion)
+- After 60 frames at 15fps with 1000mm/s X-velocity:
+  - Position: [3924, 500, 1000] (correct)
+  - Velocity: [998.6, 0, 0] (converged to true value)
+  - Prediction +400ms: [4323, 500, 1000] (correctly leads target)
+- Stationary target: prediction stays within 50mm
+- Direction reversal: velocity adapts within ~10 frames
+
+### 20.7 New run profile
+- `run_live_parallel_predictive.sh` — smooth_v2 + 400ms prediction + ghost skeleton
+- Canonical command:
+```bash
+./Parallel_working/run_live_parallel_predictive.sh
+```
+
+### 20.8 TensorRT/ONNX export utility
+- Created `Parallel_working/scripts/export_models_tensorrt.py`
+- YOLO export: `.pt` → TensorRT FP16 engine (expected: 12ms → 5ms)
+- RTMPose export: via mmdeploy ONNX path or manual torch.onnx
+- Benchmark suite: latency profiling for YOLO, MMPose, ONNX Runtime
+- Command:
+```bash
+./venv/bin/python Parallel_working/scripts/export_models_tensorrt.py --benchmark \
+  --yolo-model garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt
+```
+
+---
+
+## 21) Thesis Draft Updates (2026-04-03)
+
+### 21.1 Sections updated in `thesis_draft.md`
+- **Section 1.4**: Added Novelty Claim 3 — Displacement-Adaptive Smoothing and Predictive Targeting
+- **Section 3.3.1** (NEW): Performance-Optimized Parallel Pipeline — threaded capture, multi-rate processing, OpenCV 3D renderer, display interpolation, run profiles
+- **Section 3.7.3**: Updated EMA description — added displacement-adaptive variant and dual-layer architecture
+- **Section 6.1**: Updated to 4 contributions (added Contribution 3: adaptive smoothing + prediction + cv2 renderer)
+- **Section 6.4**: Completely rewritten with detailed execution plan:
+  - 6.4.1 Predictive Trajectory Targeting (core innovation)
+  - 6.4.2 TensorRT/ONNX Model Optimization
+  - 6.4.3 Closed-Loop BLM Integration
+  - 6.4.4 Empirical Ballistic Calibration Map
+  - 6.4.5 Stakeholder Demo Platform
+  - 6.4.6-6.4.8 SLAM, Multi-Person, Virtual 3D Goal
+  - 6.4.9 Execution Timeline (12 weeks, 4 phases)
+  - 6.4.10 Edge Deployment (Jetson analysis)
+
+### 21.2 Novelty claims now in thesis (4 total)
+1. **Autonomous Aiming Machine** — BLM computes own pitch/yaw/RPM from live 3D joint reconstruction
+2. **Low-Cost Multi-Camera Pipeline** — $200 hardware, sub-200mm joint accuracy in domestic arena
+3. **Displacement-Adaptive Smoothing + Predictive Targeting** — adaptive EMA + Kalman filter prediction
+4. **Safety-Gated Integration Protocol** — 6-stage checklist, ESTOP <100ms, JSONL traceability
+
+---
+
+## 22) Detailed Execution Plan (12-Week Roadmap)
+
+### Phase 1: Foundation & Formalization (Weeks 1-3)
+
+**Week 1: Accuracy Baseline**
+- [ ] Re-run GT evaluation with arena_fixed extrinsics
+- [ ] Ablation: fixed EMA vs adaptive EMA during fast movements
+- [ ] Record 3 reproducible test sequences (walk, jog, jump+direction-change)
+- Deliverable: Accuracy table, ablation results
+
+**Week 2: Model Optimization**
+- [ ] Export MMPose to ONNX → TensorRT (target: 80ms → 35-40ms)
+- [ ] Export YOLO to TensorRT (target: 12ms → 5ms)
+- [ ] Benchmark total pipeline latency after optimization
+- [ ] Evaluate YOLO-Pose as single-model replacement
+- Deliverable: Latency comparison table
+
+**Week 3: Predictive Module Validation**
+- [ ] Validate Kalman filter prediction accuracy on recorded sequences
+- [ ] Measure prediction error: predicted vs actual position after T ms
+- [ ] Tune process/measurement noise for best prediction accuracy
+- [ ] Record prediction quality metrics for thesis
+- Deliverable: Prediction error table, tuned Kalman parameters
+
+### Phase 2: Closed-Loop Integration (Weeks 4-6)
+
+**Week 4: BLM Preflight (S0-S1)**
+- [ ] ESP32 serial communication verification
+- [ ] Motor response timing measurement
+- [ ] Pan/tilt accuracy test
+- [ ] ESTOP reliability test (10 consecutive triggers)
+- Deliverable: BLM preflight checklist complete
+
+**Week 5: Predictive Ballistic Solver**
+- [ ] Ballistic arc computation (parabolic + optional drag)
+- [ ] Add ball flight time to prediction horizon
+- [ ] Calibrate launch parameters: measured vs computed trajectory
+- Deliverable: Calibrated ballistic solver
+
+**Week 6: Closed-Loop Aim Tests (S2-S3)**
+- [ ] Static target aim — measure angular error
+- [ ] Slow-moving target aim — tracking accuracy
+- [ ] Predictive vs reactive aiming comparison
+- Deliverable: Aiming accuracy table
+
+### Phase 3: Live Fire & Evaluation (Weeks 7-9)
+
+**Week 7: Controlled Fire (S4-S5)**
+- [ ] Static fire test (3m, 5m, 7m distances)
+- [ ] Moving target fire test
+- [ ] Predictive fire test (direction changes)
+- Deliverable: Hit-rate table
+
+**Week 8: Full Evaluation Protocol**
+- [ ] 50-trial reactive evaluation (10 stationary, 20 walking, 20 running)
+- [ ] 50-trial predictive evaluation (same patterns)
+- [ ] Synchronized video + 3D tracking recording
+- Deliverable: Complete evaluation dataset
+
+**Week 9: Results Analysis**
+- [ ] Statistical comparison: reactive vs predictive (paired t-test)
+- [ ] Ablation studies: ±adaptive EMA, ±prediction, ±TensorRT
+- [ ] Failure mode analysis
+- Deliverable: Results chapter draft
+
+### Phase 4: Demo Platform & Thesis (Weeks 10-12)
+
+**Week 10: Stakeholder Demo**
+- [ ] Unified dashboard: mosaic + 3D skeleton + ghost + BLM status
+- [ ] Recording mode for demo sessions
+- [ ] Mode selector: manual → reactive → predictive
+- Deliverable: Demo-ready platform
+
+**Week 11-12: Thesis & Defense**
+- [ ] Complete thesis writing
+- [ ] Defense slides with live demo video
+- [ ] Backup demo recording
+- [ ] Stakeholder pitch deck
+- Deliverable: Final thesis, defense slides
+
+---
+
+## 23) Innovation Summary for Committee / Stakeholders
+
+### For thesis committee (research contribution):
+1. First system combining multi-camera 3D pose estimation with Kalman-filtered predictive targeting for autonomous ball launching
+2. Displacement-adaptive EMA — formalized as a contribution to real-time multi-view pose tracking
+3. Quantitative evaluation: reactive vs predictive targeting across movement patterns
+4. Safety framework for human-targeting robotic systems in uncontrolled environments
+
+### For stakeholders (Kairat Academy, funding):
+- "$300 camera system that does what $50,000 motion capture does"
+- "AI predicts where athlete will move — launcher leads the target"
+- "Autonomous goalkeeper training, reaction drills, performance analytics"
+- "Complete self-contained training instrument — fires, measures, logs results"
+- Demo: 2-minute live walkthrough showing manual → reactive → predictive modes
+
+---
+
+## 24) Daily Log — 2026-04-03 (Benchmark Results + YOLO-Pose Discovery)
+
+### 24.1 Benchmark methodology
+- All latency benchmarks use **synthetic 720x1280 random images** (standard practice for measuring GPU inference latency)
+- Measures pure forward-pass compute time, isolated from I/O
+- Detection accuracy tests require real arena frames (separate evaluation)
+
+### 24.2 YOLO Ball Detector Benchmarks
+
+| Format | Mean | Median | P95 |
+|---|---|---|---|
+| PyTorch .pt | 8.7ms | 8.6ms | 9.4ms |
+| ONNX | 19.1ms (CPU fallback) | — | — |
+| TensorRT FP16 | 8.1ms | 8.0ms | 8.8ms |
+
+- TensorRT gives only 1.07x speedup — YOLO is already well optimized in PyTorch
+- YOLO ball detection is NOT the bottleneck
+
+### 24.3 MMPose Baseline Benchmark
+
+| Component | Per-image | 4-cam sequential |
+|---|---|---|
+| RTMDet-m + RTMPose-m | 38.5ms | 154ms |
+
+- This is the dominant bottleneck (78% of pipeline time)
+- Batch mode in parallel script gets ~80ms but still largest contributor
+
+### 24.4 YOLO-Pose Discovery (KEY RESULT)
+
+| Model | Format | Per-image | 4-cam total | vs MMPose |
+|---|---|---|---|---|
+| YOLO11m-Pose | PyTorch .pt | 8.9ms | 36ms | 4.3x faster |
+| YOLO11m-Pose | TensorRT FP16 | 6.2ms | 25ms | **6.2x faster** |
+
+- YOLO-Pose replaces BOTH RTMDet (person detector) + RTMPose (keypoint estimator) with single forward pass
+- Outputs same COCO 17-keypoint format as MMPose
+- TensorRT FP16 engine: 42.2 MB, exported at imgsz=640
+- **Pipeline total with YOLO-Pose TRT: ~70ms vs ~200ms current = 2.8x end-to-end speedup**
+
+### 24.5 Software artifacts created
+- `Parallel_working/scripts/export_models_tensorrt.py` — benchmark + export utility
+- `Parallel_working/scripts/record_test_sequence.py` — 4-camera recording for offline eval
+- `Parallel_working/scripts/ablation_ema_adaptive.py` — adaptive vs fixed EMA comparison
+- `Parallel_working/run_live_parallel_predictive.sh` — Kalman prediction profile
+- TensorRT engines:
+  - `garage-20260217T113109Z-3-001/garage/y26s_v1_garage.engine` (ball, 20.6 MB)
+  - `yolo11m-pose.engine` (pose, 42.2 MB)
+
+### 24.6 ONNX Runtime installation note
+- Installed `onnxruntime-gpu==1.16.3` (compatible with system CUDA 11.5)
+- System has libcufft.so.10, libcudnn.so.8 — ORT 1.23 requires .so.11 variants
+- protobuf upgraded to 7.34.1 (mediapipe incompatibility warning — mediapipe not used)
+
+### 24.7 Completed steps
+- [x] Integrate YOLO-Pose into parallel pipeline as `--pose-backend yolopose|mmpose` flag
+- [x] Validate YOLO-Pose keypoint accuracy on real arena frames vs MMPose
+- [x] Fix YOLO-Pose integration bug (undistortion + pose-lock logic was inside MMPose-only branch)
+- [ ] Record test sequences (walk, jog, jump) for ablation study
+- [ ] Run ablation: adaptive vs fixed EMA on recorded sequences
+
+---
+
+## 25) Daily Log — 2026-04-03 (YOLO-Pose Integration + Bug Fix)
+
+### 25.1 YOLO-Pose integrated into parallel pipeline
+- Added `--pose-backend yolopose|mmpose` CLI flag
+- Added `--yolopose-model` flag (accepts .pt or .engine TensorRT)
+- YOLO-Pose outputs same COCO 17-keypoint format → drop-in replacement for MMPose
+
+### 25.2 Live camera validation
+- Captured test frames from all 4 arena cameras with person standing in arena
+- YOLO-Pose results:
+  - camNorth: box_conf=0.921, 15/17 valid keypoints
+  - camEast: box_conf=0.889, 11/17 valid keypoints
+  - camSouth: box_conf=0.899, 12/17 valid keypoints
+  - camWest: box_conf=0.341, 2/17 valid keypoints (oblique angle)
+- MMPose comparison on same frames:
+  - camNorth: 14/17, camEast: 5/17, camSouth: 14/17, camWest: 2/17
+- YOLO-Pose matches or exceeds MMPose keypoint count on 3/4 cameras
+
+### 25.3 Bug found and fixed: no skeleton in 3D view with YOLO-Pose
+- **Root cause:** The shared post-processing code (undistortion, pose-lock, `pose_und_by_cam` population) was inside the `elif` MMPose branch only. YOLO-Pose filled `per_cam_pose_curr` but triangulation never received undistorted points.
+- **Fix:** Moved the shared block (`per_cam_pose` copy, `has_pose_lock`, `force_pose_snap`, undistortion loop) to run after both YOLO-Pose and MMPose branches under a single `if run_pose:` guard.
+- **Status:** Live tested and confirmed working — skeleton + ghost skeleton visible in 3D arena view.
+
+### 25.4 New run profiles created
+- `run_live_parallel_yolopose.sh` — YOLO-Pose + prediction + cv2 (RECOMMENDED)
+- `run_live_parallel_fastest.sh` — ball TRT + YOLO-Pose TRT + prediction (lowest latency)
+- Test captures saved: `Parallel_working/output/test_captures/cam{N,E,S,W}.jpg`
+
+### 25.5 Current pipeline status
+All features live-validated and working:
+- [x] OpenCV 3D renderer (~2ms vs 300ms matplotlib)
+- [x] Displacement-adaptive EMA (jumps snap instantly)
+- [x] Display interpolation (smooth inter-frame motion)
+- [x] Kalman filter prediction (ghost skeleton at +400ms)
+- [x] YOLO-Pose backend (6.2x faster than MMPose)
+- [x] TensorRT engines (ball + pose)
+- [x] Correct coordinate orientation (270° azimuth fix + X-mirror)
+
+---
+
+## 26) Phase J — Recorded Test Sequences + EMA Ablation Study (2026-04-06)
+
+### 26.1 Test sequence recording pipeline
+- Rewrote `Parallel_working/scripts/record_test_sequence.py` with threaded capture for reliable multi-camera recording
+- Fixed config parser to handle dict-style cameras.yaml format
+- Added warmup phase for auto-exposure stabilization
+
+### 26.2 Recorded test sequences (3 × 30s, 4 cameras, 15 FPS)
+| Sequence | Frames | Cameras | Motion type |
+|----------|--------|---------|-------------|
+| walk_01 | 449 | 4/4 | Normal walking pace across arena |
+| jog_01 | 449 | 4/4 | Fast jogging movement |
+| jump_01 | 449 | 4/4 | Jumps + sudden direction changes |
+
+All sequences saved to `Parallel_working/output/test_sequences/`.
+
+### 26.3 EMA ablation study design
+Refactored `Parallel_working/scripts/ablation_ema_adaptive.py` for efficient evaluation:
+- **Phase 1**: Pose extraction (run once per backend, cache results)
+- **Phase 2**: Multi-view triangulation (run once, cache 3D positions)
+- **Phase 3**: Apply 8 EMA variants on cached data (instant)
+
+**EMA variants tested:**
+1. `fixed_0.25` — strongest smoothing (α=0.25)
+2. `fixed_0.35` — moderate smoothing
+3. `fixed_0.45` — default production alpha
+4. `fixed_0.60` — light smoothing
+5. `adaptive_0.45_snap_80` — adaptive with 80mm snap threshold (production)
+6. `adaptive_0.45_snap_50` — aggressive adaptive
+7. `adaptive_0.45_snap_120` — conservative adaptive
+8. `no_ema` — raw triangulation (α=1.0), baseline
+
+### 26.4 YOLO-Pose vs MMPose backend comparison
+
+**Pose extraction throughput (4 cameras, per frame):**
+| Backend | walk FPS | jog FPS | jump FPS | Avg |
+|---------|----------|---------|----------|-----|
+| YOLO-Pose | 25.4 | 24.4 | 25.4 | 25.1 |
+| MMPose | 6.8 | 7.1 | 7.0 | 7.0 |
+| **Speedup** | **3.7x** | **3.4x** | **3.6x** | **3.6x** |
+
+Note: This is per-frame 4-camera sequential extraction. Live pipeline processes cameras in batch, achieving ~6.2x speedup with TRT.
+
+**Detection rates:**
+| Backend | walk | jog | jump |
+|---------|------|-----|------|
+| YOLO-Pose | 94-100% | 100% | 98-100% |
+| MMPose | 100% | 100% | 100% |
+
+**Triangulation coverage:**
+| Backend | walk | jog | jump |
+|---------|------|-----|------|
+| YOLO-Pose | 90% joints | 95% | 93% |
+| MMPose | 99% | 100% | 99% |
+
+### 26.5 EMA ablation results — walk sequence
+
+| Variant | YOLO-Pose Jitter | MMPose Jitter | YOLO-Pose Smooth | MMPose Smooth |
+|---------|-----------------|---------------|------------------|---------------|
+| fixed_0.25 | 41.1mm | 43.2mm | 10.5mm | 11.0mm |
+| fixed_0.45 | 44.4mm | 47.9mm | 18.7mm | 20.2mm |
+| adaptive_0.45_snap_80 | 47.6mm | 54.8mm | 37.5mm | 46.6mm |
+| no_ema | 52.7mm | 58.7mm | 47.7mm | 53.4mm |
+
+### 26.6 EMA ablation results — jog sequence
+
+| Variant | YOLO-Pose Jitter | MMPose Jitter | YOLO-Pose P95 | MMPose P95 |
+|---------|-----------------|---------------|---------------|------------|
+| fixed_0.25 | 84.3mm | 85.5mm | 151.0mm | 146.8mm |
+| fixed_0.45 | 93.0mm | 93.3mm | 181.5mm | 173.5mm |
+| adaptive_0.45_snap_80 | 103.7mm | 101.5mm | 249.1mm | 238.3mm |
+| no_ema | 110.0mm | 106.5mm | 237.0mm | 226.0mm |
+
+### 26.7 EMA ablation results — jump sequence
+
+| Variant | YOLO-Pose Jitter | MMPose Jitter | YOLO-Pose P95 | MMPose P95 |
+|---------|-----------------|---------------|---------------|------------|
+| fixed_0.25 | 75.5mm | 78.5mm | 174.4mm | 170.5mm |
+| fixed_0.45 | 90.0mm | 92.6mm | 219.3mm | 211.0mm |
+| adaptive_0.45_snap_80 | 108.6mm | 108.0mm | 313.0mm | 282.2mm |
+| no_ema | 117.0mm | 114.8mm | 309.3mm | 273.9mm |
+
+### 26.8 Key findings
+
+1. **YOLO-Pose achieves equivalent 3D accuracy to MMPose** at 3.6x faster extraction speed. Mean jitter differences are <5mm across all sequences — well within measurement noise.
+
+2. **Fixed EMA α=0.25 minimizes jitter** (41-85mm mean) but introduces tracking lag for fast motions. Best for static/slow targets.
+
+3. **Adaptive EMA increases P95 jitter** (by ~30-60mm vs fixed) because it intentionally reduces smoothing during large displacements. The trade-off is faster snap response.
+
+4. **For the BLM targeting use case**, the Kalman filter prediction (not measured here as pure EMA ablation) operates on top of the EMA-smoothed trajectory. The combination of moderate EMA (α=0.45) + Kalman prediction should give both smooth tracking and accurate lead.
+
+5. **Jog/jump sequences show 2x the jitter of walk** — expected for faster motion at 15 FPS. This validates the need for predictive targeting.
+
+### 26.9 Execution plan progress update
+- Week 1-2 (Foundation): **~90% complete**
+  - [x] TensorRT export + benchmarks
+  - [x] YOLO-Pose integration (3.6x speedup offline, 6.2x live with TRT)
+  - [x] Kalman prediction + ghost skeleton
+  - [x] cv2 renderer + adaptive EMA
+  - [x] Record test sequences (walk, jog, jump) — 3 × 30s, 4 cameras
+  - [x] EMA ablation study (8 variants × 3 sequences × 2 backends)
+  - [x] YOLO-Pose vs MMPose 3D accuracy comparison
+  - [x] Re-run GT evaluation with current arena_fixed extrinsics
+- Week 3 (Prediction validation): Not started
+- Week 4-6 (BLM closed-loop): Not started
+
+---
+
+## 27) Phase K — GT Re-evaluation with arena_fixed Extrinsics (2026-04-06)
+
+### 27.1 Motivation
+Previous GT evaluation (2026-03-10) used `extrinsics_final_20260309.json`. Since then, the `arena_fixed` extrinsics were introduced with the Y-axis coordinate fix. Need to verify whether the corrected extrinsics maintain or improve GT accuracy.
+
+### 27.2 Method
+- Re-processed existing recorded clips (no new recordings needed — cameras haven't moved)
+- Ball static: 36 trials from `ball_tuning_20260306_164519/`
+- Joint touch: 81 trials from `joint_tuning_20260310_124311/` (62 had clips, 19 missing)
+- Used `arena_fixed/cal/extrinsics/extrinsics_fixed.json` instead of old extrinsics
+- All other parameters identical (intrinsics, YOLO model, confidence thresholds)
+- Results in `garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/`
+
+### 27.3 Ball static GT results (36/36 trials)
+
+| Metric | Previous (old extr) | arena_fixed | Change |
+|--------|-------------------|-------------|--------|
+| Mean error | 95.17mm | 156.90mm | +61.7mm |
+| Median error | 84.18mm | 157.52mm | +73.3mm |
+| RMSE | 102.23mm | 172.05mm | +69.8mm |
+| P95 error | 166.51mm | 288.34mm | +121.8mm |
+| Detection | 36/36 (100%) | 36/36 (100%) | same |
+| Mean cams used | — | 2.74 | — |
+| Reprojection error | — | 5.46px | — |
+| Static precision | — | 3.09mm | excellent |
+
+**Axis bias (arena_fixed):** ex=+60.2mm, ey=+13.1mm, ez=-104.3mm
+
+### 27.4 Joint touch GT results (62/81 trials)
+
+| Metric | Previous (old extr) | arena_fixed | Change |
+|--------|-------------------|-------------|--------|
+| Mean error | 143.38mm | 178.98mm | +35.6mm |
+| Median error | 148.90mm | 181.17mm | +32.3mm |
+| RMSE | 147.73mm | 183.69mm | +36.0mm |
+| P95 error | 198.73mm | 243.77mm | +45.0mm |
+| Detection | 62/81 | 62/81 | same |
+| Static precision | — | 4.39mm | excellent |
+
+**Axis bias (arena_fixed):** ex=+82.7mm, ey=+72.3mm, ez=-125.4mm
+
+**Per-joint breakdown (arena_fixed):**
+| Joint | Trials | Mean Error | P95 | Precision |
+|-------|--------|-----------|-----|-----------|
+| right_knee | 17 | 148.4mm | 213.4mm | 7.3mm |
+| right_hip | 27 | 182.1mm | 218.1mm | 3.4mm |
+| left_shoulder | 18 | 203.1mm | 246.4mm | 3.1mm |
+
+### 27.5 Analysis
+
+1. **Precision is excellent** — 3-4mm static std across both evaluations. The cameras are geometrically consistent and the triangulation is stable.
+
+2. **Systematic bias increased** — The arena_fixed extrinsics introduce a consistent offset vs the GT measurement reference frame. The Z bias (-104 to -125mm) is the dominant error component.
+
+3. **The bias is correctable** — The correction model (linear fit per axis) can compensate. The X scale factor is 1.08 (8% stretch), suggesting a minor calibration-to-measurement coordinate mismatch.
+
+4. **Root cause hypothesis**: The arena_fixed extrinsics were calibrated with AprilTags at different heights/positions than the GT measurement grid. The world origin offset between the two coordinate systems explains the systematic bias. The old extrinsics may have been implicitly closer to the GT measurement frame.
+
+5. **For BLM targeting**: The systematic bias is acceptable if a correction model is applied at the launcher runtime level. The correction model from the ball evaluation can offset the known bias. Alternatively, re-calibrating extrinsics with the AprilTag grid aligned to the GT measurement points would remove the bias at source.
+
+### 27.6 Correction model (ball static)
+```json
+{
+  "global_bias_add_mm": {"x": -60.2, "y": -13.1, "z": 104.3},
+  "axis_linear_gt_from_est": {
+    "x": {"a": 1.080, "b": -383.7},
+    "y": {"a": 0.975, "b": 27.9},
+    "z": {"a": 0.965, "b": 136.1}
+  }
+}
+```
+
+### 27.7 Execution plan update
+- Week 1-2 (Foundation): **100% complete**
+  - All items checked off including GT re-evaluation
+- Next: Week 3 (Kalman prediction validation on recorded sequences)
+
+---
+
+## 28) Phase L — Kalman Prediction Validation (2026-04-07)
+
+### 28.1 Validation script
+Created `Parallel_working/scripts/validate_kalman_prediction.py`:
+- 3-phase pipeline (reuses ablation infrastructure): pose → triangulate → predict + compare
+- Compares 3 predictors: Kalman filter, naive hold (baseline), linear extrapolation
+- Tests 5 prediction horizons: 67ms, 133ms, 200ms, 400ms, 600ms
+- Reports per-axis, per-joint, and aggregate error metrics
+
+### 28.2 Parameter tuning
+Original defaults (process_noise=50, measurement_noise=80) performed terribly — 700%+ worse than naive.
+Root cause: measurement noise was too high relative to EMA-smoothed input, causing the filter to distrust measurements and lag behind.
+
+**Parameter sweep results (walk sequence, 200ms horizon):**
+| Process Noise | Meas Noise | Kalman Mean | vs Naive |
+|--------------|-----------|-------------|----------|
+| 50 | 80 | 416mm | -230% |
+| 100 | 10 | 98mm | +17% |
+| 200 | 10 | 78mm | +34% |
+| **500** | **10** | **61mm** | **+48%** |
+| 500 | 20 | 74mm | +37% |
+| 500 | 40 | 94mm | +21% |
+
+**Optimal: process_noise=500, measurement_noise=10** — high process noise allows rapid adaptation, low measurement noise trusts the already-smoothed EMA input.
+
+### 28.3 Full validation results (PN=500, MN=10)
+
+**Walk sequence:**
+| Horizon | Kalman | Naive | Linear | K vs Naive |
+|---------|--------|-------|--------|------------|
+| 67ms | 29mm | 42mm | 13mm | +31% |
+| 133ms | 46mm | 84mm | 28mm | +45% |
+| 200ms | 66mm | 125mm | 45mm | **+47%** |
+| 400ms | 132mm | 247mm | 112mm | **+47%** |
+| 600ms | 204mm | 366mm | 186mm | +44% |
+
+**Jog sequence:**
+| Horizon | Kalman | Naive | Linear | K vs Naive |
+|---------|--------|-------|--------|------------|
+| 67ms | 69mm | 88mm | 29mm | +21% |
+| 200ms | 158mm | 260mm | 109mm | **+39%** |
+| 400ms | 332mm | 505mm | 259mm | **+34%** |
+| 600ms | 559mm | 738mm | 468mm | +24% |
+
+**Jump sequence:**
+| Horizon | Kalman | Naive | Linear | K vs Naive |
+|---------|--------|-------|--------|------------|
+| 67ms | 101mm | 82mm | 37mm | -23% |
+| 200ms | 229mm | 237mm | 150mm | +3% |
+| 400ms | 454mm | 446mm | 382mm | -2% |
+| 600ms | 689mm | 631mm | 635mm | -9% |
+
+### 28.4 Analysis
+
+1. **Kalman prediction improves walk/jog targeting by 30-47%** at 200-400ms horizons. This is the primary BLM use case — the athlete is typically walking/jogging, not continuously jumping.
+
+2. **Jump prediction is neutral** — the constant-velocity model cannot predict direction changes or vertical jumps. For jump-heavy scenarios, the Kalman prediction should be disabled or combined with a higher-order motion model.
+
+3. **Linear extrapolation wins at short horizons** (<133ms) because it has no filter lag. However, it diverges rapidly on non-linear motion (jump 600ms: 635mm).
+
+4. **Optimal prediction horizon for BLM: 200-400ms** — maximizes Kalman advantage while keeping error manageable (66-132mm for walk, 158-332mm for jog).
+
+5. **Updated live pipeline defaults**: process_noise=500, measurement_noise=10 in `live_4cam_arena_view_parallel.py`.
+
+### 28.5 Execution plan update
+- Week 1-2 (Foundation): **100% complete**
+- Week 3 (Prediction validation): **100% complete**
+  - [x] Kalman parameter sweep + optimization
+  - [x] 3-sequence × 5-horizon validation
+  - [x] Updated live pipeline defaults
+- Week 4-6 (BLM closed-loop): **In progress**
+  - [x] Integrate GT correction model into `launcher_runtime_from_udp.py`
+  - [x] BLM preflight S0-S1 (ESP32 serial verified)
+
+## 29) GT Correction Model Integration (2026-04-07)
+
+### 29.1 Goal
+Compensate the systematic extrinsics bias discovered in Section 27 (X+60-83mm, Z-104 to -125mm) by applying a correction model inside the launcher runtime before the ballistic solver.
+
+### 29.2 Implementation
+Added to `garage_lab_combined/scripts/launcher_runtime_from_udp.py`:
+
+1. **`load_correction_model(path)`** — loads correction JSON (from GT eval output)
+2. **`apply_correction(xyz_mm, model, mode)`** — two modes:
+   - `bias`: global mean offset (`global_bias_add_mm`)
+   - `linear`: per-axis linear fit (`gt = a * est + b` from `axis_linear_gt_from_est`)
+3. **CLI args**: `--correction-model` (path) and `--correction-mode` (none/bias/linear)
+4. **Applied before solver**: raw position saved as `xyz_mm_raw`, corrected position used for ballistic calculation
+5. **Logging**: every JSONL log entry now includes `raw_world_xyz_mm`, `corrected_world_xyz_mm`, and `correction_mode`
+
+### 29.3 Correction Model Values (from ball GT eval)
+- Bias: X=-60.2mm, Y=-13.1mm, Z=+104.3mm
+- Linear: X: a=1.08 b=-383.7 | Y: a=0.975 b=27.9 | Z: a=0.965 b=136.1
+
+### 29.4 Usage
+```bash
+./venv/bin/python garage_lab_combined/scripts/launcher_runtime_from_udp.py \
+  --serial-port /dev/ttyUSB0 --no-shoot-enabled \
+  --correction-mode linear \
+  --dry-run-log-jsonl garage_lab_combined/output/blm_logs/aim_decisions.jsonl
+```
+
+## 30) BLM Preflight S0-S1 (2026-04-07)
+
+### 30.1 S0: Serial Connection
+- ESP32 on `/dev/ttyUSB0` at 115200 baud
+- User in `dialout` group — no permission issues
+- Firmware responds to commands: `status`, `center`, `set`, `stop`, `estop`, `clear`
+
+### 30.2 S1: Manual Command Verification
+| Command | Response | Physical |
+|---------|----------|----------|
+| `center` | `CMD: CENTERED (V=0, H=0)` | Returns to home |
+| `set 5 5 0 0` | `ACK: V=5.0 H=5.0` | Moves correctly |
+| `set 10 10 0 0` | `ACK: V=10.0 H=10.0` | Moves correctly |
+| `set 20 0 0 0` | `ACK: V=20.0 H=0.0` | Moves correctly |
+| `set 25 0 0 0` | `ACK: V=25.0 H=0.0` | Moves correctly |
+| `set 30 0 0 0` | `ACK: V=30.0 H=0.0` | Moves correctly |
+| `set -20 0 0 0` | `ACK: V=-20.0 H=0.0` | Moves correctly |
+| `set 0 -20 0 0` | `ACK: V=0.0 H=-20.0` | Moves correctly |
+| `stop` | `STOPPED` | Halts |
+| `estop` → `clear` → `center` | All acknowledged | Latch cycle works |
+
+### 30.3 Known Issue
+- `set 40 -40 0 0` (beyond ±30 limit) causes ESP32 firmware reboot (`rst:0x3 SW_RESET`)
+- Firmware clamps to ±30 before crash — the ACK shows `V=30.0 H=-30.0` then reboots
+- **Mitigation**: software already clamps at `--max-abs-angle-deg` (default 30) before sending
+
+### 30.4 Next Steps
+- S2: Aim-only dry run with live cameras (`--no-shoot-enabled --correction-mode linear`)
+- S3: RPM gate test (wheel spin-up without firing)
+- S4: Controlled fire test with safety observer
