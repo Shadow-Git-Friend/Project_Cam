@@ -1058,7 +1058,7 @@ def main():
     ap.add_argument("--intrinsics-dir", default="garage_lab_combined/cal/intrinsics")
     ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
     ap.add_argument("--dimensions", default="garage_lab_combined/cal/extrinsics/Dimensions.txt")
-    ap.add_argument("--ball-model", default="garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt")
+    ap.add_argument("--ball-model", default="archive/04_garage_backup/garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt")
     ap.add_argument("--ball-device", default="cpu", help="Ball detector device, e.g. cpu or cuda:0")
     ap.add_argument("--pose-device", default="cpu", help="Pose detector device, e.g. cpu or cuda:0")
     ap.add_argument("--width", type=int, default=1280)

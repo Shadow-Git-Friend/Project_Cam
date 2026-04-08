@@ -10,7 +10,7 @@
 # Prerequisites:
 #   - TensorRT engines must be built first:
 #     python Parallel_working/scripts/export_models_tensorrt.py \
-#       --yolo-model garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt \
+#       --yolo-model archive/04_garage_backup/garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt \
 #       --yolo-format engine --yolo-half
 #   - yolo11m-pose.engine must exist (auto-built on first run of yolopose profile)
 set -euo pipefail
@@ -22,9 +22,9 @@ TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p Parallel_working/output
 
 # Use TRT engines if available, fall back to .pt
-BALL_MODEL="garage-20260217T113109Z-3-001/garage/y26s_v1_garage.engine"
+BALL_MODEL="archive/04_garage_backup/garage-20260217T113109Z-3-001/garage/y26s_v1_garage.engine"
 if [ ! -f "$BALL_MODEL" ]; then
-  BALL_MODEL="garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt"
+  BALL_MODEL="archive/04_garage_backup/garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt"
   echo "[INFO] Ball TRT engine not found, using PyTorch model"
 fi
 
