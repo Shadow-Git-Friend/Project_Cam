@@ -1,69 +1,112 @@
 # Project_Cam
 
-Multi-camera ball + human pose tracking research workspace for a Master's thesis on pose-guided predictive ballistics.
+**Pose-Guided Predictive Ballistics with Multi-Camera 3D Tracking**
 
-## What This Repository Contains
+MSc Thesis — ECE, Nazarbayev University
 
-This repo combines multiple phases of the project:
+## Overview
 
-- `src/`: early and mid-stage pipeline (calibration, capture, triangulation, rendering, goal detection prototypes).
-- `garage_lab_combined/`: unified 4-camera garage pipeline used for the latest experiments and thesis outputs.
-- `scripts/`: calibration helpers and data utilities.
-- `config/`: camera device mapping for local capture.
+A vision-guided ball launching system that uses 4 fixed cameras to reconstruct 3D human pose in real-time, predict target motion via Kalman filtering, and aim a robotic ball launcher (BLM) at specific body joints using ballistic trajectory solving.
 
-It is both a development workspace and a thesis production workspace.
+## Repository Structure
+
+```
+Project_Cam/
+├── garage_lab_combined/     # Main production pipeline
+│   ├── scripts/             # Runtime scripts (live view, launcher, processing)
+│   ├── cal/                 # Calibration data (intrinsics, extrinsics)
+│   ├── gt_eval/             # Ground-truth evaluation results
+│   └── thesis/              # Thesis living worklog
+│
+├── Parallel_working/        # Performance-optimized pipeline
+│   ├── scripts/             # YOLO-Pose, ablation, Kalman, TensorRT export
+│   └── run_live_*.sh        # Run profiles (quality, balanced, predictive, etc.)
+│
+├── arena_fixed/             # Arena extrinsics fix (Y-axis correction)
+│   └── cal/extrinsics/      # Fixed rvec/tvec extrinsics
+│
+├── archive/                 # Historical files (not tracked in git)
+│   ├── 01_initial_cameras/  # Early camera captures (Dec 2025)
+│   ├── 02_calibration_legacy/  # Original calibration data
+│   ├── 03_early_source/     # Initial src/, scripts/, config/, docs/
+│   ├── 04_garage_backup/    # Feb 2026 snapshot
+│   ├── 05_garage_cameras/   # GARAGE_CAMERAS recordings
+│   ├── 06_pitch_demo/       # Presentation videos
+│   ├── 07_old_outputs/      # Legacy rendering outputs
+│   ├── 08_fps_safe/         # FPS-safe viewer prototype
+│   ├── 09_sport_center/     # Sport center experiments
+│   └── 10_misc/             # Miscellaneous files
+│
+└── thesis_draft.md          # Thesis draft document
+```
 
 ## System Components
 
-1. Cameras and synchronized capture.
-2. Intrinsic and extrinsic camera calibration (ChArUco/AprilTag workflows).
-3. 2D ball detection (YOLO).
-4. 2D human pose estimation (MMPose).
-5. Multi-view 3D triangulation (ball and body joints).
-6. Post-processing, smoothing, and 3D rendering.
-7. Ground-truth evaluation and thesis/report generation.
-
-## Core Technologies
-
-- Python
-- OpenCV
-- Ultralytics YOLO
-- MMPose
-- NumPy / SciPy
-- Matplotlib
-
-## Runtime Environment (Current Setup)
-
-- Arena: garage-style lab
-- Cameras: 4 fixed USB cameras (`camNorth`, `camEast`, `camSouth`, `camWest`)
-- Runtime resolution: `1280x720`
-- Capture target: `15 FPS`
-- Inference target: `5 FPS`
-- Unit system: `mm`
-
-(See `garage_lab_combined/config/runtime.yaml` and `garage_lab_combined/config/cameras.yaml`.)
+1. **4-camera synchronized capture** — USB cameras at 1280x720, 15 FPS
+2. **Ball detection** — YOLO (custom-trained on garage arena)
+3. **Pose estimation** — YOLO-Pose (6.2x faster than MMPose with TRT) or MMPose (RTMDet-m + RTMPose-m)
+4. **Multi-view 3D triangulation** — SVD-based, EMA-smoothed (alpha=0.25)
+5. **Kalman prediction** — 3D motion prediction at 200-400ms horizon (PN=500, MN=10)
+6. **GT correction model** — Compensates systematic extrinsics bias (linear per-axis fit)
+7. **Ballistic solver** — Pitch/yaw angles from 3D target position + launch speed
+8. **BLM control** — ESP32 serial commands (set, shoot, reload, stop, estop)
 
 ## Key Entry Points
 
-- 4-camera processing to 3D:
-  - `garage_lab_combined/scripts/process_4cam_to_3d.py`
-- Presentation rendering:
-  - `garage_lab_combined/scripts/render_arena_ball_skeleton.py`
-- Live multi-camera 3D view:
-  - `garage_lab_combined/scripts/live_4cam_arena_view.py`
-- Intrinsics calibration:
-  - `garage_lab_combined/scripts/calibrate_intrinsics_charuco_garage.py`
-- Extrinsics calibration:
-  - `garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py`
+| Script | Purpose |
+|--------|---------|
+| `Parallel_working/scripts/live_4cam_arena_view_parallel.py` | Live 3D viewer (recommended) |
+| `garage_lab_combined/scripts/launcher_runtime_from_udp.py` | BLM launcher runtime |
+| `garage_lab_combined/scripts/live_aim_test.py` | Interactive live aim test (S2) |
+| `garage_lab_combined/scripts/manual_aim_test.py` | Manual aim test on GT positions |
+| `garage_lab_combined/scripts/process_4cam_to_3d.py` | Offline 3D processing |
+| `Parallel_working/scripts/ablation_ema_adaptive.py` | EMA ablation study |
+| `Parallel_working/scripts/validate_kalman_prediction.py` | Kalman prediction validation |
+| `Parallel_working/scripts/export_models_tensorrt.py` | TensorRT model export |
+| `Parallel_working/scripts/record_test_sequence.py` | Record test sequences |
 
-## Documentation For External Analysis
+## Quick Start
 
-If you want ChatGPT (or any external reviewer) to analyze this project quickly, start with:
+```bash
+# Recommended: YOLO-Pose + Kalman prediction + cv2 renderer
+./Parallel_working/run_live_parallel_yolopose.sh
 
-- `docs/PROJECT_OVERVIEW_FOR_CHATGPT.md`
-- `docs/FOLDER_STRUCTURE.md`
-- `docs/REPO_SHARING_CHECKLIST.md`
+# With TensorRT acceleration
+./Parallel_working/run_live_parallel_yolopose.sh --yolopose-model yolo11m-pose.engine
 
-These files are prepared to match a thesis-assistant workflow.
+# Launcher aim-only test (no shooting)
+./venv/bin/python garage_lab_combined/scripts/launcher_runtime_from_udp.py \
+  --serial-port /dev/ttyUSB0 --launcher-yaw-deg 0 \
+  --no-shoot-enabled --correction-mode linear \
+  --dry-run-log-jsonl garage_lab_combined/output/blm_logs/aim_test.jsonl
+```
 
-- `docs/CHATGPT_HANDOFF_PROMPT.md`
+## Arena Setup
+
+- 4 fixed cameras: camNorth, camEast, camSouth, camWest
+- Arena dimensions: 6230mm x 3050mm x 2950mm
+- Origin: North-East corner (0,0,0)
+- All coordinates in mm
+- BLM position: (600, 1560, 500) mm, facing South wall (yaw=0)
+
+## Current Accuracy
+
+| Metric | Ball (static) | Joint (touch) |
+|--------|--------------|---------------|
+| Mean error | 156.9 mm | 179.0 mm |
+| P95 error | 288.3 mm | 243.8 mm |
+| Precision (std) | 3.1 mm | 4.4 mm |
+| Bias (correctable) | X+60, Z-104 mm | X+83, Z-125 mm |
+
+## Latency (RTX 2080 Ti)
+
+| Component | Time |
+|-----------|------|
+| YOLO ball detection | 8.1 ms (TRT FP16) |
+| YOLO-Pose | 6.2 ms (TRT FP16) |
+| MMPose | 38.5 ms/image |
+| cv2 3D renderer | ~2 ms |
+
+## Tech Stack
+
+Python, OpenCV, Ultralytics YOLO, YOLO-Pose, MMPose, NumPy/SciPy, TensorRT, Kalman Filter, ESP32 (serial)
