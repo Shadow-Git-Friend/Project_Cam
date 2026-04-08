@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import multiprocessing as mp
 import re
 import socket
@@ -8,6 +9,7 @@ import time
 from collections import deque
 from queue import Full
 from pathlib import Path
+from typing import Optional, Dict, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
@@ -58,6 +60,67 @@ JOINT_NAME_TO_IDX = {
 }
 
 DERIVED_UDP_JOINTS = {"body_center"}
+
+IDX_TO_JOINT_NAME = {v: k for k, v in JOINT_NAME_TO_IDX.items()}
+
+# --------------- BLM Demo: ballistic math + correction ---------------
+
+def _blm_forward_right(yaw_deg):
+    yaw = math.radians(yaw_deg)
+    fwd = np.array([math.cos(yaw), math.sin(yaw), 0.0])
+    right = np.array([fwd[1], -fwd[0], 0.0])
+    return fwd, right
+
+
+def _blm_world_to_launcher(target_mm, launcher_mm, yaw_deg):
+    d = np.asarray(target_mm, dtype=np.float64) - np.asarray(launcher_mm, dtype=np.float64)
+    fwd, right = _blm_forward_right(yaw_deg)
+    x_lat = float(np.dot(d[:2], right[:2])) / 1000.0
+    y_fwd = float(np.dot(d[:2], fwd[:2])) / 1000.0
+    dz = float(d[2]) / 1000.0
+    return x_lat, y_fwd, dz
+
+
+def _blm_solve(x_lat_m, y_fwd_m, dz_m, v_ms, g=9.81):
+    if y_fwd_m <= 0.15:
+        return None
+    d = math.sqrt(x_lat_m**2 + y_fwd_m**2)
+    if d <= 1e-6:
+        return None
+    h_deg = math.degrees(math.atan2(x_lat_m, y_fwd_m))
+    disc = v_ms**4 - g * (g * d**2 + 2.0 * dz_m * v_ms**2)
+    if disc < 0.0:
+        return None
+    v_rad = math.atan((v_ms**2 - math.sqrt(disc)) / (g * d))
+    v_deg = math.degrees(v_rad)
+    return v_deg, h_deg
+
+
+def _blm_load_correction(path):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        model = {"bias": np.array([data["global_bias_add_mm"]["x"],
+                                   data["global_bias_add_mm"]["y"],
+                                   data["global_bias_add_mm"]["z"]])}
+        if "axis_linear_gt_from_est" in data:
+            model["linear"] = data["axis_linear_gt_from_est"]
+        return model
+    except Exception:
+        return None
+
+
+def _blm_correct(xyz, model, mode):
+    if model is None or mode == "none":
+        return xyz.copy()
+    xyz = np.array(xyz, dtype=np.float64)
+    if mode == "bias":
+        return xyz + model["bias"]
+    if mode == "linear" and "linear" in model:
+        for i, ax in enumerate(["x", "y", "z"]):
+            if ax in model["linear"]:
+                xyz[i] = model["linear"][ax]["a"] * xyz[i] + model["linear"][ax]["b"]
+    return xyz
 
 
 class StageTimer:
@@ -542,6 +605,7 @@ def draw_live_scene_cv2(
     draw_axes=True, axis_len=800.0,
     ghost_joints=None,
     predict_ahead_ms=0.0,
+    blm_aim=None,
 ):
     """Render the 3D arena scene onto a cv2 BGR image (~1-3 ms)."""
     img = np.full((img_h, img_w, 3), 247, dtype=np.uint8)  # light grey bg
@@ -674,6 +738,97 @@ def draw_live_scene_cv2(
             if sok[3]: line(sp[0], sp[3], (246, 130, 59), 2)   # Z blue
             cv2.putText(img, "O", (int(sp[0,0])-14, int(sp[0,1])+5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,0), 1, cv2.LINE_AA)
+
+    # --- BLM Aim Overlay ---
+    if blm_aim is not None:
+        launcher_pos = blm_aim.get("launcher_pos")
+        target_pos = blm_aim.get("target_pos")
+        y_max_v = dims["Y"]
+
+        # Draw launcher position marker
+        if launcher_pos is not None:
+            lp = transform_world_point_y(launcher_pos.reshape(1, 3), y_max_v, enabled=world_y_mirror)
+            lsp, lok = proj(lp)
+            if lok[0]:
+                pt = (int(lsp[0, 0]), int(lsp[0, 1]))
+                cv2.circle(img, pt, 10, (0, 0, 220), 2, cv2.LINE_AA)
+                cv2.circle(img, pt, 3, (0, 0, 220), -1, cv2.LINE_AA)
+                cv2.putText(img, "BLM", (pt[0] + 14, pt[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 220), 1, cv2.LINE_AA)
+
+                # Draw aim line from launcher to target
+                if target_pos is not None and np.isfinite(target_pos).all():
+                    tp = transform_world_point_y(target_pos.reshape(1, 3), y_max_v, enabled=world_y_mirror)
+                    tsp, tok = proj(tp)
+                    if tok[0]:
+                        # Dashed-style aim line
+                        cv2.line(img, pt, (int(tsp[0, 0]), int(tsp[0, 1])),
+                                 (0, 0, 220), 2, cv2.LINE_AA)
+                        # Target crosshair
+                        tp2 = (int(tsp[0, 0]), int(tsp[0, 1]))
+                        cv2.drawMarker(img, tp2, (0, 0, 255), cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
+
+        # Draw info panel
+        panel_x = img_w - 320
+        panel_y = 12
+        panel_h = 180
+        # Semi-transparent background
+        overlay = img.copy()
+        cv2.rectangle(overlay, (panel_x - 10, panel_y - 4), (img_w - 8, panel_y + panel_h),
+                      (40, 40, 40), -1)
+        cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
+
+        status = blm_aim.get("status", "NO_TARGET")
+        joint_name = blm_aim.get("joint_name", "?")
+        pitch = blm_aim.get("pitch_deg")
+        yaw = blm_aim.get("yaw_deg")
+        dist = blm_aim.get("distance_m")
+        raw_xyz = blm_aim.get("raw_xyz")
+        corrected_xyz = blm_aim.get("corrected_xyz")
+        correction_mode = blm_aim.get("correction_mode", "none")
+
+        # Status color
+        if status == "AIM_OK":
+            status_color = (0, 255, 100)
+        elif status == "OUT_OF_RANGE":
+            status_color = (0, 100, 255)
+        else:
+            status_color = (100, 100, 255)
+
+        y = panel_y + 18
+        cv2.putText(img, "BLM AIM DEMO", (panel_x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        y += 24
+        cv2.putText(img, f"Status: {status}", (panel_x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1, cv2.LINE_AA)
+        y += 22
+        cv2.putText(img, f"Target: {joint_name}", (panel_x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+
+        if raw_xyz is not None:
+            y += 20
+            cv2.putText(img, f"Pos: ({raw_xyz[0]:.0f}, {raw_xyz[1]:.0f}, {raw_xyz[2]:.0f}) mm",
+                        (panel_x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
+
+        if correction_mode != "none" and corrected_xyz is not None:
+            y += 18
+            cv2.putText(img, f"Corr: ({corrected_xyz[0]:.0f}, {corrected_xyz[1]:.0f}, {corrected_xyz[2]:.0f})",
+                        (panel_x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 200, 180), 1, cv2.LINE_AA)
+
+        if pitch is not None and yaw is not None:
+            y += 22
+            cv2.putText(img, f"Pitch: {pitch:.1f} deg   Yaw: {yaw:.1f} deg", (panel_x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 255), 1, cv2.LINE_AA)
+        if dist is not None:
+            y += 20
+            cv2.putText(img, f"Distance: {dist:.2f} m", (panel_x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+
+        if status == "AIM_OK" and pitch is not None:
+            y += 22
+            cmd = f"set {pitch:.1f} {yaw:.1f} 0 0"
+            cv2.putText(img, f"CMD: {cmd}", (panel_x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1, cv2.LINE_AA)
 
     # --- HUD ---
     cv2.putText(img, f"Frame: {frame_idx}  FPS: {fps_est:.1f}", (12, img_h - 16),
@@ -1028,6 +1183,23 @@ def main():
                      help="Show predicted-position ghost skeleton in 3D view (auto-enabled when predict-ahead-ms > 0).")
     ap.add_argument("--predict-max-uncertainty-mm", type=float, default=500.0,
                      help="Max prediction uncertainty (mm) before prediction is discarded.")
+
+    # --- BLM Demo Mode ---
+    ap.add_argument("--demo-blm", action="store_true", default=False,
+                     help="Enable BLM aim demo overlay on 3D view (no serial needed).")
+    ap.add_argument("--demo-blm-joint", default="right_hip",
+                     help="Target joint for BLM demo (default: right_hip).")
+    ap.add_argument("--demo-blm-launcher-x-mm", type=float, default=600.0)
+    ap.add_argument("--demo-blm-launcher-y-mm", type=float, default=1560.0)
+    ap.add_argument("--demo-blm-launcher-z-mm", type=float, default=500.0)
+    ap.add_argument("--demo-blm-yaw-deg", type=float, default=0.0,
+                     help="Launcher yaw in world frame (0 = +X = toward south wall).")
+    ap.add_argument("--demo-blm-speed-mps", type=float, default=10.0,
+                     help="Ball launch speed (m/s) for ballistic solver.")
+    ap.add_argument("--demo-blm-correction-mode", choices=["none", "bias", "linear"], default="linear")
+    ap.add_argument("--demo-blm-correction-model",
+                     default="garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_ball/correction_model.json")
+
     args = ap.parse_args()
 
     normal_defaults = {
@@ -1069,6 +1241,35 @@ def main():
         args.joint_stale_frames = max(3, args.pose_every * 3)
     else:
         args.joint_stale_frames = max(1, int(args.joint_stale_frames))
+
+    # --- BLM Demo init ---
+    blm_demo = None
+    if args.demo_blm:
+        blm_joint_idx = JOINT_NAME_TO_IDX.get(args.demo_blm_joint)
+        if blm_joint_idx is None:
+            raise RuntimeError(f"Unknown --demo-blm-joint: {args.demo_blm_joint}")
+        blm_launcher = np.array([args.demo_blm_launcher_x_mm, args.demo_blm_launcher_y_mm,
+                                  args.demo_blm_launcher_z_mm])
+        blm_correction = None
+        if args.demo_blm_correction_mode != "none":
+            blm_correction = _blm_load_correction(args.demo_blm_correction_model)
+            if blm_correction:
+                print(f"[BLM-DEMO] Correction model loaded ({args.demo_blm_correction_mode})")
+            else:
+                print("[BLM-DEMO] Correction model not found, using mode=none")
+                args.demo_blm_correction_mode = "none"
+        blm_demo = {
+            "joint_idx": blm_joint_idx,
+            "joint_name": args.demo_blm_joint,
+            "launcher": blm_launcher,
+            "yaw_deg": args.demo_blm_yaw_deg,
+            "v_mps": args.demo_blm_speed_mps,
+            "correction": blm_correction,
+            "correction_mode": args.demo_blm_correction_mode,
+        }
+        print(f"[BLM-DEMO] Targeting '{args.demo_blm_joint}' | launcher=({blm_launcher[0]:.0f}, "
+              f"{blm_launcher[1]:.0f}, {blm_launcher[2]:.0f}) mm | yaw={args.demo_blm_yaw_deg}° | "
+              f"v={args.demo_blm_speed_mps} m/s")
 
     display_world_y_mirror = (
         args.world_y_mirror if args.display_world_y_mirror is None else args.display_world_y_mirror
@@ -1637,6 +1838,52 @@ def main():
             timer.stop("udp")
 
             timer.start("viz3d")
+            # --- BLM Demo: compute aim from current joints ---
+            blm_aim_data = None
+            if blm_demo is not None:
+                j_idx = blm_demo["joint_idx"]
+                j_pos = joints_display[j_idx] if joints_display is not None else None
+                if j_pos is not None and np.isfinite(j_pos).all():
+                    raw_xyz = j_pos.copy()
+                    corrected_xyz = _blm_correct(raw_xyz, blm_demo["correction"],
+                                                  blm_demo["correction_mode"])
+                    x_lat, y_fwd, dz = _blm_world_to_launcher(
+                        corrected_xyz, blm_demo["launcher"], blm_demo["yaw_deg"])
+                    d_m = math.sqrt(x_lat**2 + y_fwd**2)
+                    sol = _blm_solve(x_lat, y_fwd, dz, blm_demo["v_mps"])
+                    if sol is not None:
+                        v_deg, h_deg = sol
+                        v_clamped = max(0.0, min(30.0, v_deg))
+                        h_clamped = max(-30.0, min(30.0, h_deg))
+                        blm_aim_data = {
+                            "status": "AIM_OK",
+                            "joint_name": blm_demo["joint_name"],
+                            "pitch_deg": v_clamped,
+                            "yaw_deg": h_clamped,
+                            "distance_m": d_m,
+                            "raw_xyz": raw_xyz,
+                            "corrected_xyz": corrected_xyz,
+                            "correction_mode": blm_demo["correction_mode"],
+                            "launcher_pos": blm_demo["launcher"],
+                            "target_pos": corrected_xyz,
+                        }
+                    else:
+                        blm_aim_data = {
+                            "status": "OUT_OF_RANGE",
+                            "joint_name": blm_demo["joint_name"],
+                            "raw_xyz": raw_xyz,
+                            "corrected_xyz": corrected_xyz,
+                            "correction_mode": blm_demo["correction_mode"],
+                            "launcher_pos": blm_demo["launcher"],
+                            "target_pos": corrected_xyz,
+                        }
+                else:
+                    blm_aim_data = {
+                        "status": "NO_TARGET",
+                        "joint_name": blm_demo["joint_name"],
+                        "launcher_pos": blm_demo["launcher"],
+                    }
+
             if args.show_3d and (frame_idx % args.viz_every == 0):
                 if use_cv2_viz:
                     viz_img = draw_live_scene_cv2(
@@ -1657,6 +1904,7 @@ def main():
                         axis_len=args.global_axis_len_mm,
                         ghost_joints=joints_predicted.copy() if show_ghost else None,
                         predict_ahead_ms=args.predict_ahead_ms,
+                        blm_aim=blm_aim_data,
                     )
                     cv2.imshow("Live 3D Arena", viz_img)
                 elif render_q is not None and render_proc is not None:
