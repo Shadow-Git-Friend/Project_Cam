@@ -19,10 +19,25 @@
 - Test recording: `Parallel_working/scripts/record_test_sequence.py`
 - EMA ablation: `Parallel_working/scripts/ablation_ema_adaptive.py`
 
-## BLM Commands (ESP32 serial)
-- `set v h wl wr` — aim (angles clamped +-30 deg)
-- `shoot` / `reload` / `stop` / `center` / `setzero`
-- Operator: `start`, `estop`, `clear`, `status`, `quit`
+## BLM Firmware (control_12_full.ino — current)
+- **Serial baud: 921600** (was 115200 in control_11)
+- **Limit switches: PULLUP, triggered on LOW** (was PULLDOWN+HIGH in control_11)
+- BLE name: `RoboLauncher` (USB serial backup also active)
+- Pusher uses DRV8825 with active enable management (HIGH=rest/cool, LOW=move)
+- Telemetry suppressed during pusher motion to avoid interference
+
+### Commands
+- `set v h wl wr` — aim (angles clamped ±30°) + set wheel RPMs
+- `shoot` — fire (RPM gate: both wheels ≥400 RPM)
+- `reload` — retract → dispense → ball detect (or 10s timeout) → IDLE; also centers + spins down
+- `stop` / `center` / `setzero` / `info`
+- Manual jog: `jv<steps>`, `jh<steps>`, `jf<steps>` (pusher), `js<0-180>` (servo angle)
+- Live tuning (no reflash): `jsset<val>`, `jfspeedset<val>`, `jfaccelset<val>`
+- `info` reports: angles, RPMs, feeder state, limit switch states (Front/Back/Ball), live config
+
+### State machine
+- IDLE → `reload` → RETRACTING → (back limit LOW) → DISPENSING → (ball limit LOW or 10s timeout) → IDLE
+- IDLE → `shoot` → SHOOTING → (RPM ≥ 400) → pusher fwd → (front limit LOW) → IDLE
 
 ## Calibration Artifacts
 - Intrinsics: `garage_lab_combined/cal/intrinsics/cam{North,East,South,West}_intrinsics.json`
@@ -57,7 +72,35 @@
 # Quality baseline (no perf opts):
 ./Parallel_working/run_live_parallel_quality.sh
 
-# Launcher aim-only test:
+# Combined live viewer + BLM aim overlay (RECOMMENDED for BLM work):
+./Parallel_working/run_live_blm.sh
+
+# Interactive BLM serial terminal (manual testing, raw commands):
+./venv/bin/python garage_lab_combined/scripts/blm_interactive.py --port /dev/ttyUSB0
+
+# Live aim test (S2 aim-only, paired with run_live_blm.sh):
+./venv/bin/python garage_lab_combined/scripts/live_aim_test.py \
+  --serial-port /dev/ttyUSB0 --launcher-yaw-deg 0 --correction-mode linear \
+  --log-jsonl garage_lab_combined/output/blm_logs/s2_live_aim.jsonl
+
+# Live aim + shoot (S4 only, after RPM gate test):
+./venv/bin/python garage_lab_combined/scripts/live_aim_test.py \
+  --serial-port /dev/ttyUSB0 --launcher-yaw-deg 0 --correction-mode linear \
+  --shoot-enabled --wheel-rpm 800
+
+# Continuous follow mode (BLM tracks chosen joint as person moves, aim-only):
+./venv/bin/python garage_lab_combined/scripts/blm_follow.py \
+  --serial-port /dev/ttyUSB0 --launcher-yaw-deg 0 \
+  --joint right_shoulder --correction-mode linear
+
+# Continuous follow + shoot (wheels spin at 800 RPM, manual reload/shoot trigger):
+./venv/bin/python garage_lab_combined/scripts/blm_follow.py \
+  --serial-port /dev/ttyUSB0 --launcher-yaw-deg 0 \
+  --joint right_shoulder --correction-mode linear \
+  --shoot-enabled --wheel-rpm 800
+# Commands while running: <joint> / reload / shoot / pause / resume / quit
+
+# Launcher aim-only test (legacy):
 ./venv/bin/python garage_lab_combined/scripts/launcher_runtime_from_udp.py \
   --serial-port /dev/ttyUSB0 --no-shoot-enabled \
   --dry-run-log-jsonl garage_lab_combined/output/blm_logs/aim_decisions.jsonl
@@ -106,4 +149,7 @@
 - [x] Kalman prediction validation + parameter tuning (PN=500, MN=10)
 - [x] GT correction model integrated into launcher runtime (bias + linear modes)
 - [x] BLM preflight S0-S1 passed (serial comms + manual commands verified)
-- Next: S2 aim-only dry run with live cameras + correction mode
+- [x] BLM preflight S2 passed (live aim-only with cameras + correction model, 2026-04-09)
+- [x] BLM preflight S3+S4 passed (RPM gate + controlled fire, full reload→aim→shoot cycle, 2026-04-09)
+- [x] Full integrated live test passed (2026-04-09): pose→aim→fire on multiple joints (left_shoulder, right_knee, nose). First nose shot slightly low. Second nose shot off — ball speed at 800 RPM not yet calibrated.
+- Next: (1) Ball speed calibration (RPM→m/s curve), (2) Training automation mode with voice trigger

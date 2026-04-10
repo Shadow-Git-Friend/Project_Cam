@@ -95,7 +95,7 @@ def apply_correction(xyz_mm: np.ndarray, model: Optional[Dict], mode: str = "lin
 def main():
     ap = argparse.ArgumentParser(description="Manual BLM aim test on GT joint positions")
     ap.add_argument("--serial-port", required=True, help="ESP32 serial port")
-    ap.add_argument("--baud-rate", type=int, default=115200)
+    ap.add_argument("--baud-rate", type=int, default=921600)
     ap.add_argument("--gt-csv", default="garage_lab_combined/gt_eval/joint_tuning_20260310_124311/trials_joint_81_mm.csv")
     ap.add_argument("--launcher-x-mm", type=float, default=600.0)
     ap.add_argument("--launcher-y-mm", type=float, default=1560.0)

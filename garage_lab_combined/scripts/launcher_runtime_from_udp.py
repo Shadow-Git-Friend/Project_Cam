@@ -446,7 +446,7 @@ def stable_target_from_buffer(
 def main():
     ap = argparse.ArgumentParser(description="Run BLM sequence from live UDP joint targets.")
     ap.add_argument("--serial-port", required=True, help="ESP32 serial port, e.g. /dev/ttyUSB0")
-    ap.add_argument("--baud-rate", type=int, default=115200)
+    ap.add_argument("--baud-rate", type=int, default=921600)
     ap.add_argument("--udp-host", default="0.0.0.0")
     ap.add_argument("--udp-port", type=int, default=5005)
     ap.add_argument("--static-target-x-mm", type=float, default=None, help="Enable one-terminal mode with static target X")

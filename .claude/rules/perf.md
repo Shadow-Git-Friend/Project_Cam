@@ -41,7 +41,15 @@
 - Both support `--pose-backend yolopose|mmpose`
 - Results in `Parallel_working/output/ablation_results/`
 
+## BLM-Integrated Live Run
+- `Parallel_working/run_live_blm.sh` combines live yolopose viewer + Kalman prediction + UDP target broadcast + `--demo-blm` overlay
+- Pair with `garage_lab_combined/scripts/live_aim_test.py` in Terminal 2 for interactive aiming
+- UDP target joints (13): nose, shoulders, elbows, wrists, hips, knees, ankles
+- Default Kalman: PN=500, MN=10, predict-ahead 400ms (best for walk/jog)
+- This run script lives in `Parallel_working/` but its serial counterpart in `garage_lab_combined/` is the only path that touches BLM hardware
+
 ## Known Issues
 - maxfps at 960x540 causes skeleton placement errors
 - matplotlib 3D rendering is the main bottleneck — render-worker-process helps
 - Threaded capture + staleness gate improves freshness but not raw throughput
+- Kalman prediction is ~neutral on jump motion (CV model limitation) — do not tune to it

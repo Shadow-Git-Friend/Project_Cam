@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
 """
-Interactive live aim test — S2 preflight.
+Interactive live BLM aim + shoot test.
 
-Listens to UDP pose packets from the live viewer, lets you manually
-select a joint to aim at, shows computed angles, and sends to BLM
-only after confirmation.
+Full cycle: reload → aim at joint → spin wheels → shoot → repeat.
+
+Listens to UDP pose packets from the live viewer. Also runs a background
+serial reader so firmware state messages (RELOAD DONE, SHOT FIRED, etc.)
+are printed in real time.
 
 Procedure:
   1. Start live viewer in Terminal 1 (sends UDP on port 5005)
   2. Start this script in Terminal 2
-  3. Person stands at a position in the arena
-  4. Type a joint name (e.g. right_hip) → script grabs latest reading
-  5. Review angles → confirm → BLM aims
-  6. Visually verify → person moves → repeat
+  3. Type 'reload' to load a ball
+  4. Type a joint name (e.g. right_hip) → computes angles + sends aim + spins wheels
+  5. Type 'shoot' to fire
+  6. Repeat from step 3
 
 Usage:
     # Terminal 1:
-    ./Parallel_working/run_live_parallel_yolopose.sh
+    ./Parallel_working/run_live_blm.sh
 
-    # Terminal 2:
+    # Terminal 2 (aim-only, no shooting):
     ./venv/bin/python garage_lab_combined/scripts/live_aim_test.py \
         --serial-port /dev/ttyUSB0 \
         --launcher-yaw-deg 0 \
         --correction-mode linear
+
+    # Terminal 2 (with shooting enabled):
+    ./venv/bin/python garage_lab_combined/scripts/live_aim_test.py \
+        --serial-port /dev/ttyUSB0 \
+        --launcher-yaw-deg 0 \
+        --correction-mode linear \
+        --shoot-enabled \
+        --wheel-rpm 800
 """
 
 import argparse
@@ -113,6 +123,55 @@ def apply_correction(xyz_mm: np.ndarray, model: Optional[Dict], mode: str = "lin
     return xyz + model["bias"]
 
 
+# --------------- Serial reader thread ---------------
+
+class SerialReader:
+    """Background thread that reads serial output and prints it."""
+
+    def __init__(self, ser: serial.Serial):
+        self.ser = ser
+        self._running = True
+        self._last_msg = ""
+        self.last_state_msg = ""  # last firmware state message
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
+
+    def _read_loop(self):
+        while self._running:
+            try:
+                line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
+                # Filter boot ROM noise
+                if line.startswith("ets ") or line.startswith("rst:") or line.startswith("configsip:"):
+                    continue
+                if line.startswith("clk_drv:") or line.startswith("mode:DIO") or line.startswith("load:"):
+                    continue
+                if line.startswith("entry "):
+                    continue
+                # Filter long runs of repeated chars (line noise from baud transitions)
+                if len(line) > 20 and len(set(line)) <= 2:
+                    continue
+                # Filter wheel RPM telemetry (L:xxx R:xxx) — too chatty for interactive use
+                if line.startswith("L:") and " R:" in line:
+                    continue
+                # Deduplicate
+                if line == self._last_msg:
+                    continue
+                self._last_msg = line
+                # Track state messages
+                if "RELOAD DONE" in line or "SHOT FIRED" in line or "RETRACT" in line or "DISPENS" in line:
+                    self.last_state_msg = line
+                print(f"  <- {line}")
+            except serial.SerialException:
+                break
+            except Exception:
+                pass
+
+    def stop(self):
+        self._running = False
+
+
 # --------------- UDP listener ---------------
 
 class UDPJointListener:
@@ -122,7 +181,7 @@ class UDPJointListener:
         self.host = host
         self.port = port
         self.lock = threading.Lock()
-        self.joints: Dict[str, dict] = {}  # joint_name -> {x_mm, y_mm, z_mm, conf, cams, ts}
+        self.joints: Dict[str, dict] = {}
         self.last_packet_ts = 0.0
         self.packet_count = 0
         self._running = True
@@ -142,7 +201,6 @@ class UDPJointListener:
                 with self.lock:
                     self.last_packet_ts = now
                     self.packet_count += 1
-                    # Parse multi-joint format
                     joints_obj = pkt.get("joints", {})
                     if isinstance(joints_obj, dict):
                         for j, val in joints_obj.items():
@@ -158,7 +216,6 @@ class UDPJointListener:
                                 "cams": int(val.get("cams", 0)),
                                 "ts": now,
                             }
-                    # Parse single-joint format
                     elif "joint" in pkt and "x_mm" in pkt:
                         j = str(pkt["joint"])
                         self.joints[j] = {
@@ -200,32 +257,44 @@ COCO_JOINTS = [
     "left_knee", "right_knee", "left_ankle", "right_ankle",
 ]
 
-# Joints that make sense as BLM targets (body, not face)
 TARGETABLE_JOINTS = [
+    "nose",
     "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist",
     "left_hip", "right_hip",
     "left_knee", "right_knee",
     "left_ankle", "right_ankle",
 ]
 
 
+def send_serial(ser, cmd_str):
+    """Send a command to the BLM via serial."""
+    ser.write((cmd_str + "\n").encode())
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Interactive live BLM aim test (S2 preflight)")
+    ap = argparse.ArgumentParser(description="Interactive live BLM aim + shoot test")
     ap.add_argument("--serial-port", required=True)
-    ap.add_argument("--baud-rate", type=int, default=115200)
+    ap.add_argument("--baud-rate", type=int, default=921600)
     ap.add_argument("--udp-host", default="0.0.0.0")
     ap.add_argument("--udp-port", type=int, default=5005)
     ap.add_argument("--launcher-x-mm", type=float, default=600.0)
     ap.add_argument("--launcher-y-mm", type=float, default=1560.0)
     ap.add_argument("--launcher-z-mm", type=float, default=500.0)
     ap.add_argument("--launcher-yaw-deg", type=float, required=True)
-    ap.add_argument("--v-base-mps", type=float, default=10.0)
+    ap.add_argument("--v-base-mps", type=float, default=10.0,
+                    help="Assumed ball exit speed (m/s) for ballistic calculation")
+    ap.add_argument("--wheel-rpm", type=float, default=800.0,
+                    help="Flywheel RPM to set when aiming (both wheels)")
     ap.add_argument("--correction-model",
                     default="garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_ball/correction_model.json")
     ap.add_argument("--correction-mode", choices=["none", "bias", "linear"], default="none")
     ap.add_argument("--pitch-trim-deg", type=float, default=0.0)
     ap.add_argument("--yaw-trim-deg", type=float, default=0.0)
-    ap.add_argument("--log-jsonl", default="", help="Log aim decisions to JSONL file")
+    ap.add_argument("--shoot-enabled", action="store_true",
+                    help="Enable shoot command. Without this flag, 'shoot' is blocked.")
+    ap.add_argument("--log-jsonl", default="", help="Log decisions to JSONL file")
     args = ap.parse_args()
 
     launcher_xyz = np.array([args.launcher_x_mm, args.launcher_y_mm, args.launcher_z_mm])
@@ -247,13 +316,19 @@ def main():
     # Connect serial
     ser = serial.Serial(args.serial_port, args.baud_rate, timeout=0.1)
     time.sleep(2)
-    while ser.readline():
-        pass
-    ser.write(b"center\n")
+    ser.reset_input_buffer()
+
+    # Start serial reader thread
+    serial_reader = SerialReader(ser)
+
+    send_serial(ser, "center")
     time.sleep(0.5)
-    while ser.readline():
-        pass
     print(f"[OK] Serial connected: {args.serial_port}, BLM centered")
+
+    if args.shoot_enabled:
+        print(f"[!!] SHOOT ENABLED — wheel RPM: {args.wheel_rpm:.0f}")
+    else:
+        print(f"[OK] Shoot DISABLED (aim-only mode). Use --shoot-enabled to allow firing.")
 
     # Open log file
     log_fp = None
@@ -262,18 +337,25 @@ def main():
         log_fp = open(args.log_jsonl, "a")
         print(f"[OK] Logging to {args.log_jsonl}")
 
-    print("\n--- Interactive Live Aim Test (S2) ---")
-    print("Commands:")
-    print("  <joint_name>  — aim at joint (e.g. right_hip, left_shoulder, right_knee)")
-    print("  joints        — show currently detected joints")
+    print("\n" + "=" * 60)
+    print("  Interactive BLM Aim + Shoot Test")
+    print("=" * 60)
+    print("\nFull cycle:  reload → <joint> → shoot → reload → ...")
+    print("\nCommands:")
+    print("  <joint_name>  — aim at joint + spin wheels")
+    print("  reload        — retract pusher, load ball, center aim")
+    print("  shoot         — fire (only if --shoot-enabled)")
+    print("  joints        — show detected joints")
     print("  status        — UDP + serial status")
+    print("  info          — query BLM angles/RPM/state")
     print("  center        — return BLM to home")
-    print("  stop          — stop BLM")
-    print("  quit          — exit")
-    print(f"\nTargetable joints: {', '.join(TARGETABLE_JOINTS)}")
+    print("  stop          — emergency stop")
+    print("  quit          — exit safely")
+    print(f"\nTargetable: {', '.join(TARGETABLE_JOINTS)}")
     print()
 
     test_number = 0
+    last_aim_cmd = None  # track last aim command for logging
 
     while True:
         try:
@@ -284,28 +366,79 @@ def main():
         if not cmd:
             continue
 
-        if cmd.lower() == "quit":
+        cmd_low = cmd.lower()
+
+        # --- Direct BLM commands ---
+        if cmd_low == "quit":
             break
 
-        if cmd.lower() in ("center", "stop"):
-            ser.write((cmd.lower() + "\n").encode())
+        if cmd_low == "stop":
+            send_serial(ser, "stop")
             time.sleep(0.3)
-            while True:
-                line = ser.readline().decode("utf-8", errors="ignore").strip()
-                if not line:
-                    break
-                if not line.startswith("ets ") and not line.startswith("rst:"):
-                    print(f"  <- {line}")
+            print("  [STOPPED]")
             continue
 
-        if cmd.lower() == "status":
+        if cmd_low == "center":
+            send_serial(ser, "center")
+            time.sleep(0.3)
+            continue
+
+        if cmd_low == "info":
+            send_serial(ser, "info")
+            time.sleep(0.5)  # wait for 3 info lines
+            continue
+
+        if cmd_low == "reload":
+            print("  Reloading: retract pusher → dispense ball → center aim...")
+            send_serial(ser, "reload")
+            # Wait for reload completion (ball detect or timeout)
+            t0 = time.time()
+            while time.time() - t0 < 15:  # max 15s wait
+                if "RELOAD DONE" in serial_reader.last_state_msg:
+                    break
+                time.sleep(0.2)
+            serial_reader.last_state_msg = ""
+            print("  [RELOAD COMPLETE] Ready for next aim.")
+            continue
+
+        if cmd_low == "shoot":
+            if not args.shoot_enabled:
+                print("  [BLOCKED] Shoot is disabled. Use --shoot-enabled flag.")
+                continue
+            if last_aim_cmd is None:
+                print("  [BLOCKED] Aim at a joint first before shooting.")
+                continue
+            confirm = input("  FIRE? This will launch a ball. [yes/N] ").strip().lower()
+            if confirm != "yes":
+                print("  Aborted.")
+                continue
+            print("  Firing...")
+            send_serial(ser, "shoot")
+            # Wait for shot fired
+            t0 = time.time()
+            while time.time() - t0 < 10:
+                if "SHOT FIRED" in serial_reader.last_state_msg:
+                    break
+                time.sleep(0.2)
+            serial_reader.last_state_msg = ""
+
+            # Log
+            if log_fp and last_aim_cmd:
+                log_rec = {**last_aim_cmd, "action": "shoot", "shoot_timestamp": time.time()}
+                log_fp.write(json.dumps(log_rec, ensure_ascii=False) + "\n")
+                log_fp.flush()
+            last_aim_cmd = None
+            print("  [SHOT COMPLETE] Type 'reload' to load next ball.")
+            continue
+
+        if cmd_low == "status":
             pkt_count, last_ts = udp.get_status()
             age = time.time() - last_ts if last_ts > 0 else float("inf")
             print(f"  UDP: {pkt_count} packets, last {age:.1f}s ago")
             print(f"  Joints tracked: {list(udp.get_all_joints().keys())}")
             continue
 
-        if cmd.lower() == "joints":
+        if cmd_low == "joints":
             all_joints = udp.get_all_joints()
             if not all_joints:
                 print("  No joints detected. Is the live viewer running?")
@@ -322,12 +455,11 @@ def main():
                           f"  {d['conf']:5.2f}  {d['cams']:4d}  {age:4.1f}s{marker}")
             continue
 
-        # Try as joint name
-        joint_name = cmd.lower().replace("-", "_")
+        # --- Joint aim ---
+        joint_name = cmd_low.replace("-", "_")
         joint_data = udp.get_joint(joint_name)
 
         if joint_data is None:
-            # Check if it's a known joint that just isn't detected
             if joint_name in COCO_JOINTS:
                 print(f"  Joint '{joint_name}' is known but not currently detected.")
                 print(f"  Detected joints: {list(udp.get_all_joints().keys())}")
@@ -364,7 +496,6 @@ def main():
         v_deg += args.pitch_trim_deg
         h_deg += args.yaw_trim_deg
 
-        # Raw (unclamped) for display
         v_raw, h_raw = v_deg, h_deg
 
         # SAFETY: clamp pitch to [0, 30], yaw to [-30, 30]
@@ -373,6 +504,9 @@ def main():
         was_clamped = (v_deg != v_raw) or (h_deg != h_raw)
 
         test_number += 1
+        wl = int(args.wheel_rpm) if args.shoot_enabled else 0
+        wr = int(args.wheel_rpm) if args.shoot_enabled else 0
+
         print(f"\n  Test #{test_number}")
         print(f"  Joint:     {joint_name} (conf={joint_data['conf']:.2f}, cams={joint_data['cams']}, age={age:.1f}s)")
         print(f"  Raw pos:   X={raw_xyz[0]:.0f}  Y={raw_xyz[1]:.0f}  Z={raw_xyz[2]:.0f} mm")
@@ -384,60 +518,63 @@ def main():
             print(f"  CLAMPED:   pitch={v_deg:.2f} deg  yaw={h_deg:.2f} deg")
             if v_raw < 0:
                 print(f"  WARNING: PITCH WAS NEGATIVE ({v_raw:.2f} deg) — clamped to 0 deg")
-        print(f"  Command:   set {v_deg:.1f} {h_deg:.1f} 0 0")
+        print(f"  Command:   set {v_deg:.1f} {h_deg:.1f} {wl} {wr}")
 
         confirm = input("  Send? [y/N] ").strip().lower()
         if confirm != "y":
             print("  Skipped.")
             continue
 
-        # Send
-        cmd_str = f"set {v_deg:.1f} {h_deg:.1f} 0 0"
-        ser.write((cmd_str + "\n").encode())
+        # Send aim + wheels
+        cmd_str = f"set {v_deg:.1f} {h_deg:.1f} {wl} {wr}"
+        send_serial(ser, cmd_str)
         time.sleep(0.5)
-        while True:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
-            if not line:
-                break
-            if not line.startswith("ets ") and not line.startswith("rst:"):
-                print(f"  <- {line}")
 
         # Visual check
         visual = input("  Aim looks correct? [y/n/skip] ").strip().lower()
 
-        # Log
+        # Store for shoot logging
+        last_aim_cmd = {
+            "test_number": test_number,
+            "timestamp": time.time(),
+            "joint": joint_name,
+            "raw_xyz_mm": raw_xyz.tolist(),
+            "corrected_xyz_mm": corrected_xyz.tolist(),
+            "correction_mode": args.correction_mode,
+            "launcher_frame": {
+                "x_lateral_m": x_lat_m,
+                "y_forward_m": y_fwd_m,
+                "dz_m": dz_m,
+                "distance_m": d_m,
+            },
+            "angles_raw": {"pitch_deg": v_raw, "yaw_deg": h_raw},
+            "angles_clamped": {"pitch_deg": v_deg, "yaw_deg": h_deg},
+            "was_clamped": was_clamped,
+            "sent_command": cmd_str,
+            "wheel_rpm": args.wheel_rpm,
+            "visual_check": visual,
+            "conf": joint_data["conf"],
+            "cams": joint_data["cams"],
+            "data_age_sec": age,
+        }
+
+        # Log aim
         if log_fp:
-            log_rec = {
-                "test_number": test_number,
-                "timestamp": time.time(),
-                "joint": joint_name,
-                "raw_xyz_mm": raw_xyz.tolist(),
-                "corrected_xyz_mm": corrected_xyz.tolist(),
-                "correction_mode": args.correction_mode,
-                "launcher_frame": {
-                    "x_lateral_m": x_lat_m,
-                    "y_forward_m": y_fwd_m,
-                    "dz_m": dz_m,
-                    "distance_m": d_m,
-                },
-                "angles_raw": {"pitch_deg": v_raw, "yaw_deg": h_raw},
-                "angles_clamped": {"pitch_deg": v_deg, "yaw_deg": h_deg},
-                "was_clamped": was_clamped,
-                "sent_command": cmd_str,
-                "visual_check": visual,
-                "conf": joint_data["conf"],
-                "cams": joint_data["cams"],
-                "data_age_sec": age,
-            }
+            log_rec = {**last_aim_cmd, "action": "aim"}
             log_fp.write(json.dumps(log_rec, ensure_ascii=False) + "\n")
             log_fp.flush()
 
+        if args.shoot_enabled:
+            print(f"  Wheels spinning to {wl} RPM. Type 'shoot' when ready.")
         print()
 
     # Cleanup
-    print("Returning to center...")
-    ser.write(b"center\n")
+    print("\nShutting down safely...")
+    send_serial(ser, "stop")
+    time.sleep(0.3)
+    send_serial(ser, "center")
     time.sleep(1)
+    serial_reader.stop()
     udp.stop()
     ser.close()
     if log_fp:
