@@ -167,3 +167,11 @@
 - `thesis_defense_qa.md` — defense prep Q&A pack
 - `thesis_draft.md` — pre-existing thesis draft (do not touch unless asked)
 - `thesis_report _bachelors.md`, `yessimkhan_thesis.md` — reference materials (read-only)
+
+## Session Log
+
+### 2026-04-14 — Stack freeze pre-defense
+- Done today: ball KF + robust triangulation, dynamic-batch TRT engines (ball + pose), recording SIGTERM fix, README updated, suggestions.md audit + verdicts, plan.md created (Phase 0–5)
+- Frozen: tag `v0.9-predefense` — rollback point if anything breaks
+- Decision: отложили Pipeline/Strategy, batch SVD, ROS2, HMAC до Phase 5 (post-funding). См. suggestions.md.
+- Next: Phase 0 — ball tuning in lab + RPM→m/s calibration. Then Phase 1.1 — `common.py` + `ArenaConfig` before defense if time permits.

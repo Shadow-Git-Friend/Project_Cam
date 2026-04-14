@@ -42,3 +42,6 @@ garage_lab_combined/gt_eval/**/visualizations/
 # Parallel working outputs (test recordings, ablation frames)
 Parallel_working/output/
 weights-20260413T135335Z-3-001/
+
+# Local orientation file, not for repo history
+START_HERE.md
