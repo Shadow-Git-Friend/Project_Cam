@@ -208,7 +208,7 @@ def main():
     ap.add_argument("--intrinsics-dir", default="garage_lab_combined/cal/intrinsics")
     ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
     ap.add_argument("--out", default="garage_lab_combined/output/motion_capture_data_garage.json")
-    ap.add_argument("--ball-model", default="archive/04_garage_backup/garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt")
+    ap.add_argument("--ball-model", default="models/ball/yolo26m-672.pt")
     ap.add_argument("--conf", type=float, default=0.4)
     ap.add_argument("--ball-min-cams", type=int, default=2, help="Minimum cameras required for 3D ball triangulation")
     ap.add_argument("--ball-max-reproj-px", type=float, default=20.0, help="Reject ball 3D if reprojection error is above this threshold")

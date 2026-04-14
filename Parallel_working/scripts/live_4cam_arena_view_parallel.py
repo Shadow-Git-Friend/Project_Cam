@@ -323,6 +323,37 @@ def triangulate_multi(observations, proj_mats):
     return x[:3] / x[3]
 
 
+def project_world_to_pixel(point_w, R, tvec, K, D):
+    rvec, _ = cv2.Rodrigues(R)
+    pt = np.asarray(point_w, dtype=np.float64).reshape(1, 1, 3)
+    uv, _ = cv2.projectPoints(pt, rvec, tvec, K, D)
+    return uv.reshape(2)
+
+
+def robust_triangulate_ball(obs_norm, obs_px, proj_mats, extr, intr, min_cams=2, max_reproj_px=15.0):
+    """Iteratively reject the worst-reprojection camera until all are within tolerance."""
+    if len(obs_norm) < min_cams:
+        return None, [], None
+    active = dict(obs_norm)
+    while len(active) >= min_cams:
+        X = triangulate_multi(active, proj_mats)
+        if X is None:
+            return None, [], None
+        if max_reproj_px <= 0:
+            return X, sorted(active.keys()), 0.0
+        reproj = {}
+        for cam in list(active.keys()):
+            uv = project_world_to_pixel(X, extr[cam]["R"], extr[cam]["tvec"], intr[cam]["K"], intr[cam]["D"])
+            reproj[cam] = float(np.linalg.norm(uv - obs_px[cam]))
+        worst_cam = max(reproj, key=reproj.get)
+        if reproj[worst_cam] <= max_reproj_px:
+            return X, sorted(active.keys()), float(np.mean(list(reproj.values())))
+        if len(active) == min_cams:
+            return None, [], reproj[worst_cam]
+        del active[worst_cam]
+    return None, [], None
+
+
 def transform_world_point_y(world_pt, y_max, enabled=True):
     if world_pt is None or not enabled:
         return world_pt
@@ -1058,8 +1089,8 @@ def main():
     ap.add_argument("--intrinsics-dir", default="garage_lab_combined/cal/intrinsics")
     ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
     ap.add_argument("--dimensions", default="garage_lab_combined/cal/extrinsics/Dimensions.txt")
-    ap.add_argument("--ball-model", default="archive/04_garage_backup/garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt")
-    ap.add_argument("--ball-device", default="cpu", help="Ball detector device, e.g. cpu or cuda:0")
+    ap.add_argument("--ball-model", default="models/ball/yolo26m-672.engine")
+    ap.add_argument("--ball-device", default="cuda:0", help="Ball detector device, e.g. cpu or cuda:0")
     ap.add_argument("--pose-device", default="cpu", help="Pose detector device, e.g. cpu or cuda:0")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
@@ -1067,6 +1098,12 @@ def main():
     ap.add_argument("--fourcc", default="MJPG")
     ap.add_argument("--buffer-size", type=int, default=1)
     ap.add_argument("--ball-conf", type=float, default=0.4)
+    ap.add_argument("--ball-min-cams", type=int, default=2, help="Minimum cameras for 3D ball triangulation")
+    ap.add_argument("--ball-max-reproj-px", type=float, default=15.0, help="Reject ball cams with reproj error above this (px). 0=off")
+    ap.add_argument("--ball-max-speed-mps", type=float, default=25.0, help="Reject ball jumps faster than this (m/s). 0=off")
+    ap.add_argument("--ball-kalman-process-noise", type=float, default=800.0, help="Ball KF process noise (higher = more reactive)")
+    ap.add_argument("--ball-kalman-measurement-noise", type=float, default=25.0, help="Ball KF measurement noise (higher = more smoothing)")
+    ap.add_argument("--ball-coast-frames", type=int, default=6, help="Frames to coast ball on KF prediction when detection drops")
     ap.add_argument(
         "--track-ball",
         action=argparse.BooleanOptionalAction,
@@ -1142,6 +1179,9 @@ def main():
     )
     ap.add_argument("--viz-width", type=int, default=960, help="Width of cv2 3D view window.")
     ap.add_argument("--viz-height", type=int, default=720, help="Height of cv2 3D view window.")
+    ap.add_argument("--record-video", default="", help="If set, write 3D arena view to this .mp4 path.")
+    ap.add_argument("--record-fps", type=float, default=15.0, help="FPS for the recorded video (usually matches capture rate / viz_every).")
+    ap.add_argument("--record-mosaic", default="", help="If set, also write the 4-cam 2D mosaic to this .mp4 path.")
     ap.add_argument(
         "--ema-snap-thresh-mm",
         type=float,
@@ -1463,6 +1503,12 @@ def main():
     pose_select_conf = max(0.2, args.pose_conf - 0.10)
     ball_boxes_state = {}
     ball_state = None
+    ball_kf = JointKalmanFilter(
+        process_noise=args.ball_kalman_process_noise,
+        measurement_noise=args.ball_kalman_measurement_noise,
+        dt=1.0 / max(1, args.fps),
+    )
+    ball_coast_count = 0
     joints_state = np.full((17, 3), np.nan, dtype=np.float32)
     joints_display = np.full((17, 3), np.nan, dtype=np.float32)
     joints_predicted = np.full((17, 3), np.nan, dtype=np.float32)
@@ -1505,8 +1551,28 @@ def main():
         print(f"[INFO] Live loop started. { ' or '.join(stop_hints) } to stop.")
     else:
         print("[INFO] Live loop started. Press Ctrl+C to stop.")
+
+    video_writer_3d = None
+    video_writer_mosaic = None
+
+    import signal as _sig
+    _stop_flag = {"v": False}
+    def _sig_handler(signum, frame):
+        _stop_flag["v"] = True
+    _sig.signal(_sig.SIGTERM, _sig_handler)
+    _sig.signal(_sig.SIGINT, _sig_handler)
+
+    if args.record_video:
+        Path(args.record_video).parent.mkdir(parents=True, exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        video_writer_3d = cv2.VideoWriter(args.record_video, fourcc, args.record_fps,
+                                          (args.viz_width, args.viz_height))
+        print(f"[REC] 3D arena recording → {args.record_video} @ {args.record_fps} fps")
+    if args.record_mosaic:
+        Path(args.record_mosaic).parent.mkdir(parents=True, exist_ok=True)
+
     try:
-        while True:
+        while not _stop_flag["v"]:
             timer.start("total")
             if args.max_runtime_sec > 0 and (time.time() - t_start) > args.max_runtime_sec:
                 break
@@ -1550,6 +1616,7 @@ def main():
 
             ball_boxes = ball_boxes_state.copy()
             ball_obs = {}
+            ball_obs_px = {}
             run_ball = ball_model is not None and (frame_idx % args.ball_every == 0)
             timer.start("ball")
             if run_ball:
@@ -1571,6 +1638,7 @@ def main():
                     cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
                     und = undistort_points((cx, cy), intr[cam]["K"], intr[cam]["D"])
                     ball_obs[cam] = und
+                    ball_obs_px[cam] = np.array([cx, cy], dtype=np.float64)
                     ball_boxes[cam] = (int(x1), int(y1), int(x2), int(y2), conf)
                 ball_boxes_state = ball_boxes
             timer.stop("ball")
@@ -1681,8 +1749,34 @@ def main():
             timer.stop("pose")
 
             timer.start("triang")
-            ball_3d = triangulate_multi(ball_obs, proj) if len(ball_obs) >= 2 else None
-            ball_state = ema_update(ball_state, ball_3d, alpha=args.ema_alpha)
+            ball_3d = None
+            if len(ball_obs) >= max(2, args.ball_min_cams):
+                tri, _used, _rep = robust_triangulate_ball(
+                    obs_norm=ball_obs,
+                    obs_px=ball_obs_px,
+                    proj_mats=proj,
+                    extr=extr,
+                    intr=intr,
+                    min_cams=max(2, args.ball_min_cams),
+                    max_reproj_px=args.ball_max_reproj_px,
+                )
+                if tri is not None and ball_kf.initialized and args.ball_max_speed_mps > 0:
+                    prev_pos = ball_kf.get_position()
+                    speed = float(np.linalg.norm(tri - prev_pos)) / 1000.0 / max(1e-3, 1.0 / max(1, args.fps))
+                    if speed > args.ball_max_speed_mps:
+                        tri = None
+                ball_3d = tri
+            if ball_3d is not None:
+                ball_kf.predict_step()
+                ball_kf.update_step(ball_3d)
+                ball_state = ball_kf.get_position().astype(np.float32)
+                ball_coast_count = 0
+            elif ball_kf.initialized and ball_coast_count < args.ball_coast_frames:
+                ball_kf.predict_step()
+                ball_state = ball_kf.get_position().astype(np.float32)
+                ball_coast_count += 1
+            else:
+                ball_state = None
             if args.show_3d and ball_state is not None and np.isfinite(ball_state).all():
                 ball_traj.append(ball_state.copy())
 
@@ -1907,6 +2001,8 @@ def main():
                         blm_aim=blm_aim_data,
                     )
                     cv2.imshow("Live 3D Arena", viz_img)
+                    if video_writer_3d is not None:
+                        video_writer_3d.write(viz_img)
                 elif render_q is not None and render_proc is not None:
                     if not render_proc.is_alive():
                         print("[WARN] Render worker stopped unexpectedly; disabling 3D updates.")
@@ -1958,6 +2054,13 @@ def main():
                     2,
                 )
                 cv2.imshow("Live 4Cam 2D (q to quit)", mosaic)
+                if args.record_mosaic:
+                    if video_writer_mosaic is None:
+                        h, w = mosaic.shape[:2]
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        video_writer_mosaic = cv2.VideoWriter(args.record_mosaic, fourcc, args.record_fps, (w, h))
+                        print(f"[REC] 2D mosaic recording → {args.record_mosaic} @ {args.record_fps} fps ({w}x{h})")
+                    video_writer_mosaic.write(mosaic)
             timer.stop("mosaic")
 
             # Unified cv2 event pump (handles both 3D and 2D windows)
@@ -1994,6 +2097,12 @@ def main():
                     perf_fh.flush()
 
     finally:
+        if video_writer_3d is not None:
+            video_writer_3d.release()
+            print(f"[REC] Saved 3D video: {args.record_video}")
+        if video_writer_mosaic is not None:
+            video_writer_mosaic.release()
+            print(f"[REC] Saved 2D mosaic: {args.record_mosaic}")
         for cap in caps.values():
             cap.release()
         if udp_sock is not None:

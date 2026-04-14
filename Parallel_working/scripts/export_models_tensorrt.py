@@ -32,7 +32,7 @@ def export_yolo(model_path, fmt="engine", half=True, imgsz=1280, device="cuda:0"
 
     model = YOLO(model_path)
     print(f"[YOLO] Exporting {model_path} to {fmt} (half={half}, imgsz={imgsz})")
-    export_path = model.export(format=fmt, half=half, imgsz=imgsz, device=device)
+    export_path = model.export(format=fmt, half=half, imgsz=imgsz, device=device, dynamic=True, batch=4)
     print(f"[YOLO] Exported to: {export_path}")
     return export_path
 

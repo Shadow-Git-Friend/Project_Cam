@@ -48,6 +48,19 @@ All five serial scripts use **baud 921600** as of 2026-04-09. Do not introduce n
 - Keep firmware (`control_*_full.ino`) commits separate from Python script updates that follow
 - Never force-push without explicit approval
 
+## Thesis Documentation Files
+- `new_complete.md` — full pipeline + per-script reference (math, CLI flags, classes, functions)
+- `thesis_engineering_chapter.md` — engineering chapter draft (chassis/electronics/firmware FSM/comm/safety/integration/ECE-curriculum map)
+- `thesis_defense_qa.md` — defense Q&A prep pack (ECE panel + PhD CV examiner)
+- `thesis_draft.md` — pre-existing draft (do not touch unless asked)
+- `thesis_report _bachelors.md`, `yessimkhan_thesis.md` — reference summaries (read-only)
+- When thesis content changes, update the relevant .md and the "Documentation Files" section in CLAUDE.md
+
+## Recording 3D Arena Videos
+- Use `./Parallel_working/run_record_3d.sh` for combined 3D + 2D mosaic capture
+- Always stop with `q` in the cv2 window or single Ctrl+C — never SIGKILL (unplayable MP4)
+- If an old recording shows "moov atom not found" in ffmpeg, it cannot be recovered — re-record cleanly
+
 ## Folder Boundaries
 - `garage_lab_combined/` — production runtime (live viewer, launcher, BLM scripts)
 - `Parallel_working/` — perf experiments, isolated, do not merge to production without approval

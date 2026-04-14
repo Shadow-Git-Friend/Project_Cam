@@ -48,6 +48,27 @@
 - Default Kalman: PN=500, MN=10, predict-ahead 400ms (best for walk/jog)
 - This run script lives in `Parallel_working/` but its serial counterpart in `garage_lab_combined/` is the only path that touches BLM hardware
 
+## TensorRT Export (mandatory)
+- Always export YOLO engines with `dynamic=True, batch=4` — `export_models_tensorrt.py` already patched
+- Static batch=1 engines segfault (ball) or silently fail (pose) when viewer passes 4-frame batch
+- ONNX input `[1, 3, H, W]` = broken; `['batch', 3, 'height', 'width']` = correct
+- After any `.pt` swap, rebuild the `.engine` from scratch (delete old `.onnx` + `.engine` first)
+
+## Ball Tracking Robustness (2026-04-13)
+- Live viewer uses `robust_triangulate_ball`: iteratively rejects cameras with reprojection error > `--ball-max-reproj-px` (default 15 px)
+- Dedicated ball `JointKalmanFilter` (CV model): defaults `--ball-kalman-process-noise 800 --ball-kalman-measurement-noise 25`
+- Max-speed gate: `--ball-max-speed-mps 25` discards physically impossible jumps
+- Coast-through-drop: `--ball-coast-frames 6` lets KF predict during brief detection failures (~400 ms at 15 FPS)
+- Replaces naive ball EMA. Do not reintroduce `ema_update(ball_state, ...)` — the KF owns ball smoothing now
+- Tune reproj threshold down if false positives persist, up if edge-of-frame balls get dropped
+
+## Recording (run_record_3d.sh)
+- Writes `Parallel_working/output/recordings/arena3d_<ts>.mp4` + `mosaic2d_<ts>.mp4`
+- Uses `mp4v` fourcc — MP4s only playable after clean `VideoWriter.release()`
+- SIGTERM/SIGINT handler in `live_4cam_arena_view_parallel.py` breaks the loop cleanly so moov atom is written
+- Never stop recording with `timeout`/`kill -9` — resulting MP4 is unrecoverable (no moov atom, ffmpeg cannot remux)
+- Stop with `q` in the cv2 window or a single Ctrl+C
+
 ## Known Issues
 - maxfps at 960x540 causes skeleton placement errors
 - matplotlib 3D rendering is the main bottleneck — render-worker-process helps

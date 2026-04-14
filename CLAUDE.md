@@ -152,4 +152,18 @@
 - [x] BLM preflight S2 passed (live aim-only with cameras + correction model, 2026-04-09)
 - [x] BLM preflight S3+S4 passed (RPM gate + controlled fire, full reload→aim→shoot cycle, 2026-04-09)
 - [x] Full integrated live test passed (2026-04-09): pose→aim→fire on multiple joints (left_shoulder, right_knee, nose). First nose shot slightly low. Second nose shot off — ball speed at 800 RPM not yet calibrated.
-- Next: (1) Ball speed calibration (RPM→m/s curve), (2) Training automation mode with voice trigger
+- [x] Thesis engineering chapter drafted (2026-04-13): `thesis_engineering_chapter.md` — chassis/electronics/firmware FSM/comm stack/safety/integration/ECE-curriculum mapping/BOM rationale
+- [x] Defense Q&A pack drafted (2026-04-13): `thesis_defense_qa.md` — ECE panel hardware questions + PhD CV examiner methodology questions + defense tactics
+- [x] Pipeline reference doc drafted (2026-04-13): `new_complete.md` — full per-script reference with math/formulas/CLI flags
+- [x] Ball detection upgraded (2026-04-13): swapped `y26s_v1_garage.pt` (75 epochs, old garage dataset) → `yolo26m-672.engine` (100 epochs, dataset-main, TRT FP16 @imgsz 1280). Benchmark on recorded sequences: walk_01 99.6%→99.6% with higher conf; jump_01 (hard case) **74.9%→84.2% detection rate**, balanced across all 4 cameras (OLD had camEast drop to 22%). Default device moved CPU→cuda:0. Inference ~13 ms. New weights live in `models/ball/`, selection evaluated in `Parallel_working/scripts/ball_model_sanity_check.py`.
+- [x] TRT engines re-exported with `dynamic=True, batch=4` (2026-04-13): previous static-batch engines segfaulted on 4-cam batched inference. `export_models_tensorrt.py` patched. Rebuilt `models/ball/yolo26m-672.engine` and `yolo11m-pose.engine`. Pose skeleton now renders in recordings (was silently failing on batch mismatch).
+- [x] Ball tracking robustness (2026-04-13): live viewer now uses `robust_triangulate_ball` (iterative per-cam reprojection rejection, `--ball-max-reproj-px 15`), dedicated ball Kalman filter (CV model, PN=800/MN=25), max-speed gate (`--ball-max-speed-mps 25`), and coast-through-drop (`--ball-coast-frames 6`). Replaces naive EMA — eliminates teleports, false positives across cams, and visual drops on fast motion.
+- [x] Recording pipeline (2026-04-13): `run_record_3d.sh` writes `arena3d_<ts>.mp4` + `mosaic2d_<ts>.mp4`. SIGTERM/SIGINT handler added so MP4 moov atom is finalized on any clean interruption (press `q` or single Ctrl+C).
+- Next: (1) Tomorrow — continue ball tracking tuning in live lab, (2) Ball speed calibration (RPM→m/s curve), (3) Training automation mode with voice trigger
+
+## Documentation Files (thesis-related, do not modify without approval)
+- `new_complete.md` — full pipeline + per-script reference
+- `thesis_engineering_chapter.md` — engineering chapter draft for thesis
+- `thesis_defense_qa.md` — defense prep Q&A pack
+- `thesis_draft.md` — pre-existing thesis draft (do not touch unless asked)
+- `thesis_report _bachelors.md`, `yessimkhan_thesis.md` — reference materials (read-only)

@@ -1,27 +1,22 @@
 #!/usr/bin/env bash
-# fastest: Both YOLO ball + YOLO-Pose on TensorRT FP16 + Kalman prediction
-# Expected total pipeline: ~50ms per frame (vs ~200ms baseline)
-#   - Ball detection: 8.1ms (TRT) instead of 8.7ms (PyTorch)
-#   - Pose estimation: 6.2ms/cam (TRT) instead of 38.5ms/cam (MMPose)
-#   - 3D render: ~2ms (cv2) instead of ~300ms (matplotlib)
-#   - Kalman prediction: <0.1ms overhead
-#   - pose-every 1 (can afford it now that pose is 6ms not 80ms)
+# Record 3D arena + 2D mosaic videos while running the live yolopose pipeline
+# with the new yolo26m ball detector. Press 'q' in any cv2 window to stop.
 #
-# Prerequisites:
-#   - TensorRT engines must be built first:
-#     python Parallel_working/scripts/export_models_tensorrt.py \
-#       --yolo-model archive/04_garage_backup/garage-20260217T113109Z-3-001/garage/y26s_v1_garage.pt \
-#       --yolo-format engine --yolo-half
-#   - yolo11m-pose.engine must exist (auto-built on first run of yolopose profile)
+# Outputs:
+#   Parallel_working/output/recordings/arena3d_<ts>.mp4
+#   Parallel_working/output/recordings/mosaic2d_<ts>.mp4
 set -euo pipefail
 
 cd /home/hanush/Desktop/Project_Cam
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
-mkdir -p Parallel_working/output
+REC_DIR="Parallel_working/output/recordings"
+mkdir -p "$REC_DIR"
 
-# Use TRT engines if available, fall back to .pt
+VID_3D="$REC_DIR/arena3d_${TS}.mp4"
+VID_2D="$REC_DIR/mosaic2d_${TS}.mp4"
+
 BALL_MODEL="models/ball/yolo26m-672.engine"
 if [ ! -f "$BALL_MODEL" ]; then
   BALL_MODEL="models/ball/yolo26m-672.pt"
@@ -31,19 +26,24 @@ fi
 POSE_MODEL="yolo11m-pose.engine"
 if [ ! -f "$POSE_MODEL" ]; then
   POSE_MODEL="yolo11m-pose.pt"
-  echo "[INFO] Pose TRT engine not found, using PyTorch model"
 fi
+
+echo "[REC] Ball model : $BALL_MODEL"
+echo "[REC] Pose model : $POSE_MODEL"
+echo "[REC] 3D video   : $VID_3D"
+echo "[REC] 2D mosaic  : $VID_2D"
+echo "[REC] Press 'q' in any window to stop recording."
 
 ./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_parallel.py \
   --config garage_lab_combined/config/cameras.yaml \
   --intrinsics-dir garage_lab_combined/cal/intrinsics \
   --extrinsics arena_fixed/cal/extrinsics/extrinsics_fixed.json \
   --dimensions arena_fixed/cal/extrinsics/Dimensions_fixed.txt \
-  --ball-model "$BALL_MODEL" \
   --no-world-y-mirror \
   --invert-y-axis-display \
   --draw-global-axes \
   --global-axis-len-mm 900 \
+  --ball-model "$BALL_MODEL" \
   --ball-device cuda:0 \
   --pose-device cuda:0 \
   --pose-backend yolopose \
@@ -66,10 +66,7 @@ fi
   --kalman-measurement-noise 80 \
   --show-ghost-skeleton \
   --perf-log-every 60 \
-  --perf-jsonl "Parallel_working/output/perf_fastest_${TS}.jsonl" \
-  --udp-target-host 127.0.0.1 \
-  --udp-target-port 5005 \
-  --udp-target-joints right_knee,nose,body_center \
-  --udp-target-conf-min 0.45 \
-  --udp-target-cams-min 3 \
+  --record-video "$VID_3D" \
+  --record-mosaic "$VID_2D" \
+  --record-fps 15 \
   "$@"

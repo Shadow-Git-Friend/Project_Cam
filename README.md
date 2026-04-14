@@ -43,10 +43,10 @@ Project_Cam/
 ## System Components
 
 1. **4-camera synchronized capture** — USB cameras at 1280x720, 15 FPS
-2. **Ball detection** — YOLO (custom-trained on garage arena)
+2. **Ball detection** — YOLO26m trained on dataset-main, 100 epochs, TRT FP16 @ imgsz 1280 (`models/ball/yolo26m-672.engine`)
 3. **Pose estimation** — YOLO-Pose (6.2x faster than MMPose with TRT) or MMPose (RTMDet-m + RTMPose-m)
-4. **Multi-view 3D triangulation** — SVD-based, EMA-smoothed (alpha=0.25)
-5. **Kalman prediction** — 3D motion prediction at 200-400ms horizon (PN=500, MN=10)
+4. **Multi-view 3D triangulation** — SVD-based, EMA-smoothed joints; ball uses robust per-cam reprojection rejection + dedicated Kalman filter
+5. **Kalman prediction** — 3D motion prediction at 200-400ms horizon (joints: PN=500, MN=10; ball: PN=800, MN=25)
 6. **GT correction model** — Compensates systematic extrinsics bias (linear per-axis fit)
 7. **Ballistic solver** — Pitch/yaw angles from 3D target position + launch speed
 8. **BLM control** — ESP32 serial commands (set, shoot, reload, stop, estop)
@@ -64,6 +64,7 @@ Project_Cam/
 | `Parallel_working/scripts/validate_kalman_prediction.py` | Kalman prediction validation |
 | `Parallel_working/scripts/export_models_tensorrt.py` | TensorRT model export |
 | `Parallel_working/scripts/record_test_sequence.py` | Record test sequences |
+| `Parallel_working/run_record_3d.sh` | Record 3D arena + 2D mosaic MP4s during live run |
 
 ## Quick Start
 
