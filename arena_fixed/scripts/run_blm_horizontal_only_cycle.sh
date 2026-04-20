@@ -16,7 +16,8 @@ LOG_DIR="garage_lab_combined/output/blm_logs"
 mkdir -p "$LOG_DIR"
 LOG_PATH="$LOG_DIR/horizontal_only_cycle_${TS}.jsonl"
 
-cd /home/hanush/Desktop/Project_Cam
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "[INFO] Horizontal-only cycle"
 echo "[INFO] yaw_trim_deg=$YAW_TRIM aim_only_wheel_rpm=$AIM_RPM serial=$SERIAL_PORT"

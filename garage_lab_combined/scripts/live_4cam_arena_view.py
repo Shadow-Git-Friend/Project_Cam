@@ -2,6 +2,7 @@ import argparse
 import json
 import re
 import socket
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -11,6 +12,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+sys.path.insert(0, str(Path(__file__).parent))
+from common import ema_update, transform_world_point_y, undistort_points
 
 
 CONNECTIONS = [
@@ -120,12 +124,6 @@ def load_extrinsics(path):
     return cams
 
 
-def undistort_points(pt, k, d):
-    pts = np.array([[pt]], dtype=np.float64)
-    und = cv2.undistortPoints(pts, k, d)
-    return und[0, 0]
-
-
 def triangulate_multi(observations, proj_mats):
     if len(observations) < 2:
         return None
@@ -142,14 +140,6 @@ def triangulate_multi(observations, proj_mats):
     if abs(x[3]) < 1e-9:
         return None
     return x[:3] / x[3]
-
-
-def transform_world_point_y(world_pt, y_max, enabled=True):
-    if world_pt is None or not enabled:
-        return world_pt
-    out = np.array(world_pt, copy=True)
-    out[..., 1] = y_max - out[..., 1]
-    return out
 
 
 def flatten_predictions(preds):
@@ -364,14 +354,6 @@ def draw_live_scene(
     ax.text2D(0.02, 0.02, f"Frame: {frame_idx} | FPS: {fps_est:.2f}", transform=ax.transAxes, fontsize=10, color="#444444")
 
 
-def ema_update(prev, new, alpha):
-    if new is None:
-        return prev
-    if prev is None:
-        return np.array(new, dtype=np.float32)
-    return (1.0 - alpha) * prev + alpha * np.array(new, dtype=np.float32)
-
-
 def make_mosaic(cam_frames, ball_boxes, per_cam_pose):
     panels = []
     for cam in CAM_ORDER:
@@ -415,8 +397,8 @@ def main():
     )
     ap.add_argument("--config", default="garage_lab_combined/config/cameras.yaml")
     ap.add_argument("--intrinsics-dir", default="garage_lab_combined/cal/intrinsics")
-    ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
-    ap.add_argument("--dimensions", default="garage_lab_combined/cal/extrinsics/Dimensions.txt")
+    ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
+    ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
     ap.add_argument("--ball-model", default="models/ball/yolo26m-672.engine")
     ap.add_argument("--ball-device", default="cuda:0", help="Ball detector device, e.g. cpu or cuda:0")
     ap.add_argument("--pose-device", default="cpu", help="Pose detector device, e.g. cpu or cuda:0")

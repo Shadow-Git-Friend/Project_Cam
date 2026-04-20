@@ -31,6 +31,69 @@
   The critical insight from your research is correct: the largest latency contributor is probably not your code — it's the camera-to-USB-to-software path. Your threaded capture + buffer-size-1 strategy
   mitigates software-side buffering, but cannot fix camera-internal delays.
 
+## USB Bandwidth Engineering (Hardware-Systems Note for the Committee)
+
+**Confirmed empirically 2026-04-17** via `lsusb -t`, `lsusb`, and `v4l2-ctl --list-formats-ext`.
+
+### Hardware
+
+| Item | Measured / Confirmed Value |
+|---|---|
+| Cameras | 4× Hikvision DS-E12, USB Vendor:Product `2bdf:0289`, labelled "1080P USB Camera" |
+| USB class at negotiation | **USB 2.0 High-Speed, 480 Mbps per camera** (`lsusb -t` reports `Driver=uvcvideo, 480M` on all four devices) |
+| Host controller | Single Intel xHCI at PCI `0000:00:14.0`, all 4 cameras share it |
+| Cables | 2× 5 m + 2× 10 m USB 3.0 **active** (built-in signal repeater). Supplier: `https://mobile.yangkeduo.com/goods.html?ps=RVFvfdXjWm` |
+| Supported formats | MJPG / YUYV / NV12 at 1280×720. MJPG advertises up to 30 FPS. |
+| Live operating point | **1280×720 MJPG @ 15 FPS** |
+
+### Design Choice: Long-Reach 4-Camera Deployment
+
+The lab and target deployment (Academy Kairat pitch-scale) both require cameras **placed at the arena/pitch corners, not at the PC**. Passive USB 2.0 cables are specified to ~5 m; passive USB 3.0 to ~3 m. Both fall short of the ≥10 m runs required by any realistic multi-camera sports rig. The active USB 3.0 extension cables (with an in-cable signal-repeater IC) were selected specifically to meet this physical-reach requirement while preserving UVC compatibility on Linux.
+
+An important subtlety — verified after physical deployment — is that the **cables cannot upgrade the device class of the camera**. The DS-E12 is a USB 2.0 device by firmware class, so the active cables correctly re-drive the USB 2.0 signal across 10 m but do not negotiate a USB 3.0 SuperSpeed link. This was confirmed by inspecting the link speed in `lsusb -t`: every DS-E12 sits on a 480 Mbps endpoint, not a 5 Gbps one. The active cables did their job (reach), but the aggregate pipeline bandwidth is therefore capped by USB 2.0, not by the cable spec printed on the jacket.
+
+### Bandwidth Budget and the MJPG Decision
+
+With four cameras sharing one USB 2.0 controller, the effective isochronous budget is approximately 320 Mbps (USB 2.0 reserves ~80% of the raw 480 Mbps for isochronous endpoints with protocol overhead).
+
+| Pixel format | Per-cam rate @ 1280×720, 15 FPS | Aggregate (×4) | Fits USB 2.0? |
+|---|---|---|---|
+| YUYV (uncompressed, 2 B/px) | 221 Mbps | 884 Mbps | **No** |
+| NV12 (uncompressed, 1.5 B/px) | 166 Mbps | 663 Mbps | **No** |
+| MJPG (in-camera JPEG, ~10× compression) | ~20 Mbps | ~80 Mbps | **Yes, with ample margin** |
+
+**MJPG was not a stylistic preference; it was the only format that fits four simultaneous streams on one USB 2.0 controller at our operating resolution.** The cost paid for this is CPU cycles — every frame is JPEG-decoded by the host-side capture thread (`cv2.imdecode`). This is budgeted inside the threaded capture stage and is invisible to the downstream geometry pipeline.
+
+### Why the Operating Point Is 15 FPS
+
+At 1280×720 MJPG the camera firmware advertises 30 FPS per device. In practice the system is limited by two compounding ceilings:
+
+1. **USB 2.0 isochronous scheduling on a shared xHCI controller.** When four UVC devices share one host controller, frame delivery is subject to bus-wide microframe allocation and the camera-internal MJPG encoding pipeline. In our measurements this caps stable aggregate capture at ~15–18 FPS across all four cameras, well below what the raw Mbps budget alone would suggest. This contention pattern is a well-known limitation of multi-camera UVC on a single host controller and is the documented motivation for industrial machine-vision cameras to use USB 3.0 or GigE Vision.
+2. **Inference throughput.** Batched 4-camera YOLO + pose inference on the RTX 2080 Ti with TensorRT FP16 also saturates near 15 FPS.
+
+The two limits meet at approximately the same operating point, which is why the pipeline is explicitly configured with `--fps 15` rather than allowed to free-run.
+
+### Why This Is Acceptable for the Thesis
+
+The thesis claims were validated at this operating point:
+- Precision post-correction: 4.4 mm (joint-touch), 3.1 mm (rigid ball GT).
+- Pose-to-aim latency: ~50 ms.
+- Shot accuracy verified on the integrated live test (2026-04-09) at multiple joints.
+
+The research questions are about the method — multi-view triangulation, pose-guided ballistic targeting, safety FSM on the BLM — not about maximising frame rate. The 15 FPS operating point is therefore an **honest, documented operating envelope**, not an unmitigated weakness.
+
+### Documented Upgrade Path (Future-Work Chapter)
+
+For deployment at Academy Kairat (full-pitch scale, faster ball speeds, harder motion blur) the camera layer is the first thing to upgrade, not the software:
+
+- **Move to USB 3.0 native machine-vision cameras** (e.g. Basler ace 2 USB3 Mono global-shutter, FLIR Blackfly S USB3). These negotiate SuperSpeed links (5 Gbps) per camera and expose manual exposure + external trigger, directly addressing the rolling-shutter + auto-exposure motion-blur limitations documented in the ball-tracking observations.
+- **The active-cable infrastructure partly carries over.** USB 3.0 active cables of the same class can be re-used, though SuperSpeed integrity over 10 m typically requires a re-driver at both ends or a fibre-optical USB 3.0 extender — a known and specified upgrade, not a redesign.
+- **For pitch-scale (≥50 m runs)**: GigE Vision with PoE+ is the industry-standard answer and fits the same software abstraction through `aravis-viewer`/`harvester` UVC-like wrappers.
+
+The engineering point to the committee is this: the current system has been **characterised down to the link layer**, the operating point has been **justified with bandwidth math**, and the upgrade path is **specific and costed** rather than vague.
+
+---
+
   What Would Actually Help (Ranked by Impact per Dollar)
 
   Tier 1: Same Budget, Better Camera (~$40-60 each)

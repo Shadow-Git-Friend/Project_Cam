@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/hanush/Desktop/Project_Cam
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 # Same geometry/pose baseline as run_live_visual_invert_quality.sh,
 # but relaxed UDP gates for horizontal-only BLM aiming stage.

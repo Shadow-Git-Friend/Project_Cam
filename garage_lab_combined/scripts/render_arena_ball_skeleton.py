@@ -380,8 +380,8 @@ def render(args):
 def main():
     ap = argparse.ArgumentParser(description="Render arena + ball + skeleton in garage world frame")
     ap.add_argument("--motion", default="data/processed/motion_capture_data.json")
-    ap.add_argument("--dimensions", default="garage_lab_combined/cal/extrinsics/Dimensions.txt")
-    ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
+    ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
+    ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
     ap.add_argument("--out-dir", default="garage_lab_combined/output/frames_arena")
     ap.add_argument("--out-video", default="garage_lab_combined/output/garage_arena_ball_skel.mp4")
     ap.add_argument("--fps", type=int, default=15)

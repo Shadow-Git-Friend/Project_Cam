@@ -159,14 +159,16 @@
 - [x] TRT engines re-exported with `dynamic=True, batch=4` (2026-04-13): previous static-batch engines segfaulted on 4-cam batched inference. `export_models_tensorrt.py` patched. Rebuilt `models/ball/yolo26m-672.engine` and `yolo11m-pose.engine`. Pose skeleton now renders in recordings (was silently failing on batch mismatch).
 - [x] Ball tracking robustness (2026-04-13): live viewer now uses `robust_triangulate_ball` (iterative per-cam reprojection rejection, `--ball-max-reproj-px 15`), dedicated ball Kalman filter (CV model, PN=800/MN=25), max-speed gate (`--ball-max-speed-mps 25`), and coast-through-drop (`--ball-coast-frames 6`). Replaces naive EMA — eliminates teleports, false positives across cams, and visual drops on fast motion.
 - [x] Recording pipeline (2026-04-13): `run_record_3d.sh` writes `arena3d_<ts>.mp4` + `mosaic2d_<ts>.mp4`. SIGTERM/SIGINT handler added so MP4 moov atom is finalized on any clean interruption (press `q` or single Ctrl+C).
-- Next: (1) Tomorrow — continue ball tracking tuning in live lab, (2) Ball speed calibration (RPM→m/s curve), (3) Training automation mode with voice trigger
+- [x] Ball reproj threshold tuned (2026-04-17): `--ball-max-reproj-px` default raised 15→25 in `live_4cam_arena_view_parallel.py` to let motion-blurred far detections pass triangulation.
+- [x] Voice integration (2026-04-17): colleague's Vosk model (`/home/hanush/Desktop/Speech to text/model`) wired into BLM via UDP IPC (127.0.0.1:5006). New scripts: `voice_command_test.py` (standalone tester), `voice_bridge.py` (UDP producer, runs in colleague's venv). `blm_follow.py` added `--voice-port` UDP listener thread + `--auto-reload` flag (training-mode rapid-fire: after shoot, auto-`reload`, target + RPM persist, next "go" fires same joint). Voice grammar: 16 phrases mapping to COCO joint names + shoot/reload/pause/resume/quit. Multi-venv architecture avoids installing Vosk/pyaudio into project venv.
+- Next: (1) RPM→m/s calibration (Phase 0 close-out — blocking shot accuracy at 800 RPM), (2) Test voice + auto-reload in live lab, (3) Phase 1.1 `common.py` + `ArenaConfig` before defense.
 
 ## Documentation Files (thesis-related, do not modify without approval)
 - `new_complete.md` — full pipeline + per-script reference
 - `thesis_engineering_chapter.md` — engineering chapter draft for thesis
 - `thesis_defense_qa.md` — defense prep Q&A pack
 - `thesis_draft.md` — pre-existing thesis draft (do not touch unless asked)
-- `thesis_report _bachelors.md`, `yessimkhan_thesis.md` — reference materials (read-only)
+- `thesis_report_bachelors.md`, `yessimkhan_thesis.md` — reference materials (read-only)
 
 ## Session Log
 
@@ -175,3 +177,10 @@
 - Frozen: tag `v0.9-predefense` — rollback point if anything breaks
 - Decision: отложили Pipeline/Strategy, batch SVD, ROS2, HMAC до Phase 5 (post-funding). См. suggestions.md.
 - Next: Phase 0 — ball tuning in lab + RPM→m/s calibration. Then Phase 1.1 — `common.py` + `ArenaConfig` before defense if time permits.
+
+### 2026-04-17 — Voice + auto-reload + repo cleanup
+- Ball tracking: raised `--ball-max-reproj-px` default 15→25 in `live_4cam_arena_view_parallel.py` (motion-blurred far detections now pass). FPS cap ~15–18 confirmed as hardware ceiling, not code.
+- Voice integration: colleague's Vosk model wired via UDP IPC to avoid installing vosk/pyaudio into project venv. Two new scripts in `garage_lab_combined/scripts/`: `voice_command_test.py` (standalone), `voice_bridge.py` (UDP producer on 5006). `blm_follow.py` got `--voice-port` listener + `--auto-reload` for training-mode rapid-fire (wheels keep spinning, target persists, auto-`reload` after each shot).
+- Commands for full stack: Terminal 1 `run_live_blm.sh` / Terminal 2 `blm_follow.py --voice-port 5006 [--shoot-enabled --wheel-rpm 800 --auto-reload]` / Terminal 3 `voice_bridge.py` under colleague's venv.
+- Cleanup pass: identified `voice_commands/` (old prototype, 48K), `weights-20260413T135335Z-3-001/` (raw download, 340M), legacy `output/frames_*/` dumps (~713M), `sync_frames/` (2.6G), `synchronized_video/` (1.2G) as deletion candidates. Awaiting user confirmation before purge.
+- Next: (1) Confirm & purge legacy folders, (2) RPM→m/s calibration (Phase 0 close-out), (3) Test voice + auto-reload in live lab, (4) Phase 1.1 `common.py` refactor if time permits pre-defense.

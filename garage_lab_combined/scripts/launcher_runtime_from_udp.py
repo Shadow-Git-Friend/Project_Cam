@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from launcher_common import apply_correction, load_correction_model, solve_angles_ballistic, world_to_launcher_xy_delta
 
 try:
     import serial
@@ -93,101 +94,12 @@ def load_zone_by_joint(
     return out
 
 
-def load_correction_model(path: str) -> Optional[Dict]:
-    """Load a GT correction model JSON (from evaluate_ball_static_gt.py output)."""
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"[WARN] Could not load correction model {path}: {e}")
-        return None
-
-
-def apply_correction(xyz_mm: np.ndarray, model: Dict, mode: str = "linear") -> np.ndarray:
-    """Apply GT correction model to estimated 3D position.
-
-    Modes:
-        'bias'   — subtract global mean bias:  corrected = estimated + bias_add
-        'linear' — per-axis linear fit:  corrected_axis = a * estimated_axis + b
-        'none'   — passthrough (no correction)
-    """
-    if mode == "none" or model is None:
-        return xyz_mm
-    xyz = np.array(xyz_mm, dtype=np.float64)
-    if mode == "bias":
-        bias = model.get("global_bias_add_mm", {})
-        xyz[0] += bias.get("x", 0.0)
-        xyz[1] += bias.get("y", 0.0)
-        xyz[2] += bias.get("z", 0.0)
-    elif mode == "linear":
-        linear = model.get("axis_linear_gt_from_est", {})
-        for i, ax in enumerate(["x", "y", "z"]):
-            if ax in linear:
-                xyz[i] = linear[ax]["a"] * xyz[i] + linear[ax]["b"]
-    return xyz
-
-
 def point_in_zone(x_mm: float, y_mm: float, z_mm: float, zone: Dict[str, float], margin_mm: float = 0.0) -> bool:
     return (
         zone["x_min"] - margin_mm <= x_mm <= zone["x_max"] + margin_mm
         and zone["y_min"] - margin_mm <= y_mm <= zone["y_max"] + margin_mm
         and zone["z_min"] - margin_mm <= z_mm <= zone["z_max"] + margin_mm
     )
-
-
-def forward_right_vectors_from_yaw(yaw_deg: float) -> Tuple[np.ndarray, np.ndarray]:
-    # yaw in world XY: 0deg = +X, +CCW toward +Y
-    yaw = math.radians(yaw_deg)
-    fwd = np.array([math.cos(yaw), math.sin(yaw), 0.0], dtype=np.float64)
-    right = np.array([fwd[1], -fwd[0], 0.0], dtype=np.float64)
-    return fwd, right
-
-
-def world_to_launcher_xy_delta(
-    target_xyz_mm: np.ndarray,
-    launcher_xyz_mm: np.ndarray,
-    launcher_yaw_deg: float,
-) -> Tuple[float, float, float]:
-    """
-    Returns local launcher coords in meters:
-      x_lateral_m (+right),
-      y_forward_m (+forward),
-      dz_m (target_z - launcher_z)
-    """
-    d = np.asarray(target_xyz_mm, dtype=np.float64) - np.asarray(launcher_xyz_mm, dtype=np.float64)
-    fwd, right = forward_right_vectors_from_yaw(launcher_yaw_deg)
-    x_lat_mm = float(np.dot(d[:2], right[:2]))
-    y_fwd_mm = float(np.dot(d[:2], fwd[:2]))
-    dz_mm = float(d[2])
-    return x_lat_mm / 1000.0, y_fwd_mm / 1000.0, dz_mm / 1000.0
-
-
-def solve_angles_ballistic(
-    x_lat_m: float,
-    y_fwd_m: float,
-    dz_m: float,
-    v_ms: float,
-    g: float = 9.81,
-) -> Optional[Tuple[float, float]]:
-    """
-    Returns (v_deg, h_deg), where:
-      h = pan (atan2 lateral/forward)
-      v = low-arc pitch
-    """
-    if y_fwd_m <= 0.15:
-        return None
-    d = math.sqrt(x_lat_m * x_lat_m + y_fwd_m * y_fwd_m)
-    if d <= 1e-6:
-        return None
-
-    h_deg = math.degrees(math.atan2(x_lat_m, y_fwd_m))
-    disc = v_ms**4 - g * (g * d**2 + 2.0 * dz_m * v_ms**2)
-    if disc < 0.0:
-        return None
-
-    v_rad = math.atan((v_ms**2 - math.sqrt(disc)) / (g * d))
-    v_deg = math.degrees(v_rad)
-    return v_deg, h_deg
 
 
 def calculate_kinematics_v1(
@@ -227,53 +139,6 @@ def speed_from_distance(
 ) -> float:
     v = base_mps + slope_mps_per_m * distance_m
     return max(min_mps, min(max_mps, v))
-
-
-def load_correction_model(path: str) -> Optional[dict]:
-    """Load a GT correction model JSON (from evaluate_ball_static_gt.py).
-
-    Returns dict with 'bias' (3,) and 'linear' {axis: {a, b}} or None.
-    """
-    if not path:
-        return None
-    p = Path(path)
-    if not p.exists():
-        print(f"[WARN] correction model not found: {path}")
-        return None
-    with open(p) as f:
-        data = json.load(f)
-    model = {
-        "bias": np.array([
-            data["global_bias_add_mm"]["x"],
-            data["global_bias_add_mm"]["y"],
-            data["global_bias_add_mm"]["z"],
-        ], dtype=np.float64),
-    }
-    if "axis_linear_gt_from_est" in data:
-        model["linear"] = data["axis_linear_gt_from_est"]
-    return model
-
-
-def apply_correction(xyz_mm: np.ndarray, model: Optional[dict], mode: str = "linear") -> np.ndarray:
-    """Apply GT correction model to a 3D position.
-
-    Modes:
-        'bias'   — simple additive bias correction
-        'linear' — per-axis linear fit (gt = a*est + b)
-        'none'   — pass-through
-    """
-    if model is None or mode == "none":
-        return xyz_mm
-    xyz = np.array(xyz_mm, dtype=np.float64)
-    if mode == "bias":
-        return xyz + model["bias"]
-    if mode == "linear" and "linear" in model:
-        lin = model["linear"]
-        for i, ax in enumerate(["x", "y", "z"]):
-            if ax in lin:
-                xyz[i] = lin[ax]["a"] * xyz[i] + lin[ax]["b"]
-        return xyz
-    return xyz + model["bias"]
 
 
 def parse_joint_float_map(spec: str) -> Dict[str, float]:

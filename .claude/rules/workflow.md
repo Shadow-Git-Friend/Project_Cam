@@ -53,7 +53,7 @@ All five serial scripts use **baud 921600** as of 2026-04-09. Do not introduce n
 - `thesis_engineering_chapter.md` — engineering chapter draft (chassis/electronics/firmware FSM/comm/safety/integration/ECE-curriculum map)
 - `thesis_defense_qa.md` — defense Q&A prep pack (ECE panel + PhD CV examiner)
 - `thesis_draft.md` — pre-existing draft (do not touch unless asked)
-- `thesis_report _bachelors.md`, `yessimkhan_thesis.md` — reference summaries (read-only)
+- `thesis_report_bachelors.md`, `yessimkhan_thesis.md` — reference summaries (read-only)
 - When thesis content changes, update the relevant .md and the "Documentation Files" section in CLAUDE.md
 
 ## Recording 3D Arena Videos

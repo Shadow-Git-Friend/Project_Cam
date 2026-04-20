@@ -26,7 +26,8 @@ LOG_DIR="garage_lab_combined/output/blm_logs"
 mkdir -p "$LOG_DIR"
 LOG_PATH="$LOG_DIR/aim_stage2_${LABEL}_${TS}.jsonl"
 
-cd /home/hanush/Desktop/Project_Cam
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "[INFO] joint=$JOINT target=($X_MM,$Y_MM,$Z_MM) yaw_trim=$YAW_TRIM pitch_trim=$PITCH_TRIM"
 echo "[INFO] log=$LOG_PATH"

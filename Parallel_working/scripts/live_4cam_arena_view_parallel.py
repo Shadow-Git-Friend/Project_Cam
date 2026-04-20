@@ -1087,8 +1087,8 @@ def main():
     )
     ap.add_argument("--config", default="garage_lab_combined/config/cameras.yaml")
     ap.add_argument("--intrinsics-dir", default="garage_lab_combined/cal/intrinsics")
-    ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
-    ap.add_argument("--dimensions", default="garage_lab_combined/cal/extrinsics/Dimensions.txt")
+    ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
+    ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
     ap.add_argument("--ball-model", default="models/ball/yolo26m-672.engine")
     ap.add_argument("--ball-device", default="cuda:0", help="Ball detector device, e.g. cpu or cuda:0")
     ap.add_argument("--pose-device", default="cpu", help="Pose detector device, e.g. cpu or cuda:0")
@@ -1099,8 +1099,8 @@ def main():
     ap.add_argument("--buffer-size", type=int, default=1)
     ap.add_argument("--ball-conf", type=float, default=0.4)
     ap.add_argument("--ball-min-cams", type=int, default=2, help="Minimum cameras for 3D ball triangulation")
-    ap.add_argument("--ball-max-reproj-px", type=float, default=15.0, help="Reject ball cams with reproj error above this (px). 0=off")
-    ap.add_argument("--ball-max-speed-mps", type=float, default=25.0, help="Reject ball jumps faster than this (m/s). 0=off")
+    ap.add_argument("--ball-max-reproj-px", type=float, default=25.0, help="Reject ball cams with reproj error above this (px). 0=off")
+    ap.add_argument("--ball-max-speed-mps", type=float, default=40.0, help="Reject ball jumps faster than this (m/s). 0=off")
     ap.add_argument("--ball-kalman-process-noise", type=float, default=800.0, help="Ball KF process noise (higher = more reactive)")
     ap.add_argument("--ball-kalman-measurement-noise", type=float, default=25.0, help="Ball KF measurement noise (higher = more smoothing)")
     ap.add_argument("--ball-coast-frames", type=int, default=6, help="Frames to coast ball on KF prediction when detection drops")
@@ -1193,6 +1193,7 @@ def main():
     ap.add_argument("--max-frame-age-ms", type=float, default=200.0, help="Discard stale camera frames older than this age.")
     ap.add_argument("--perf-log-every", type=int, default=60, help="Print perf summary every N frames (0 disables).")
     ap.add_argument("--perf-jsonl", default="", help="Optional JSONL path for perf summaries.")
+    ap.add_argument("--ball-log-jsonl", default="", help="Optional JSONL path logging ball 3D per frame (for speed calibration).")
     ap.add_argument(
         "--render-worker-process",
         action=argparse.BooleanOptionalAction,
@@ -1509,6 +1510,7 @@ def main():
         dt=1.0 / max(1, args.fps),
     )
     ball_coast_count = 0
+    ball_frames_since_detect = 10_000
     joints_state = np.full((17, 3), np.nan, dtype=np.float32)
     joints_display = np.full((17, 3), np.nan, dtype=np.float32)
     joints_predicted = np.full((17, 3), np.nan, dtype=np.float32)
@@ -1541,6 +1543,12 @@ def main():
         perf_path.parent.mkdir(parents=True, exist_ok=True)
         perf_fh = perf_path.open("a", encoding="utf-8")
         print(f"[INFO] Perf JSONL enabled: {perf_path}")
+    ball_log_fh = None
+    if args.ball_log_jsonl:
+        ball_log_path = Path(args.ball_log_jsonl)
+        ball_log_path.parent.mkdir(parents=True, exist_ok=True)
+        ball_log_fh = ball_log_path.open("a", encoding="utf-8")
+        print(f"[INFO] Ball JSONL enabled: {ball_log_path}")
 
     stop_hints = []
     if args.show_2d:
@@ -1760,25 +1768,52 @@ def main():
                     min_cams=max(2, args.ball_min_cams),
                     max_reproj_px=args.ball_max_reproj_px,
                 )
-                if tri is not None and ball_kf.initialized and args.ball_max_speed_mps > 0:
+                # Max-speed gate only when gap is short enough to be physically meaningful.
+                # After a long drop, treat the new detection as a re-acquisition (no gate).
+                if (tri is not None and ball_kf.initialized
+                        and args.ball_max_speed_mps > 0
+                        and ball_frames_since_detect <= 3):
                     prev_pos = ball_kf.get_position()
-                    speed = float(np.linalg.norm(tri - prev_pos)) / 1000.0 / max(1e-3, 1.0 / max(1, args.fps))
+                    elapsed = max(1e-3, ball_frames_since_detect / max(1, args.fps))
+                    speed = float(np.linalg.norm(tri - prev_pos)) / 1000.0 / elapsed
                     if speed > args.ball_max_speed_mps:
                         tri = None
                 ball_3d = tri
             if ball_3d is not None:
+                # On re-acquisition after a long drop, reset KF to new measurement
+                # so we don't blend with stale velocity.
+                if ball_frames_since_detect > args.ball_coast_frames:
+                    ball_kf = JointKalmanFilter(
+                        process_noise=args.ball_kalman_process_noise,
+                        measurement_noise=args.ball_kalman_measurement_noise,
+                        dt=1.0 / max(1, args.fps),
+                    )
                 ball_kf.predict_step()
                 ball_kf.update_step(ball_3d)
                 ball_state = ball_kf.get_position().astype(np.float32)
                 ball_coast_count = 0
+                ball_frames_since_detect = 0
             elif ball_kf.initialized and ball_coast_count < args.ball_coast_frames:
                 ball_kf.predict_step()
+                # Damp velocity during coast so we don't fly off on bounces/stops.
+                ball_kf.x[3:] *= 0.7
                 ball_state = ball_kf.get_position().astype(np.float32)
                 ball_coast_count += 1
+                ball_frames_since_detect += 1
             else:
                 ball_state = None
+                ball_frames_since_detect += 1
             if args.show_3d and ball_state is not None and np.isfinite(ball_state).all():
                 ball_traj.append(ball_state.copy())
+            if ball_log_fh is not None:
+                rec = {"t": time.time(), "frame": int(frame_idx), "n_cams": int(len(ball_obs))}
+                if ball_state is not None and np.isfinite(ball_state).all():
+                    rec["ball_mm"] = [float(ball_state[0]), float(ball_state[1]), float(ball_state[2])]
+                    rec["detected"] = (ball_3d is not None)
+                else:
+                    rec["ball_mm"] = None
+                    rec["detected"] = False
+                ball_log_fh.write(json.dumps(rec) + "\n")
 
             if run_pose:
                 for j in triangulated_joint_indices:
@@ -2115,6 +2150,8 @@ def main():
                 render_proc.terminate()
         if perf_fh is not None:
             perf_fh.close()
+        if ball_log_fh is not None:
+            ball_log_fh.close()
         cv2.destroyAllWindows()
         plt.close("all")
         print("[DONE] Live viewer stopped.")

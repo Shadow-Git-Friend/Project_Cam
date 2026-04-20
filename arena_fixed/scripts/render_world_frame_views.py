@@ -26,7 +26,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Render arena world-coordinate snapshots using the exact draw logic of live_4cam_arena_view."
     )
-    ap.add_argument("--repo-root", default="/home/hanush/Desktop/Project_Cam")
+    ap.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
     ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
     ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
     ap.add_argument("--launcher-x-mm", type=float, default=600.0)

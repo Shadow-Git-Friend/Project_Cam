@@ -40,7 +40,6 @@ Safety:
 
 import argparse
 import json
-import math
 import select
 import socket
 import sys
@@ -49,6 +48,7 @@ import time
 from typing import Callable, Dict, Optional
 
 import numpy as np
+from launcher_common import apply_correction, load_correction_model, solve_angles_ballistic, world_to_launcher_xy_delta
 
 try:
     import serial
@@ -74,74 +74,6 @@ def _default_safe_print(msg: str) -> None:
 
 
 safe_print: Callable[[str], None] = _default_safe_print
-
-
-# --------------- ballistic math (shared with live_aim_test.py) ---------------
-
-def forward_right_vectors_from_yaw(yaw_deg: float):
-    yaw = math.radians(yaw_deg)
-    fwd = np.array([math.cos(yaw), math.sin(yaw), 0.0], dtype=np.float64)
-    right = np.array([fwd[1], -fwd[0], 0.0], dtype=np.float64)
-    return fwd, right
-
-
-def world_to_launcher_xy_delta(target_xyz_mm, launcher_xyz_mm, launcher_yaw_deg):
-    d = np.asarray(target_xyz_mm, dtype=np.float64) - np.asarray(launcher_xyz_mm, dtype=np.float64)
-    fwd, right = forward_right_vectors_from_yaw(launcher_yaw_deg)
-    x_lat_mm = float(np.dot(d[:2], right[:2]))
-    y_fwd_mm = float(np.dot(d[:2], fwd[:2]))
-    dz_mm = float(d[2])
-    return x_lat_mm / 1000.0, y_fwd_mm / 1000.0, dz_mm / 1000.0
-
-
-def solve_angles_ballistic(x_lat_m, y_fwd_m, dz_m, v_ms, g=9.81):
-    if y_fwd_m <= 0.15:
-        return None
-    d = math.sqrt(x_lat_m**2 + y_fwd_m**2)
-    if d <= 1e-6:
-        return None
-    h_deg = math.degrees(math.atan2(x_lat_m, y_fwd_m))
-    disc = v_ms**4 - g * (g * d**2 + 2.0 * dz_m * v_ms**2)
-    if disc < 0.0:
-        return None
-    v_rad = math.atan((v_ms**2 - math.sqrt(disc)) / (g * d))
-    return math.degrees(v_rad), h_deg
-
-
-# --------------- correction model ---------------
-
-def load_correction_model(path: str) -> Optional[Dict]:
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        model = {
-            "bias": np.array([
-                data["global_bias_add_mm"]["x"],
-                data["global_bias_add_mm"]["y"],
-                data["global_bias_add_mm"]["z"],
-            ], dtype=np.float64),
-        }
-        if "axis_linear_gt_from_est" in data:
-            model["linear"] = data["axis_linear_gt_from_est"]
-        return model
-    except Exception as e:
-        print(f"[WARN] Could not load correction model {path}: {e}")
-        return None
-
-
-def apply_correction(xyz_mm: np.ndarray, model: Optional[Dict], mode: str = "linear") -> np.ndarray:
-    if model is None or mode == "none":
-        return xyz_mm.copy()
-    xyz = np.array(xyz_mm, dtype=np.float64)
-    if mode == "bias":
-        return xyz + model["bias"]
-    if mode == "linear" and "linear" in model:
-        lin = model["linear"]
-        for i, ax in enumerate(["x", "y", "z"]):
-            if ax in lin:
-                xyz[i] = lin[ax]["a"] * xyz[i] + lin[ax]["b"]
-        return xyz
-    return xyz + model["bias"]
 
 
 # --------------- Serial reader thread ---------------
@@ -382,12 +314,14 @@ class CommandHandler:
     which is fine — the user shouldn't be typing other things mid-cycle."""
 
     def __init__(self, state: dict, state_lock: threading.Lock,
-                 ser, serial_reader, shoot_enabled: bool):
+                 ser, serial_reader, shoot_enabled: bool,
+                 auto_reload: bool = False):
         self.state = state
         self.state_lock = state_lock
         self.ser = ser
         self.serial_reader = serial_reader
         self.shoot_enabled = shoot_enabled
+        self.auto_reload = auto_reload
 
     def _do_reload(self):
         with self.state_lock:
@@ -429,7 +363,11 @@ class CommandHandler:
             self.state["armed"] = False
             self.state["last_v"] = None
             self.state["last_h"] = None
-        safe_print("  [SHOT COMPLETE] DISARMED — type 'reload' for next shot.")
+        if self.auto_reload:
+            safe_print("  [SHOT COMPLETE] auto-reloading...")
+            self._do_reload()
+        else:
+            safe_print("  [SHOT COMPLETE] DISARMED — type 'reload' for next shot.")
 
     def handle(self, raw: str):
         cmd = (raw or "").strip().lower()
@@ -515,6 +453,13 @@ def main():
                     help="Print one status line per N sends")
     ap.add_argument("--verbose-serial", action="store_true",
                     help="Print all (filtered) serial output")
+    ap.add_argument("--voice-port", type=int, default=0,
+                    help="If >0, bind UDP localhost:<port> for voice commands "
+                         "from voice_bridge.py. 0 = disabled.")
+    ap.add_argument("--auto-reload", action="store_true",
+                    help="After each shot, automatically reload. Target and "
+                         "wheel RPM persist, so the next 'go' fires at the "
+                         "same joint without re-aiming. Requires --shoot-enabled.")
     args = ap.parse_args()
 
     if args.joint not in TARGETABLE_JOINTS:
@@ -584,8 +529,29 @@ def main():
     print(f"Targetable: {', '.join(TARGETABLE_JOINTS)}")
     print()
 
-    handler = CommandHandler(state, state_lock, ser, serial_reader, args.shoot_enabled)
+    handler = CommandHandler(state, state_lock, ser, serial_reader,
+                             args.shoot_enabled, auto_reload=args.auto_reload)
     editor = LineEditor(on_line=handler.handle)
+
+    if args.voice_port > 0:
+        def _voice_listener(port, on_cmd):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.bind(("127.0.0.1", port))
+            while True:
+                try:
+                    data, _ = s.recvfrom(256)
+                    cmd = data.decode("utf-8", errors="ignore").strip()
+                    if cmd:
+                        safe_print(f"  [VOICE] {cmd}")
+                        on_cmd(cmd)
+                except Exception as e:
+                    safe_print(f"  [VOICE ERR] {e}")
+        threading.Thread(
+            target=_voice_listener,
+            args=(args.voice_port, handler.handle),
+            daemon=True,
+        ).start()
+        print(f"[OK] Voice UDP listener on 127.0.0.1:{args.voice_port}")
 
     # Re-bind global safe_print so all status output goes through the editor
     # (clears + redraws the in-progress input line on every print).

@@ -1,9 +1,13 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent))
+from common import undistort_points
 
 
 def load_intrinsics(path):
@@ -23,18 +27,12 @@ def load_extrinsics(path):
     for name, cam in data.items():
         rvec = np.array(cam["rvec"], dtype=np.float64).reshape(3, 1)
         tvec = np.array(cam["tvec"], dtype=np.float64).reshape(3, 1)
-        # extrinsics_main.json is in meters -> convert to mm
+        # Extrinsics JSON stores tvec in meters -> convert to mm.
         tvec = tvec * 1000.0
         R, _ = cv2.Rodrigues(rvec)
         P = np.hstack([R, tvec])  # world->cam (no K)
         cams[name] = {"R": R, "tvec": tvec, "P": P}
     return cams
-
-
-def undistort_points(pt, K, D):
-    pts = np.array([[pt]], dtype=np.float64)
-    und = cv2.undistortPoints(pts, K, D)
-    return und[0, 0]
 
 
 def triangulate_multi(observations, proj_mats):
@@ -206,7 +204,7 @@ def main():
     ap.add_argument("--video-south", required=True)
     ap.add_argument("--video-west", required=True)
     ap.add_argument("--intrinsics-dir", default="garage_lab_combined/cal/intrinsics")
-    ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
+    ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
     ap.add_argument("--out", default="garage_lab_combined/output/motion_capture_data_garage.json")
     ap.add_argument("--ball-model", default="models/ball/yolo26m-672.pt")
     ap.add_argument("--conf", type=float, default=0.4)

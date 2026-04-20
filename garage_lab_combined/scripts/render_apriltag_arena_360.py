@@ -172,8 +172,8 @@ def encode_video(frames_dir, out_video, fps, crf, preset):
 
 def main():
     ap = argparse.ArgumentParser(description="Render AprilTag garage arena (static + 360 orbit).")
-    ap.add_argument("--dimensions", default="garage_lab_combined/cal/extrinsics/Dimensions.txt")
-    ap.add_argument("--extrinsics", default="garage_lab_combined/cal/extrinsics/extrinsics_main.json")
+    ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
+    ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
     ap.add_argument("--out-image", default="garage_lab_combined/output/arena_apriltag_static_v2.png")
     ap.add_argument("--out-video", default="garage_lab_combined/output/arena_apriltag_360_v2.mp4")
     ap.add_argument("--frames-dir", default="garage_lab_combined/output/frames_arena_apriltag_360_v2")

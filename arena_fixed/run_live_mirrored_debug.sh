@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/hanush/Desktop/Project_Cam
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 ./venv/bin/python garage_lab_combined/scripts/live_4cam_arena_view.py \
   --config garage_lab_combined/config/cameras.yaml \
