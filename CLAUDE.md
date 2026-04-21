@@ -184,3 +184,19 @@
 - Commands for full stack: Terminal 1 `run_live_blm.sh` / Terminal 2 `blm_follow.py --voice-port 5006 [--shoot-enabled --wheel-rpm 800 --auto-reload]` / Terminal 3 `voice_bridge.py` under colleague's venv.
 - Cleanup pass: identified `voice_commands/` (old prototype, 48K), `weights-20260413T135335Z-3-001/` (raw download, 340M), legacy `output/frames_*/` dumps (~713M), `sync_frames/` (2.6G), `synchronized_video/` (1.2G) as deletion candidates. Awaiting user confirmation before purge.
 - Next: (1) Confirm & purge legacy folders, (2) RPM→m/s calibration (Phase 0 close-out), (3) Test voice + auto-reload in live lab, (4) Phase 1.1 `common.py` refactor if time permits pre-defense.
+
+### 2026-04-20 — Ball detection diagnosis + single-cam fallback + Gemini review
+- **Tier 0 additions from second-pass review + Gemini/tree review analysis landed.** New `suggestions.md` section (Tier verdicts for gemini3.1pro.md, industrial-tree critique). Safe additions only; pre-defense freeze intact.
+- **Ball detection offline analyzer** (`Parallel_working/scripts/ball_detection_analyzer.py`): sweeps conf thresholds + top-K on either per-cam frame directories OR `mosaic2d_*.mp4` 2×2 tiled videos. Reveals how many detections the current conf=0.40 threshold silently discards.
+- **Real-recording findings (bounce/fast/slow from 2026-04-15):**
+  - `slow`: 64.8% @ conf=0.40 → 67.3% @ 0.15 (small gain, ball confident)
+  - `fast`: 46.1% → 51.9% (+5.8 pp) — motion streaks real (aspect 1.6–3.3 at low conf)
+  - `bounce`: **23.1% → 27.0% @ conf alone; 23.1% → 33.4% @ imgsz=672→960** — the dominant lever is input resolution, not conf
+  - camNorth on bounce: **58.4% → 98.0% at imgsz=960** (+39.6 pp). The other three cams stay 10–17% regardless of model/threshold tuning — bounce visibility is **structurally geometric** (ball outside frustum or occluded), not a detection problem.
+- **New flag `--ball-imgsz`** (default 672, try 960 for bounce) in `live_4cam_arena_view_parallel.py`. Engine was exported with `dynamic=True` so no re-export needed. +8 ms latency per 4-cam batch, fits 15 FPS budget easily.
+- **New single-camera fallback** (`project_ray_to_z_plane`): when only 1 cam sees the ball, project that cam's ray to the KF-predicted Z plane (or floor on cold start). Geometry-safe; does not touch `triangulate_multi`. Flag-guarded, off by default:
+  - `--ball-single-cam-fallback` — enable
+  - `--ball-single-cam-max-frames 15` — runaway cap (~1 s at 15 FPS)
+  - `--ball-single-cam-floor-mm 0.0` — cold-start Z-plane
+- **Recommended runtime flags** (once live-validated): `--ball-imgsz 960 --ball-single-cam-fallback`. Will consider flipping `--ball-conf` default 0.40→0.25 after observing live behavior.
+- Next: (1) Live test bounce/fast with new flags, (2) if stable, flip defaults in separate commit, (3) record a `bounce_01` per-cam sequence via `record_test_sequence.py` for regression fixture seed (R1 keystone).

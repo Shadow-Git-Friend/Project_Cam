@@ -13,7 +13,7 @@
 
 ## Pose / Vision Testing Order
 1. Dry-run / offline first (`process_4cam_to_3d.py` with recorded clips)
-2. Ablation / evaluation on recorded sequences (`record_test_sequence.py` → `ablation_ema_adaptive.py`)
+2. Ablation / evaluation on recorded sequences (`record_test_sequence.py` → `ablation_ema_adaptive.py` for pose; `ball_detection_analyzer.py` for ball conf/imgsz sweeps — accepts `mosaic2d_*.mp4` directly via `--mosaic`)
 3. Live viewer without BLM (visual verification — `run_live_parallel_yolopose.sh`)
 4. Live viewer + BLM aim overlay, no actuation (`run_live_blm.sh` with `--demo-blm`)
 

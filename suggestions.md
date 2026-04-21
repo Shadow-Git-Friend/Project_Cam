@@ -890,3 +890,99 @@ class LowArcSolver:
 Для стартапа критичны **продукт + безопасность + демо**, а не Clean Architecture. Code quality agent дал чек-лист из своей зоны комфорта — в стартап-контексте его совет-лист сдвигается, но не инвертируется. Большая часть его «идеала» остаётся лишней даже для инвесторского pitch.
 
 Реально полезных дел на ближайшие 2 месяца — ~20 часов кода + 40 часов демо/документации/outreach. Это выполнимо. Clean Architecture переписывание на 200 часов — не выполнимо и не нужно.
+
+---
+
+# 2026-04-20 — gemini3.1pro.md + Tree-Critique Verdicts
+
+Captured from analysis of `gemini3.1pro.md` + a separate "industrial project tree" critique. Nothing below is actioned — these are ranked tickets.
+
+## A. gemini3.1pro.md — Tier verdicts
+
+### Already shipped (inform, do not re-implement)
+- Offline Vosk voice with wake words → `voice_bridge.py` + `blm_follow.py --voice-port 5006`
+- Non-blocking serial → `SerialReader` thread pattern (`.claude/rules/workflow.md`)
+- Calibration-as-config → `calibration_manifest.yaml`, `arena_dimensions.yaml`
+- Dependency pinning → `requirements.lock.txt`
+- Safety gates (angle clamp, RPM gate, ESTOP) → `.claude/rules/safety.md`
+- Robust reprojection-reject + KF on ball → `robust_triangulate_ball` + `JointKalmanFilter`
+
+### Tier 0 — safe pre-defense additions
+- R2: README demo GIF + architecture diagram
+- R3: "Harsh ECE/CV professor" LLM adversary using `thesis_defense_qa.md`
+- R4: Document hardware-sync jitter as "known limitation + future work" in defense Q&A
+- R13: Process-isolation audit documented in `.claude/rules/perf.md`
+- R14: `git mv` root thesis `.docx` / `.md` drafts into `docs/thesis/`
+
+### Tier 1 — pre-defense housekeeping (only if >10 days to defense)
+- R1 (keystone): `tests/` regression fixtures for `triangulate_multi`, `solve_angles_ballistic`, `world_to_launcher_xy_delta`, using recorded sequences (walk_01/jog_01/jump_01) as golden. Nothing in Tier 2 ships without this.
+- R6: Pydantic `ArenaConfig` loading `calibration_manifest.yaml` + `arena_dimensions.yaml`
+
+### Tier 2 — post-defense (gated on R1 fixtures)
+- R5: Confidence-weighted SVD triangulation — YOLO-Pose conf as per-cam weight (HIGH potential accuracy lever, joint p95 243 mm → lower)
+- R7: `LauncherClient` class extraction (UDP sender + serial + clamp + RPM gate)
+- R8: Typed Pydantic packet schemas (`JointPacket`, `LauncherCommand`)
+- R9: CRC8/16 + start/end markers on ESP32 serial + firmware `control_13` validation
+- R10: Levenberg–Marquardt non-linear refinement layered after SVD (flag-guarded)
+- R11: Physics-informed EKF for *incoming* ball only (scope excludes launcher ballistics)
+- R12: Bundle Adjustment to replace arena_fixed linear bias correction (touches extrinsics; needs GT re-eval as regression)
+- Backend unification (yolopose primary, mmpose fallback) in `process_4cam_to_3d.py`
+- Migrate 7 remaining legacy `extrinsics_main.json` refs → `extrinsics_fixed.json`
+- Hardcoded `/home/hanush` → `PROJECT_CAM_ROOT` env var (~23 paths)
+
+### Tier 3 — post-funding / commercial
+- R18: Footbonaut drill state machine (Xavi / Lewandowski / Vinicius) — thesis-demo narrative value even without full impl
+- R17: Projector calibration + "Follow the Light" floor mapping
+- R16: Face ID + athlete DB + parent portal + Stripe subscription (GDPR note: embeddings only, not raw frames)
+- R15: Attention-cropped ROI detection (only worthwhile at 60+ FPS target)
+- R19: Automated highlight clip export (9:16 crop on success event)
+- R20: Leaderboards / gamification scoring
+- R21: FreeRTOS dual-core on ESP32 (motor Core 0, serial Core 1)
+- Hardware strobe trigger (Arduino Nano square wave to 4 cameras) — true sync
+
+### Rejected / deferred with qualification
+- "Merge `garage_lab_combined/` + `Parallel_working/` into flat `src/`" — violates isolation guardrail; 23 hardcoded paths + shell scripts would break. Tier 2/3 only.
+- "Drop resolution to 640×480 for 30–60 FPS" — already tested; 960×540 caused documented skeleton drift. Intrinsics scaling required.
+- "4-process multiprocessing split" — partially exists (`--render-worker-process`, worker pool for inference). Gemini proposes what already ships.
+- "Attention cropping for inference speedup" — inference is not the bottleneck (YOLO-Pose TRT @ 6.2 ms). matplotlib + USB bandwidth are.
+
+## B. "Industrial Tree" Critique — Verdict
+
+External assessment scored the tree 3/10 industrial and proposed full `src/project_cam/` restructure. Verdict:
+
+- **Diagnosis: mostly right.** Folder-based versioning, root clutter, no `pyproject.toml`, no `tests/` are real smells.
+- **Score: too harsh.** 4.5–5/10 industrial after Tier 0 (CANONICAL.md, calibration_manifest.yaml, common.py, lockfile) — not 3.
+- **Prescription timing: wrong.** A `src/project_cam/` rename pre-defense would:
+  1. Break every `Parallel_working/*.sh` and `arena_fixed/*.sh` shell entry
+  2. Invalidate ~23 hardcoded `/home/hanush/...` paths (documented migration debt)
+  3. Require re-running S0–S4 BLM safety tests (import paths changed)
+  4. Trade a *working robot* for *clean folders* — wrong trade pre-defense
+- **`venv/` at repo root** is a non-issue (gitignored, filesystem-only).
+- **`archive/` bloat** is actually *correct* pre-defense — committee may request progression artifacts. Post-defense: move to separate `project_cam_archive` repo.
+
+### Target tree (Tier 2, post-defense, gated on R1)
+```
+project_cam/
+├── src/project_cam/{vision,tracking,ballistics,hardware,calibration,core}/
+├── tests/        (regression fixtures from R1 — precondition)
+├── configs/      (absorbs arena_fixed/config/*.yaml)
+├── calibration/  (absorbs arena_fixed/cal/*)
+├── scripts/      (thin CLI entrypoints; today's shell scripts map here)
+├── models/, data/, docs/, .github/
+├── pyproject.toml, requirements.lock.txt, CANONICAL.md, README.md
+```
+
+### Migration sequence (do not execute — plan only)
+1. R1 regression fixtures merged + green
+2. Freeze firmware + calibration + extrinsics versions
+3. Create `src/project_cam/` skeleton, move code module-by-module with `git mv`
+4. Update imports in one module at a time, run fixtures after each move
+5. Rewrite shell scripts in `scripts/` to call new entry points
+6. Purge `/home/hanush` hardcodes → `PROJECT_CAM_ROOT`
+7. Archive `garage_lab_combined/`, `Parallel_working/`, `arena_fixed/`, `archive/` into a separate repo
+8. Re-run S0–S4 + integrated live test as regression
+
+### What NOT to do pre-defense
+- No flat `src/` rename
+- No `archive/` deletion
+- No purge of `Parallel_working/` vs `garage_lab_combined/` distinction (CANONICAL.md already resolves the ambiguity)

@@ -43,10 +43,11 @@ Safe-tuning matrix (ema-alpha, pose-every, ball-every, viz-every и т.д.) пе
 - [x] TRT engines с dynamic batch=4 (ball + pose) — 2026-04-13
 - [x] Robust ball triangulation + Kalman в live viewer — 2026-04-13
 - [x] SIGTERM handler для recording (MP4 finalize) — 2026-04-13
-- [ ] **Live-lab тюнинг ball tracking** — продолжить завтра
-  - Записать 3 сценария (slow roll, fast throw, bounce) с новым стеком
-  - Проверить `--ball-max-reproj-px`, `--ball-coast-frames`, `--ball-max-speed-mps` эмпирически
-  - Зафиксировать финальные значения в `run_record_3d.sh` и CLAUDE.md
+- [x] **Запись 3 сценариев (slow / fast / bounce)** — 2026-04-15 (`mosaic2d_20260415_132*.mp4`)
+- [x] **Offline ball-detection sweep** — `Parallel_working/scripts/ball_detection_analyzer.py` (2026-04-20). Показал: conf=0.40 отбрасывает 40–60% recoverable detections на bounce/fast; imgsz=672→960 поднимает camNorth bounce 58%→98%.
+- [x] **Single-cam fallback в live viewer** — `project_ray_to_z_plane` + `--ball-single-cam-fallback` (2026-04-20). Geometry-safe, flag-guarded, off by default. Фиксирует структурную проблему "ball disappears when <2 cams see it".
+- [ ] **Live-lab тест новых флагов** — `--ball-imgsz 960 --ball-single-cam-fallback`, bounce + fast в арене. Если стабильно → flip defaults отдельным коммитом.
+- [ ] **Запись `bounce_01` per-cam sequence** через `record_test_sequence.py` — seed для Phase 1 regression fixture (R1 keystone).
 - [ ] **Ball speed calibration (RPM→m/s curve)**
   - Выстрелы на 500/600/700/800/900 RPM
   - Измерить скорость через 2 кадра + известное расстояние

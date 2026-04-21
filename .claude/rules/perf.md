@@ -54,13 +54,32 @@
 - ONNX input `[1, 3, H, W]` = broken; `['batch', 3, 'height', 'width']` = correct
 - After any `.pt` swap, rebuild the `.engine` from scratch (delete old `.onnx` + `.engine` first)
 
-## Ball Tracking Robustness (2026-04-13)
-- Live viewer uses `robust_triangulate_ball`: iteratively rejects cameras with reprojection error > `--ball-max-reproj-px` (default 15 px)
+## Ball Tracking Robustness (2026-04-13, extended 2026-04-20)
+- Live viewer uses `robust_triangulate_ball`: iteratively rejects cameras with reprojection error > `--ball-max-reproj-px` (default 25 px as of 2026-04-17)
 - Dedicated ball `JointKalmanFilter` (CV model): defaults `--ball-kalman-process-noise 800 --ball-kalman-measurement-noise 25`
-- Max-speed gate: `--ball-max-speed-mps 25` discards physically impossible jumps
+- Max-speed gate: `--ball-max-speed-mps 40` discards physically impossible jumps
 - Coast-through-drop: `--ball-coast-frames 6` lets KF predict during brief detection failures (~400 ms at 15 FPS)
 - Replaces naive ball EMA. Do not reintroduce `ema_update(ball_state, ...)` — the KF owns ball smoothing now
 - Tune reproj threshold down if false positives persist, up if edge-of-frame balls get dropped
+
+### Ball Detection Levers (2026-04-20, measured on real bounce/fast/slow recordings)
+- `--ball-imgsz` (default 672) — engine exported with `dynamic=True` so inference-time resize works. **Bumping to 960 moves camNorth bounce detection from 58% → 98%.** +8 ms per 4-cam batch, fits 15 FPS budget.
+- `--ball-conf` (default 0.40) — lowering to 0.15 recovers +4–6 pp detection rate on fast/bounce but adds false-positive risk on empty frames. Consider 0.25 as conservative middle ground.
+- Motion-blur streak presence: real (aspect > 1.5 seen at low conf on fast/bounce). Fixing via top-K + multi-hypothesis association is Tier 2 (requires regression fixtures).
+- **Structural bounce limit:** at bounce moment only camNorth reliably sees the ball (other 3 cams are 10–17% regardless of detector tuning). No threshold/model change fixes it — the ball is genuinely outside East/South/West frustums or occluded. The fix is the single-cam fallback (below) or camera-placement changes (hardware).
+
+### Single-camera fallback (2026-04-20)
+- `project_ray_to_z_plane(obs_norm, R, tvec, target_z)` — new helper in `live_4cam_arena_view_parallel.py`. Intersects one camera's undistorted ray with a world Z-plane. Pure geometry, no iteration.
+- Flag-guarded, off by default:
+  - `--ball-single-cam-fallback` — enable
+  - `--ball-single-cam-max-frames 15` — cap before forcing coast-through (prevents KF depth drift without geometric constraint)
+  - `--ball-single-cam-floor-mm 0.0` — cold-start Z-plane if KF has no depth yet
+- When ≥2 cams: unchanged SVD path (`robust_triangulate_ball`). When exactly 1 cam + flag on + within max-frames: ray→Z-plane; Z taken from `ball_kf.predict_ahead(1/fps)`, else floor. When 0 cams: unchanged coast-through.
+- Does **not** modify `triangulate_multi`, `transform_world_point_y`, `ema_update`, or UDP schema.
+- Recommended live flags for bounce-heavy sessions: `--ball-imgsz 960 --ball-single-cam-fallback`.
+
+### Offline diagnosis tool
+- `Parallel_working/scripts/ball_detection_analyzer.py` — read-only sweep of conf thresholds + top-K over a sequence. Accepts either per-cam frame directories (`--sequence`) or `mosaic2d_*.mp4` 2×2 tiled videos (`--mosaic`). Reports per-cam detection rate, multi-box frequency, bbox aspect ratio histogram, and recovered-vs-0.40 delta.
 
 ## Recording (run_record_3d.sh)
 - Writes `Parallel_working/output/recordings/arena3d_<ts>.mp4` + `mosaic2d_<ts>.mp4`

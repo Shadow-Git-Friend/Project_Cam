@@ -330,6 +330,34 @@ def project_world_to_pixel(point_w, R, tvec, K, D):
     return uv.reshape(2)
 
 
+def project_ray_to_z_plane(obs_norm, R, tvec, target_z):
+    """Intersect a single-camera ray with the world plane Z = target_z.
+
+    obs_norm: (u, v) undistorted normalized image coords (output of cv2.undistortPoints).
+    R: 3x3 world->cam rotation. tvec: 3x1 world->cam translation (mm).
+    Returns 3D world point (mm) on the Z-plane, or None if the ray is parallel.
+
+    Geometry: a pixel ray in cam frame at depth s is X_c = s * [u, v, 1].
+    Then X_w = R^T (X_c - t). Solving X_w[2] = target_z for s gives a single
+    intersection point. Gracefully handles rays near-parallel to the Z-plane.
+    """
+    u, v = float(obs_norm[0]), float(obs_norm[1])
+    t = np.asarray(tvec, dtype=np.float64).reshape(3)
+    # Third row of R^T == third column of R.
+    r2 = R[:, 2]
+    A = r2[0] * u + r2[1] * v + r2[2]
+    if abs(A) < 1e-6:
+        return None
+    B = r2[0] * t[0] + r2[1] * t[1] + r2[2] * t[2]
+    s = (target_z + B) / A
+    if s <= 0:
+        # Ray pointing backward from the camera — plane is behind the lens.
+        return None
+    X_c = np.array([u * s, v * s, s], dtype=np.float64)
+    X_w = R.T @ (X_c - t)
+    return X_w
+
+
 def robust_triangulate_ball(obs_norm, obs_px, proj_mats, extr, intr, min_cams=2, max_reproj_px=15.0):
     """Iteratively reject the worst-reprojection camera until all are within tolerance."""
     if len(obs_norm) < min_cams:
@@ -1090,6 +1118,10 @@ def main():
     ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
     ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
     ap.add_argument("--ball-model", default="models/ball/yolo26m-672.engine")
+    ap.add_argument("--ball-imgsz", type=int, default=672,
+                    help="Ball detector input size. 672 = default (engine was exported at this). "
+                         "Try 960 for small/distant/bounce balls — dynamic-batch engine handles it, "
+                         "~+8ms latency per 4-cam batch.")
     ap.add_argument("--ball-device", default="cuda:0", help="Ball detector device, e.g. cpu or cuda:0")
     ap.add_argument("--pose-device", default="cpu", help="Pose detector device, e.g. cpu or cuda:0")
     ap.add_argument("--width", type=int, default=1280)
@@ -1104,6 +1136,15 @@ def main():
     ap.add_argument("--ball-kalman-process-noise", type=float, default=800.0, help="Ball KF process noise (higher = more reactive)")
     ap.add_argument("--ball-kalman-measurement-noise", type=float, default=25.0, help="Ball KF measurement noise (higher = more smoothing)")
     ap.add_argument("--ball-coast-frames", type=int, default=6, help="Frames to coast ball on KF prediction when detection drops")
+    ap.add_argument("--ball-single-cam-fallback", action="store_true",
+                    help="When only 1 cam sees the ball, project that cam's ray to the KF-predicted Z plane "
+                         "(or floor if KF uninitialized). Recovers bounce/low-visibility frames at the cost of "
+                         "slightly noisier single-cam depth. Off by default.")
+    ap.add_argument("--ball-single-cam-max-frames", type=int, default=15,
+                    help="Max consecutive frames the single-cam fallback can be used without a multi-cam re-lock. "
+                         "Prevents KF depth from drifting without geometric constraint.")
+    ap.add_argument("--ball-single-cam-floor-mm", type=float, default=0.0,
+                    help="Floor Z (mm) used when the KF has no depth estimate yet. Default 0 (world floor).")
     ap.add_argument(
         "--track-ball",
         action=argparse.BooleanOptionalAction,
@@ -1632,6 +1673,7 @@ def main():
                 ball_results = ball_model(
                     frame_batch,
                     conf=args.ball_conf,
+                    imgsz=args.ball_imgsz,
                     verbose=False,
                     stream=False,
                     device=args.ball_device,
@@ -1758,6 +1800,7 @@ def main():
 
             timer.start("triang")
             ball_3d = None
+            ball_single_cam_used = False
             if len(ball_obs) >= max(2, args.ball_min_cams):
                 tri, _used, _rep = robust_triangulate_ball(
                     obs_norm=ball_obs,
@@ -1779,6 +1822,25 @@ def main():
                     if speed > args.ball_max_speed_mps:
                         tri = None
                 ball_3d = tri
+            elif (args.ball_single_cam_fallback and len(ball_obs) == 1
+                    and ball_frames_since_detect <= args.ball_single_cam_max_frames):
+                # Single-cam fallback: intersect this cam's ray with the KF-predicted Z plane.
+                # Use KF depth if we have a recent lock; else fall back to the floor plane.
+                cam_solo = next(iter(ball_obs.keys()))
+                if ball_kf.initialized:
+                    dt_ahead = max(1e-3, 1.0 / max(1, args.fps))
+                    target_z = float(ball_kf.predict_ahead(dt_ahead)[2])
+                else:
+                    target_z = float(args.ball_single_cam_floor_mm)
+                tri = project_ray_to_z_plane(
+                    ball_obs[cam_solo],
+                    extr[cam_solo]["R"],
+                    extr[cam_solo]["tvec"],
+                    target_z,
+                )
+                if tri is not None and np.isfinite(tri).all():
+                    ball_3d = tri
+                    ball_single_cam_used = True
             if ball_3d is not None:
                 # On re-acquisition after a long drop, reset KF to new measurement
                 # so we don't blend with stale velocity.
