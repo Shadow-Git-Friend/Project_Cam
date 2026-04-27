@@ -279,9 +279,117 @@ def check_s11(prs: _Prs) -> None:
     assert_slide_text_contains(slide, "in-sample")
     assert_slide_text_not_contains(slide, "3D trajectory verified")
 
+# ---------- Slide 12: key results — P95 + raw/corrected ----------
+
+S12_SUBTITLE = (
+    "All thresholds met within validated static/live-aim scope. "
+    "Raw ball mean 150.77 mm → corrected 95.17 mm via in-sample bias model (Fig 5.1)."
+)
+S12_CAPTIONS = {
+    "t105": "corrected ball mean (P95 166.51 mm)",
+    "t107": "joint mean over 62 valid trials (P95 198.73 mm)",
+    "t109": "knee / hip / shoulder means; P95 171 / 172 / 200 mm (Table 5.3)",
+    "t111": "E-STOP latch response (Sec 3.14.3)",
+    "t113": "live YOLO-Pose pipeline; ≈15 ms compute, 52 ms headroom (Sec 3.3)",
+}
+
+def apply_s12(prs: _Prs) -> None:
+    slide = prs.slides[11]
+    set_paragraphs(find_shape_by_name(slide, "t101"), [S12_SUBTITLE])
+    for name, txt in S12_CAPTIONS.items():
+        set_paragraphs(find_shape_by_name(slide, name), [txt])
+
+def check_s12(prs: _Prs) -> None:
+    slide = prs.slides[11]
+    for needle in ["166.51", "198.73", "171 / 172 / 200", "150.77", "95.17"]:
+        assert_slide_text_contains(slide, needle)
+
+# ---------- Slide 13: limitations — expand to 6 bullets ----------
+
+S13_LIMIT_LINES = [
+    "1. UNVALIDATED: closed-loop firing at a moving subject (Sec 1.3, 6.3)",
+    "2. In-sample bias correction — fitted on same 36-pt set (Sec 4.4.2, 6.3)",
+    "3. 19 / 81 joint-touch trials invalid (23.5 %) due to occlusion (Sec 5.4)",
+    "4. RPM → velocity not empirically calibrated (Sec 5.9, 6.4.3)",
+    "5. Single-person, single-arena, indoor-only evaluation (Sec 6.3)",
+    "6. CV Kalman neutral on jump motion — IMM filter is future work (Sec 5.7)",
+]
+S13_NEW_TAKEAWAY = (
+    "Takeaway: validated scope (perception → safety-gated single-shot live-aim) "
+    "is a strong partial validation. The unvalidated boundary — moving-subject "
+    "closed-loop firing — is precisely defined and is the next milestone."
+)
+
+def apply_s13(prs: _Prs) -> None:
+    slide = prs.slides[12]
+    set_paragraphs(find_shape_by_name(slide, "t101"), S13_LIMIT_LINES)
+    set_paragraphs(find_shape_by_name(slide, "t106"), [S13_NEW_TAKEAWAY])
+
+def check_s13(prs: _Prs) -> None:
+    slide = prs.slides[12]
+    assert_slide_text_contains(slide, "23.5 %")
+    assert_slide_text_contains(slide, "RPM → velocity not empirically calibrated")
+    assert_slide_text_contains(slide, "IMM filter is future work")
+
+# ---------- Slide 14: conclusions — disadvantages + cost honesty ----------
+
+S14_CARD_TEXT = {
+    "TextBox 3":  "BLM aims live from 3D joints (Sec 5.9)",
+    "TextBox 4":  "4 USB cameras, ≈USD 120 perception / ≈USD 358 total",
+    "TextBox 6":  "Safety-gated S0–S4 integration, E-STOP <100 ms (Sec 3.14.3)",
+    "TextBox 7":  "Voice + keyboard control behind safety gates (Sec 3.12)",
+}
+S14_NEW_TAKEAWAY = (
+    "Takeaway: strong partial validation of a low-cost, pose-guided BLM. "
+    "Disadvantages: in-sample bias fit · 3-camera occlusion floor · "
+    "RPM → velocity not yet calibrated."
+)
+
+def apply_s14(prs: _Prs) -> None:
+    slide = prs.slides[13]
+    for name, txt in S14_CARD_TEXT.items():
+        set_paragraphs(find_shape_by_name(slide, name), [txt])
+    set_paragraphs(find_shape_by_name(slide, "t121"), [S14_NEW_TAKEAWAY])
+
+def check_s14(prs: _Prs) -> None:
+    slide = prs.slides[13]
+    assert_slide_text_contains(slide, "USD 358")
+    assert_slide_text_contains(slide, "Disadvantages:")
+    assert_slide_text_not_contains(slide, "closed-loop")
+
+# ---------- Slide 15: future work + ethics + standards how ----------
+
+S15_DUAL_USE = (
+    "Dual-use: a system capable of autonomously tracking human body parts "
+    "and directing a projectile has obvious dual-use potential beyond sports "
+    "training. Operator presence, hardware NC E-STOP, exclusion zone, and the "
+    "six-stage protocol are the necessary safeguards (Sec 6.5)."
+)
+S15_STD_HOW = {
+    "t107": "Machinery safety — L1–L10 hazard map (Sec 3.14)",
+    "t110": "Safety-related control — NC E-STOP = ISO 13849-1 Cat-1 stop (L8)",
+    "t113": "Wiring, fusing, E-STOP — 24V/50A fuse, single star-point ground (Sec 3.2)",
+    "t116": "Operator-only zone during controlled fire (Sec 3.14.2)",
+}
+
+def apply_s15(prs: _Prs) -> None:
+    slide = prs.slides[14]
+    set_paragraphs(find_shape_by_name(slide, "t119"), [S15_DUAL_USE])
+    for name, txt in S15_STD_HOW.items():
+        set_paragraphs(find_shape_by_name(slide, name), [txt])
+
+def check_s15(prs: _Prs) -> None:
+    slide = prs.slides[14]
+    assert_slide_text_contains(slide, "Dual-use")
+    assert_slide_text_contains(slide, "ISO 13849-1 Cat-1")
+    assert_slide_text_contains(slide, "NC E-STOP")
+    assert_slide_text_contains(slide, "24V/50A fuse")
+
 # ---------- Registries (extended by later tasks) ----------
 
 APPLY_FUNCTIONS = [apply_s1, apply_s2, apply_s3, apply_s4, apply_s5,
-                   apply_s8, apply_s9, apply_a5, apply_s10, apply_s11]
+                   apply_s8, apply_s9, apply_a5, apply_s10, apply_s11,
+                   apply_s12, apply_s13, apply_s14, apply_s15]
 CHECK_FUNCTIONS = [check_s1, check_s2, check_s3, check_s4, check_s5,
-                   check_s8, check_s9, check_a5, check_s10, check_s11]
+                   check_s8, check_s9, check_a5, check_s10, check_s11,
+                   check_s12, check_s13, check_s14, check_s15]
