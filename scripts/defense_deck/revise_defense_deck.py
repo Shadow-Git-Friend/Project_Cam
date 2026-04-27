@@ -23,7 +23,11 @@ DST = REPO / "thesis_defense_presentation" / "thesis_defense_final_revised.pptx"
 # and S22 (untouched Q&A backup quoting the future-work plan).
 BANNED = {
     "[PLACEHOLDER_": (),  # never anywhere
-    "closed-loop": (12, 21),
+    # Legitimate hyphenated occurrences: S13 (limitation describing the
+    # unvalidated boundary), S15 (Future Work milestone explicitly framing
+    # closed-loop firing as the next experimental step), S22 (untouched Q&A
+    # backup quoting the future-work plan).
+    "closed-loop": (12, 14, 21),
 }
 
 REQUIRED_STRINGS = [
@@ -61,16 +65,13 @@ def check() -> None:
         except AssertionError as e:
             failures.append(f"{fn.__name__}: {e}")
     # Banned strings.
-    # TODO uncomment in Task 12 — disabled during incremental build because
-    # closed-loop occurrences on S5/S15 and [PLACEHOLDER_ on S16/S18 are not
-    # cleaned up until Tasks 4, 10, 11 respectively.
-    # for needle, allow_idx in BANNED.items():
-    #     for i, slide in enumerate(prs.slides):
-    #         haystack = "\n".join(
-    #             sh.text_frame.text for sh in slide.shapes if sh.has_text_frame
-    #         )
-    #         if needle in haystack and i not in allow_idx:
-    #             failures.append(f"slide {i+1} contains banned {needle!r}")
+    for needle, allow_idx in BANNED.items():
+        for i, slide in enumerate(prs.slides):
+            haystack = "\n".join(
+                sh.text_frame.text for sh in slide.shapes if sh.has_text_frame
+            )
+            if needle in haystack and i not in allow_idx:
+                failures.append(f"slide {i+1} contains banned {needle!r}")
     # Required strings (anywhere in deck).
     full = "\n".join(
         sh.text_frame.text
@@ -78,9 +79,9 @@ def check() -> None:
         for sh in slide.shapes
         if sh.has_text_frame
     )
-    # for s in REQUIRED_STRINGS:                       # TODO uncomment in Task 12
-    #     if s not in full:                            # TODO uncomment in Task 12
-    #         failures.append(f"deck missing required string {s!r}")  # TODO uncomment in Task 12
+    for s in REQUIRED_STRINGS:
+        if s not in full:
+            failures.append(f"deck missing required string {s!r}")
     if failures:
         print("CHECK FAIL:", file=sys.stderr)
         for f in failures:

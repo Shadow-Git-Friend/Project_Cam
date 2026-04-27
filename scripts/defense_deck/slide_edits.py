@@ -385,11 +385,106 @@ def check_s15(prs: _Prs) -> None:
     assert_slide_text_contains(slide, "NC E-STOP")
     assert_slide_text_contains(slide, "24V/50A fuse")
 
-# ---------- Registries (extended by later tasks) ----------
+# ---------- Slide 16: A1 live demo — embed video ----------
+
+import os
+import shutil as _shutil
+import subprocess
+from pathlib import Path as _Path
+
+REPO_ROOT = _Path(__file__).resolve().parents[2]
+DEMO_VIDEO = REPO_ROOT / "thesis_defense_presentation" / "IMG_1589 (online-video-cutter.com).mp4"
+DEMO_POSTER = REPO_ROOT / "thesis_defense_presentation" / "_demo_poster.jpg"
+
+def _ensure_poster() -> "_Path | None":
+    if DEMO_POSTER.exists():
+        return DEMO_POSTER
+    if not _shutil.which("ffmpeg"):
+        return None
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(DEMO_VIDEO),
+             "-vframes", "1", "-q:v", "3", str(DEMO_POSTER)],
+            check=True, timeout=60,
+        )
+        return DEMO_POSTER
+    except Exception:
+        return None
+
+def apply_s16(prs: _Prs) -> None:
+    slide = prs.slides[15]
+    placeholder = find_shape_by_name(slide, "t103")
+    set_paragraphs(placeholder, ["Demo clip: arena 3D tracking, 20-30 s."])
+    has_movie = any(
+        getattr(sh, "shape_type", None) and "media" in str(sh.shape_type).lower()
+        for sh in slide.shapes
+    )
+    if has_movie or not DEMO_VIDEO.exists():
+        return
+    poster = _ensure_poster()
+    try:
+        from pptx.util import Inches
+        slide.shapes.add_movie(
+            str(DEMO_VIDEO),
+            left=Inches(1.0), top=Inches(1.5),
+            width=Inches(11.0), height=Inches(5.5),
+            poster_frame_image=str(poster) if poster else None,
+            mime_type="video/mp4",
+        )
+    except Exception as e:
+        set_paragraphs(placeholder,
+                       [f"Demo clip: {DEMO_VIDEO.name} — drag in via LibreOffice ({e})"])
+
+def check_s16(prs: _Prs) -> None:
+    slide = prs.slides[15]
+    assert_slide_text_not_contains(slide, "[PLACEHOLDER_VIDEO_1")
+
+# ---------- Slide 18: A3 latency table ----------
+
+import json
+import statistics as _stats
+
+PERF_JSONL = REPO_ROOT / "Parallel_working" / "output" / "perf_blm_20260409_133818.jsonl"
+
+LATENCY_FIELDS = ["capture_ms", "ball_ms", "pose_ms", "triang_ms",
+                  "udp_ms", "viz3d_ms", "total_ms", "end_to_end_ms"]
+
+def _build_latency_lines() -> list[str]:
+    rows = [json.loads(l) for l in open(PERF_JSONL) if l.strip()]
+    out = [f"From {PERF_JSONL.name} ({len(rows)} frames)",
+           "Stage           Mean ms   P95 ms"]
+    for fld in LATENCY_FIELDS:
+        vals = [r[fld] for r in rows if isinstance(r.get(fld), (int, float))]
+        if not vals:
+            continue
+        mean = sum(vals) / len(vals)
+        if len(vals) >= 20:
+            p95 = _stats.quantiles(sorted(vals), n=20)[18]
+        else:
+            p95 = max(vals)
+        out.append(f"{fld:<14}{mean:>9.1f}{p95:>9.1f}")
+    return out
+
+def apply_s18(prs: _Prs) -> None:
+    slide = prs.slides[17]
+    placeholder = find_shape_by_name(slide, "t103")
+    if not PERF_JSONL.exists():
+        set_paragraphs(placeholder, [f"Latency log not on disk: {PERF_JSONL.name}"])
+        return
+    set_paragraphs(placeholder, _build_latency_lines())
+
+def check_s18(prs: _Prs) -> None:
+    slide = prs.slides[17]
+    assert_slide_text_not_contains(slide, "[PLACEHOLDER_TABLE_1")
+    assert_slide_text_contains(slide, "Mean ms")
+
+# ---------- Registries ----------
 
 APPLY_FUNCTIONS = [apply_s1, apply_s2, apply_s3, apply_s4, apply_s5,
                    apply_s8, apply_s9, apply_a5, apply_s10, apply_s11,
-                   apply_s12, apply_s13, apply_s14, apply_s15]
+                   apply_s12, apply_s13, apply_s14, apply_s15,
+                   apply_s16, apply_s18]
 CHECK_FUNCTIONS = [check_s1, check_s2, check_s3, check_s4, check_s5,
                    check_s8, check_s9, check_a5, check_s10, check_s11,
-                   check_s12, check_s13, check_s14, check_s15]
+                   check_s12, check_s13, check_s14, check_s15,
+                   check_s16, check_s18]
