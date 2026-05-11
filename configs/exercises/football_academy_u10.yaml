@@ -1,0 +1,104 @@
+schema_version: project_cam.exercise_rules.v1
+profile:
+  name: football_academy_u10
+  population: "Boys and girls around age 10 in football academy screening"
+  principle: "Use configurable coaching thresholds and each athlete's own baseline; do not compare children to professional-player templates."
+
+reference_context:
+  - name: FitBack / ALPHA
+    url: https://www.fitbackeurope.eu/en-us/About/FAQ
+    use: "Age/sex physical-fitness reference context for children and adolescents."
+  - name: Eurofit norms
+    url: https://bjsm.bmj.com/content/52/22/1445
+    use: "Large age/sex normative context for 9-17 year-old youth fitness tests."
+  - name: CDC NHANES National Youth Fitness Survey plank
+    url: https://wwwn.cdc.gov/Nchs/Data/Nnyfs/Public/2012/DataFiles/Y_PLX.htm
+    use: "Youth plank/core-endurance protocol context."
+  - name: TGMD-3
+    url: https://www.tgmd3.org/general-information
+    use: "Motor-skill quality framework for children up to 10 years 11 months."
+  - name: MOBAK-5-6
+    url: https://mobak.info/en/mobak/
+    use: "Basic motor-competency context for 10-11 year-old children."
+  - name: FIFA 11+ Kids
+    url: https://pubmed.ncbi.nlm.nih.gov/29273936/
+    use: "Football-specific youth neuromuscular-control and injury-prevention context."
+
+defaults: &defaults
+  thresholds:
+    min_confidence_score: 45
+    max_left_right_angle_asymmetry_deg: 25
+    max_knee_line_deviation_ratio: 0.20
+    max_knee_valgus_signed_ratio: 0.12
+  segmentation:
+    min_rom_deg: 25
+  movement_quality:
+    review_flag_severities: ["coaching", "warning"]
+    block_on_unscored_rep: true
+
+exercises:
+  squat:
+    <<: *defaults
+    description: "Bilateral squat movement-quality screen."
+    segmentation:
+      min_pelvis_travel_mm: 150
+      enter_angle_deg: 90
+      exit_angle_deg: 120
+      min_rep_duration_s: 0.3
+      max_rep_duration_s: 8.0
+      max_missing_frame_ratio: 0.30
+      # 1.0 = no smoothing (default). Lower (e.g. 0.6) trades amplitude for
+      # robustness to single-frame triangulation drops; tune to your frame rate.
+      pelvis_ema_alpha: 1.0
+    protocol:
+      min_fps: 15
+      min_reps: 5
+      min_rom_deg: 60
+      min_valid_frame_ratio: 0.60
+    thresholds:
+      min_confidence_score: 45
+      max_left_right_angle_asymmetry_deg: 25
+      max_knee_line_deviation_ratio: 0.20
+      max_knee_valgus_signed_ratio: 0.12
+      bottom_knee_angle_max_deg: 115
+
+  single_leg_squat:
+    <<: *defaults
+    description: "Single-leg squat screen for control, symmetry, and knee-line deviation."
+    segmentation:
+      min_pelvis_travel_mm: 110
+      enter_angle_deg: 105
+      exit_angle_deg: 130
+      min_rep_duration_s: 0.3
+      max_rep_duration_s: 8.0
+      max_missing_frame_ratio: 0.30
+      pelvis_ema_alpha: 1.0
+    protocol:
+      min_fps: 15
+      min_reps: 3
+      min_rom_deg: 45
+      min_valid_frame_ratio: 0.60
+    thresholds:
+      min_confidence_score: 50
+      max_left_right_angle_asymmetry_deg: 35
+      max_knee_line_deviation_ratio: 0.25
+      max_knee_valgus_signed_ratio: 0.18
+      bottom_knee_angle_max_deg: 125
+
+deferred_exercises:
+  push_up:
+    reason: "Deferred until squat/single-leg squat repeatability is proven in garage tests."
+  plank:
+    reason: "Deferred until Kairat demo scope expands beyond squat screening."
+  countermovement_jump:
+    reason: "Requires validated 30fps capture and jump-specific confidence checks."
+  drop_landing:
+    reason: "Requires landing ground-truth validation before academy reporting."
+  lateral_shuffle:
+    reason: "Requires movement-path protocol and ground truth."
+  cutting:
+    reason: "Requires movement-path protocol and ground truth."
+  slalom_dribble:
+    reason: "Requires ball-skill ground truth and is not part of the Kairat MVP."
+  wall_volley:
+    reason: "Requires ball-contact ground truth and is not part of the Kairat MVP."
