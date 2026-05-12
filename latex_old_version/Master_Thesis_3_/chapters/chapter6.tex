@@ -1,0 +1,91 @@
+\chapter{Chapter 6: Conclusions and Future Work}
+
+\section{Summary of Contributions}
+
+This thesis has presented the design, implementation, and quantitative evaluation of a vision-guided ball launching system validated through aim-only and controlled static single-shot trials. The three stated contributions are assessed as follows:
+
+Contribution 1, The Autonomous Aiming Machine: A Ball Launching Machine has been demonstrated to autonomously compute and execute its own aim direction (pitch angle, yaw angle, and launch speed) derived exclusively from live 3D reconstruction of a human athlete's body joints. No human operator sets the trajectory. The system identifies the target joint in three-dimensional space and directs the launcher accordingly, representing, to the best of the author's knowledge, a qualitative departure from the surveyed commercial ball machines.
+
+Contribution 2, Low-Cost Multi-Camera Pose-to-Launch Pipeline: The complete perception pipeline (four commodity USB cameras at approximately USD 30 each, ChArUco intrinsic calibration, AprilTag extrinsic calibration, YOLO ball detection, MMPose joint estimation, and DLT/SVD triangulation) achieves a ball localisation mean error of 95.17 mm and a joint localisation mean error of 143.38 mm in a real domestic arena. The total hardware cost of the perception system is approximately USD 200.
+
+Contribution 3, Structured Safety-Gated Integration Protocol: A six-stage incremental integration checklist with per-stage pass criteria and mandatory decision logging has been developed, progressed through Stages 0--4, and documented. The E-STOP latch responds in under 100 ms. Every actuation decision is recorded to a JSONL log providing full traceability.
+
+\section{Objectives Achievement}
+
+This section evaluates whether the three research objectives defined in Section~1.2 have been met, based on the quantitative results presented in Chapter~5.
+
+\textbf{RQ1: Ball 3D Localisation Accuracy.} The target was to achieve a mean 3D ball localisation error below 120~mm using commodity USB cameras. The 36-point static ball evaluation yielded a corrected mean error of 95.17~mm, RMSE of 102.23~mm, and P95 of 166.51~mm. The mean error target is satisfied with a margin of approximately 25~mm.
+
+\textbf{RQ2: Human Pose Joint Localisation Accuracy.} The target was a mean 3D joint localisation error below 180~mm. The 81-trial joint-touch evaluation (62 valid trials) yielded a mean error of 143.38~mm, RMSE of 147.73~mm, and P95 of 198.73~mm. Per-joint analysis shows right knee at 110.03~mm (best), right hip at 150.38~mm, and left shoulder at 164.38~mm (worst, consistent with reduced camera visibility at shoulder height). The mean error target is satisfied with a margin of approximately 37~mm.
+
+\textbf{RQ3: Safe Staged Integration.} The target was to demonstrate a reproducible, evidence-based safety validation methodology. The six-stage integration checklist has been progressed through Stages~0--4, with all pass criteria met. The E-STOP latch responds in under 100~ms. Every actuation decision is recorded to a structured JSONL log. Stage~5 (full autonomous closed-loop firing at a moving subject) remains as future work, so this objective is assessed as partially satisfied.
+
+Table~\ref{tab:6_1} summarises the achievement status.
+
+\begin{table}[htbp]
+\centering
+\caption{Research question objectives achievement summary}
+\label{tab:6_1}
+\begin{tabularx}{\textwidth}{|l|X|l|l|}
+\hline
+\textbf{Research Question} & \textbf{Target} & \textbf{Achieved} & \textbf{Status} \\
+\hline
+RQ1: Ball 3D localisation & Mean error $<$ 120~mm & 95.17~mm & Satisfied \\
+\hline
+RQ2: Joint 3D localisation & Mean error $<$ 180~mm & 143.38~mm & Satisfied \\
+\hline
+RQ3: Safe integration & Staged safety validation & Stages 0--4 done & Partial \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Limitations}
+
+Three-camera minimum requirement: Accurate 3D triangulation requires at least three cameras with simultaneous line of sight to the target joint. At the edges of the arena, or when the athlete's body occludes certain cameras, the system degrades to two-camera triangulation with significantly higher error. The 19/81 invalid joint-touch trials (23.5\%) are primarily attributable to this constraint.
+
+Joint-touch ground-truth methodology: The physical contact protocol introduces a systematic error between the surface contact point and the true joint centre (approximately 30--50 mm). This component of the measured error is not attributable to the vision system.
+
+No BLM hardware homing: The ESP32 stepper motors use logical zero positioning (software reset to setzero) with no physical limit switches or encoders. Cumulative step errors over multiple sessions can drift the mechanical zero, requiring periodic re-homing. This limits the long-term repeatability of absolute aim angles without recalibration.
+
+Single-person, single-arena evaluation: All experiments were conducted with one subject in one fixed arena. Generalisation to different subjects (different body proportions), different arenas, or different lighting conditions has not been evaluated.
+
+Closed-loop firing not yet demonstrated: The system has been validated in aim-only mode and in controlled static single-shot trials, but fully autonomous closed-loop shooting at a moving human subject has not yet been demonstrated. This is the immediate next experimental milestone.
+
+\section{Future Work}
+
+\subsection{Closed-Loop Autonomous Firing and Moving-Target Prediction}
+
+The immediate next step is to progress Stage 5 and Stage 6 of the BLM integration checklist: controlled single-shot firing at a static human subject (aim-only confirmed, ball loaded), followed by moving-target trials. The latter requires predictive tracking: estimating the future position of the target joint at the moment the ball will arrive (given ball flight time), rather than targeting the current joint position. A simple linear extrapolation of the EMA-filtered joint velocity is the proposed first implementation.
+
+\subsection{Empirical Ballistic Calibration Map}
+
+The current ballistic solver uses a first-principles projectile model neglecting aerodynamic drag and the mechanical imprecision of the wheel-motor speed-to-velocity mapping. An empirical calibration map, measuring actual ball landing positions for a grid of (RPM, pitch, yaw) settings, would allow a correction table to be learned and applied at runtime, reducing systematic aiming error. This is analogous to the bias correction model applied to the perception pipeline.
+
+\subsection{SLAM-Based Camera Re-Localisation and Self-Recalibration}
+
+Currently, any physical movement of a camera requires manual extrinsic re-calibration using the AprilTag procedure. A SLAM (Simultaneous Localisation and Mapping) \cite{ref36} approach would allow the system to detect calibration drift automatically by tracking feature points between sessions and flagging when reprojection errors exceed a threshold. This would make the system self-monitoring and reduce the maintenance burden.
+
+\subsection{Multi-Person Tracking and Joint Assignment}
+
+The current system assumes a single person in the arena. Extending to multiple subjects requires person-level tracking (associating each detected skeleton with a specific individual across frames and across cameras) and a mechanism for the operator to designate which person is the target. Standard multi-object tracking algorithms (ByteTrack \cite{ref33}, StrongSORT \cite{ref34}) are candidates for this extension.
+
+\subsection{Virtual 3D Goal: Replacing Physical Sensors with Camera-Based Impact Detection}
+
+A significant limitation of current training validation tools is their reliance on physical sensors to detect whether the ball reached its target. Pressure mats, tripwires, and light-curtain arrays report a binary hit/miss signal. They require installation, can break down, cannot be repositioned easily, and provide no information about where within the target zone the ball arrived.
+
+The planned next major capability extension is a software-defined Virtual 3D Goal using the existing 4-camera infrastructure. The concept is as follows: a 1 \(\times\) 1 metre rectangle is defined in world-frame coordinates, centred on the target zone (e.g., centred on the athlete's torso at the expected interception height), oriented perpendicular to the expected ball trajectory. The camera system already tracks the ball's 3D position frame-by-frame. When the ball's trajectory crosses this plane (detected via a ray-plane intersection test between consecutive 3D position estimates), the system logs the exact 3D crossing coordinate, the ball velocity vector at crossing, the time of crossing, and the offset from the designated target joint centroid. This yields per-shot accuracy data with millimetre resolution, with no hardware required at the goal location.
+
+This concept is directly inspired by professional instrumented training arenas such as the Footbot system \cite{ref35}, that define virtual goal boundaries in 3D space using multi-camera tracking in contrast to physical sensors. Systems of this type at the professional level cost hundreds of thousands of dollars and are installed only in elite training facilities. Since the 4-camera perception infrastructure in this work is already deployed, calibrated and tracking the ball in 3D, the Virtual 3D Goal capability requires only additional software logic: the crossing event detection algorithm, integration with the existing JSONL decision log and the visualisation of crossing positions in 3D arena overlay.
+
+This ability provides a complete transform into a full training instrument, going from smart launcher to full, self-contained training capability, firing at the athlete and measuring if the ball arrived at the desired target, and recording the result, while not having any actual sensor hardware on the target (the goal). The data produced (a per-shot (x, y) impact map on the virtual goal plane, with velocity and timing) would enable quantitative training analytics that are currently unavailable in any affordable training system.
+
+\section{Professional and Ethical Considerations}
+
+Physical safety: The BLM projects balls at speeds sufficient to cause injury, particularly at close range or if directed at the face or head. The safety architecture described in Section 3.9 is designed to prevent unintended firing, but any deployment of the full system with live ball launching must be accompanied by a physical safety briefing, mandatory personal protective equipment (eye protection at minimum), and exclusion of bystanders from the ball flight path. The six-stage integration protocol enforces that safety gating is validated before any ball is loaded.
+
+Video data and privacy: All ground-truth evaluation sessions involve video recording of a human subject. Data is stored locally and has not been shared with third parties. Any future publication of results should anonymise subject identity in published figures if the subject has not provided explicit consent for identification.
+
+Open-source intent: The processing pipeline, calibration scripts, evaluation tools, and decision logging framework developed in this thesis are intended for open-source release. Making the full software stack publicly available would allow other researchers and practitioners to replicate or extend the system, consistent with the goal of making adaptive ball delivery accessible beyond well-funded institutions.
+
+Dual-use consideration: A system that can autonomously track human body parts and direct a projectile at them has potential for usage in applications not related to sports training. The authors comment on this and underpin that the safety architecture (presence of operator, E-STOP control and explicit target designation) is necessarily the safeguard if this technology is ever deployed.
+

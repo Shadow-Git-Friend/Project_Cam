@@ -23,7 +23,7 @@
     .score { display: flex; align-items: center; gap: 16px; }
     .gauge { width: 118px; height: 118px; border-radius: 50%; display: grid; place-items: center; color: white; font-size: 28px; font-weight: 700; }
     .gauge.data-quality { background: #2e7d32; }
-    .gauge.movement-quality { background: #2e7d32; font-size: 18px; line-height: 1.1; text-align: center; }
+    .gauge.movement-quality { background: #f9a825; font-size: 18px; line-height: 1.1; text-align: center; }
     .quality-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
     .quality-card { display: flex; align-items: center; gap: 16px; }
     .flag { border-left: 4px solid #d64545; padding: 8px 12px; margin: 8px 0; background: #fff5f5; }
@@ -77,11 +77,11 @@
         </div>
       </div>
       <div class="quality-card">
-        <div class="gauge movement-quality">Looks good</div>
+        <div class="gauge movement-quality">Needs review</div>
         <div>
           <h2>Movement Quality</h2>
           <p class="muted">
-            No coaching flags
+            1 coaching flag(s)
             .
             Movement quality is independent of data quality — a high data score with coaching flags still warrants review.
           </p>
@@ -95,7 +95,7 @@
     
       <div class="flag info">Left knee was off the hip-ankle line (observation only; depth-confounded, not a coaching signal).</div>
     
-      <div class="flag info">Right knee was off the hip-ankle line (observation only; depth-confounded, not a coaching signal).</div>
+      <div class="flag coaching">Right knee drifts inward (valgus) during the squat pattern.</div>
     
     
     

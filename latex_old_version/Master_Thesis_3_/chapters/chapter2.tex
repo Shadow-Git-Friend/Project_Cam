@@ -1,0 +1,103 @@
+\chapter{Chapter 2: Literature Review and Background Theory}
+
+\section{Multi-Camera 3D Reconstruction}
+
+Recovering the three dimensional position of the objects from two dimensional image observations is a classical problem in computer vision. The theoretical foundation is based on that of pinhole camera model, which models the projection of a 3D point $\mathbf{P} = (X, Y, Z)$ to an image point $\mathbf{p} = (u, v)$ as done by the relation:
+
+\begin{equation}
+s \cdot [u, v, 1]^T = K \cdot [R | T] \cdot [X, Y, Z, 1]^T \label{eq:2_1}
+\end{equation}
+
+where $K$ is the intrinsic matrix of $3 \times 3$ representing the focal lengths and principal point of the camera, $R$ is the rotation matrix $3 \times 3$, $T$ is the translation vector with a length of $3 \times 1$ representing the camera position and attitude in the world frame and $s$ is the scalar projection depth \cite{ref1}.
+
+When the same object appears in two or more calibrated cameras at the same time, the 3D position of the object can be reproduced using the triangulation method. The geometrical principle here is epipolar geometry: the projection rays from both cameras that pass through the 2D point to be observed must intersect in the 3D located at the true 3D point in the ideal case of no noise \cite{ref2}. In practice, due to image noise and imperfections in the calibration of the imaging system, rays even from convergence points very rarely coincide. The Direct Linear Transform (DLT) method develops triangulation as a system of linear equations and solves this linear equation for the 3D point minimising the algebraic reprojection error using Singular Value Decomposition (SVD) \cite{ref1}.
+
+Triangulation accuracy is determined by two main factors: the quality of camera calibration and the number of cameras with more valid observations. In underconstrained configurations (where only one camera observes the target) no triangulation is possible. With exactly two cameras, depth reconstruction is sensitive to the baseline between cameras and to any calibration error \cite{ref4}. With three or more cameras, redundancy in the system of equations improves robustness. This motivates the minimum camera count requirements used in this work (Section 3.6).
+
+Multi-camera 3D reconstruction has been applied extensively in sports science. Systems have been deployed for ball tracking in tennis \cite{ref5}, football \cite{ref6}, and cricket \cite{ref7}, and for full-body motion capture in biomechanics research \cite{ref8}. These applications typically use carefully calibrated synchronised cameras in purpose-built environments. The contribution of this work is demonstrating equivalent reconstruction capability with commodity hardware in a domestic, uncontrolled arena.
+
+\section{Camera Calibration Techniques}
+
+\subsection{Intrinsic Calibration}
+
+Camera intrinsic calibration determines the parameters of the imaging model: focal lengths ($f_x$, $f_y$), principal point ($c_x$, $c_y$), and lens distortion coefficients. The widely adopted approach, due to Zhang \cite{ref9}, uses a planar calibration pattern observed from multiple viewpoints. The method solves for intrinsic and extrinsic parameters simultaneously through homography decomposition, then refines all parameters with non-linear optimisation minimising reprojection error.
+
+In this work, a ChArUco calibration board is used, which combines a chessboard pattern with embedded ArUco markers. ChArUco boards offer two advantages over plain chessboards: individual square corners can be identified even when the board is partially occluded, and the ArUco marker IDs provide unambiguous corner labelling that eliminates the corner-order ambiguity present in plain chessboard patterns \cite{ref10}. The board used measures $5 \times 7$ squares with 21.5 cm square size.
+
+\subsection{Extrinsic Calibration}
+
+Extrinsic calibration determines each camera's position and orientation ($R$, $T$) in a common world frame. This is the prerequisite for multi-view triangulation: all cameras must share the same world coordinate system for their projection rays to be compared.
+
+AprilTag fiducial markers, developed at the University of Michigan \cite{ref11}, are used extensively for this purpose. Each tag encodes a unique binary ID and allows the tag's four corners to be detected and their 3D positions estimated from a single camera image, given known tag size, using the Perspective-n-Point (PnP) algorithm. When multiple tags at known world positions are detected, the camera pose can be recovered by minimising reprojection error across all tag corners. Robust estimation techniques, such as RANSAC-based outlier rejection and iteratively re-weighted least squares with sigma-clipping, reduce the influence of incorrectly detected tags \cite{ref12}.
+
+\section{Object Detection for Sports Applications}
+
+Real-time object detection has been transformed by the YOLO (You Only Look Once) family of architectures \cite{ref13}, which formulate detection as a single-pass regression problem predicting bounding boxes and class probabilities from a full image in one forward pass through a convolutional neural network. Subsequent versions (YOLOv5, YOLOv8, YOLO11) have successively optimized the accuracy-speed tradeoff allowing them to be deployed in commodity GPU hardware at frame rates in real time \cite{ref14}.
+
+Ball detection in sports is a particular problem compared to object detection in general, as balls are small, partially occluded, suffer from a lot of motion blur during fast velocities and have to be separated from similarly shaped parts of background objects. Prior work on ball tracking in sports has made use of a variety of approaches including background subtraction, colour-based filtering, and deep learning detectors \cite{ref5, ref6}. For this system, the version Ultralytics YOLO11 is used, with the level of confidence for detecting objects set by empirical approach individually for each experiment (0.25--0.45) for the balance between the rate of false-positive events with detection recall.
+
+\section{Human Pose Estimation}
+
+Human pose estimation is the task of detecting the spatial configuration of a person's body from image data. The problem is commonly formulated as keypoint detection: estimating the 2D (or 3D) coordinates of a set of anatomically defined body landmarks from one or more camera views \cite{ref15}.
+
+The COCO keypoint format defines 17 anatomical landmarks: nose, eyes, ears, shoulders, elbows, wrists, hips, knees, and ankles. This convention has become the dominant benchmark standard, and the majority of modern pose estimation models produce COCO-format output \cite{ref16}. Top-down approaches, which first detect persons with a bounding-box detector and then run a specialised keypoint network on each detected person, generally achieve higher per-keypoint accuracy than bottom-up approaches that detect all keypoints first and group them afterwards.
+
+MMPose \cite{ref17}, the pose estimation framework used in this work, implements both paradigms and provides pre-trained models on COCO-format benchmarks. For this system, a top-down pipeline is used with the HRNet backbone, which has demonstrated strong performance on COCO benchmark evaluations \cite{ref18}.
+
+Extending 2D pose estimation to 3D using multiple cameras follows the same multi-view triangulation principle as ball localisation: 2D joint observations from multiple cameras are combined via DLT/SVD to recover 3D joint positions. The accuracy of 3D joint reconstruction is inherently limited by the 2D pose estimation accuracy, the camera calibration quality, and the number of cameras with valid joint visibility.
+
+\section{Ballistic Modelling and Actuator Control}
+
+A ball projected from a launcher at initial speed $v_0$, pitch angle $\theta$, and yaw angle $\phi$ follows a parabolic trajectory under gravity (neglecting air resistance for first-order approximation). The equations of motion are:
+
+\begin{equation}
+x(t) = v_0 \cdot \cos(\theta) \cdot \cos(\phi) \cdot t \label{eq:2_2}
+\end{equation}
+
+\begin{equation}
+y(t) = v_0 \cdot \cos(\theta) \cdot \sin(\phi) \cdot t \label{eq:2_3}
+\end{equation}
+
+\begin{equation}
+z(t) = v_0 \cdot \sin(\theta) \cdot t - \frac{1}{2} \cdot g \cdot t^2 \label{eq:2_4}
+\end{equation}
+
+where $g = 9810$ mm/s$^2$ is gravitational acceleration. Given a target point $(T_x, T_y, T_z)$ and launcher origin $(B_x, B_y, B_z)$, the system of equations (2.2)--(2.4) can be solved for the required launch parameters. For a fixed target range and height difference, two valid pitch angles generally exist (the low and high trajectory solutions); the lower-angle solution is preferred in this system as it minimises flight time and therefore targeting uncertainty due to athlete movement \cite{ref19}.
+
+Stepper motors provide an appropriate actuation mechanism for launcher pan/tilt positioning: their open-loop step-counting control provides predictable angular displacement without requiring continuous position feedback, and their holding torque maintains aim angle against mechanical vibration from the wheel motors \cite{ref20}.
+
+\section{Safety in Autonomous Actuated Systems}
+
+Any system that combines computer vision decision-making with physical actuation must address safety as a first-class design concern. The relevant engineering context is machine safety standards: IEC 62061 (functional safety of machinery) \cite{ref21} and ISO 10218 (safety of industrial robots) \cite{ref26} both mandate that automated systems implement a defined safe state and a reliable means of commanding transition to that state under fault conditions \cite{ref21}.
+
+An Emergency Stop (E-STOP) function, mandatory in ISO 12100, must interrupt hazardous motion immediately and latch in the stopped state until a deliberate human reset action is taken \cite{ref22}. Response time requirements vary by hazard level; for a ball launcher in a domestic training environment with no proximity hazard to the operator during normal operation, a response time below 200 ms is considered acceptable practice. The system described in this thesis achieves a measured E-STOP response time below 100 ms.
+
+The broader principle of incremental validation, testing each subsystem in isolation before integration and each integration stage before full operation, is standard practice in safety-critical embedded systems development \cite{ref23} and is formalised in this work as the six-stage BLM test checklist (Section 3.9).
+
+\section{Summary and Research Gap}
+
+The following table organises existing systems into three categories and positions this work relative to them.
+
+\begin{table}[htbp]
+\caption{Existing system categories and their limitations}
+\label{tab:2_1}
+\begin{tabular}{|p{2cm}|p{3cm}|p{1.8cm}|p{1.8cm}|p{3.5cm}|}
+\hline
+\textbf{Category} & \textbf{Example Systems} & \textbf{Cost (approx.)} & \textbf{Accuracy} & \textbf{Limitations} \\
+\hline
+A: Commercial Open-Loop Launchers & Lobster Elite Liberty, Spinshot Player, iPong Pro & USD 200--2,000 & N/A (no sensing) & No perception; fixed paths; cannot target athlete \\
+\hline
+B: Professional Lab Motion Capture & OptiTrack \cite{ref30}, Vicon \cite{ref8}, PhaseSpace \cite{ref31} & USD 50,000--200,000+ & \textless{}1 mm (with markers) & Lab-only; no actuation; requires markers; inaccessible \\
+\hline
+C: Research Prototype Vision Systems & Robot tennis/table-tennis, ball-serving robots & USD 2,000--10,000 & 50--100 mm (ball only) & Fixed-zone targeting; lab environments; no joint targeting \\
+\hline
+\end{tabular}
+\end{table}
+
+Category A systems dominate sports training deployment globally. Their limitation is not cost; it is architecture. They are incapable of perception-guided targeting regardless of budget, because they have no sensors.
+
+Category B systems exist in biomechanics research and high-performance sports science institutes. Their accuracy is exemplary, but their deployment model makes them inaccessible for the majority of training contexts. Furthermore, they observe, but they do not act. No system in this category integrates with a ball launcher.
+
+Category C systems represent the closest research analogues to this work. Prior systems for robotic table tennis \cite{ref24} and tennis ball serving \cite{ref25} demonstrate vision-guided launching but target fixed zones on the court, not body parts of the athlete. They operate in controlled laboratory environments and use stereo camera pairs or depth cameras costing significantly more than the commodity USB cameras used here. Critically, none of the reviewed systems demonstrates joint-level targeting, meaning that the launch target is a named anatomical landmark on a moving human.
+
+The research gap is therefore precisely stated: \textbf{no prior system combines commodity multi-camera 3D reconstruction, real-time human joint localisation from open-source pose estimation, and a physical ballistic controller targeting those joints, deployed and evaluated in an uncontrolled domestic environment at low cost.} This thesis fills that gap.

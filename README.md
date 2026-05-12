@@ -82,6 +82,55 @@ Project_Cam/
   --dry-run-log-jsonl garage_lab_combined/output/blm_logs/aim_test.jsonl
 ```
 
+## Athlete Assessment + Exports
+
+End-to-end recording → report → biomechanics-lab handoff.  Full per-session
+protocol lives in [docs/capture_sop.md](docs/capture_sop.md).
+
+```bash
+# Generate JSON + HTML + C3D in one call:
+PYTHONPATH=src ./venv/bin/python -m project_cam.assessment.offline_assess \
+  --input data/raw/athlete_001_squat.jsonl \
+  --exercise squat \
+  --athlete-id athlete_001 --age 10 --sex male --fps 15 \
+  --session-id athlete_001_session_001 \
+  --output data/reports/athlete_001_squat_report.json \
+  --html-output data/reports/athlete_001_squat_report.html \
+  --c3d-output data/reports/athlete_001_squat_report.c3d \
+  --calibration-report data/reports/athlete_001_pre_session_calibration.json
+```
+
+Outputs:
+- `*.json` — full per-rep metrics, flags, confidence tiering, demo verdict.
+- `*.html` — coach-facing report with Data Quality / Movement Quality split,
+  rep chart, calibration gate.
+- `*.c3d` — COCO-17 joints as virtual markers in mm units. Opens in Mokka,
+  Visual3D, OpenSim, and `ezc3d` Python pipelines. Includes `META.SESSION_ID`,
+  `META.SCHEMA_VERSION`, and `SUBJECTS.NAMES` provenance fields.
+
+## Closed-Loop Event Logging
+
+Live viewer + launcher emit a curated event-narrative JSONL stream for demo
+review and post-session analytics. See
+[src/project_cam/closed_loop/event_log.py](src/project_cam/closed_loop/event_log.py)
+for the schema. Non-blocking writer — never affects render FPS.
+
+```bash
+# Live viewer with event log:
+./Parallel_working/run_live_blm.sh --session-id demo_001 \
+  --event-log-output data/events/demo_001_viewer.jsonl
+
+# Launcher with same session_id + confidence gates:
+./venv/bin/python garage_lab_combined/scripts/blm_follow.py \
+  --serial-port /dev/ttyUSB0 --launcher-yaw-deg 0 \
+  --joint right_shoulder --correction-mode linear \
+  --min-confidence 0.55 --min-cameras 2
+```
+
+In the live-viewer window, press `r` to record `athlete_reacted`, `n` for
+`no_reaction`. Join the viewer events with the launcher decision log via
+`session_id` to get the full target→aim→fire→outcome trace.
+
 ## Arena Setup
 
 - 4 fixed cameras: camNorth, camEast, camSouth, camWest

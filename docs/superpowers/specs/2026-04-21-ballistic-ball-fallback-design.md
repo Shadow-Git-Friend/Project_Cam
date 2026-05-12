@@ -66,6 +66,12 @@ Tracks:
 
 Lives alongside existing `ball_kf`. Initialized to `FLOOR` with zeros.
 
+Velocity source is defined explicitly during implementation: on each accepted
+multi-cam lock, velocity is estimated by finite difference from the previous
+accepted multi-cam lock. `vz` is lightly smoothed and clipped to a sane range
+before being promoted into `BallFlightState`, so one noisy multi-cam frame
+cannot poison subsequent single-cam ballistic prediction.
+
 ### 2. `ballistic_predict_z(z0, vz, dt_s, g, floor) -> float` (new helper)
 
 Pure kinematics, no iteration:
@@ -103,6 +109,10 @@ When flag is OFF: call site unchanged from today.
 
 On every multi-cam lock (≥2 cams): update `last_multicam_pos_mm`,
 `last_multicam_vel_mm_s`, `t_last_multicam`; reset `frames_since_multicam = 0`.
+Only accepted multi-cam lock frames are allowed to count toward the
+`FLOOR → AIRBORNE` debounce; any non-multicam frame breaks the streak. A
+single-cam fallback frame can never self-promote the flight state to
+`AIRBORNE`.
 
 ### 5. Counter semantics fix (unconditional, no flag)
 
@@ -142,6 +152,10 @@ applies regardless of ballistic mode.
   coast only, force multi-cam re-lock.
 - `ball_frames_since_detect > ball_coast_frames`: reset KF fresh (existing,
   preserved).
+- Existing `--ball-log-jsonl` output is extended to log per-frame source
+  (`multi`, `single_ballistic`, `single_legacy`, `coast`, `none`), flight
+  state, state transitions, relock counters, effective measurement-noise
+  multiplier, target Z, and fallback reject reason for diagnosis.
 
 ## Testing Plan
 
@@ -167,7 +181,7 @@ applies regardless of ballistic mode.
 4. **Flag-on live** — full stack:
    ```
    ./Parallel_working/run_live_blm.sh --ball-imgsz 960 --ball-single-cam-fallback \
-     --ball-ballistic-fallback --ball-log Parallel_working/output/ball_ballistic_$(date +%s).jsonl
+     --ball-ballistic-fallback --ball-log-jsonl Parallel_working/output/ball_ballistic_$(date +%s).jsonl
    ```
    Expect: no floor penetration, occlusion recovery ≤1 frame after camNorth
    re-acquires.
@@ -178,6 +192,9 @@ applies regardless of ballistic mode.
 - **Flag ON, `bounce_01` replay:** ball Z ≥ floor − 10mm every frame.
 - **Flag ON, `bounce_01`:** ball visible in 3D view on ≥90% of frames from
   first detection onward.
+- **Flag ON, `bounce_01`:** JSONL shows bounded single-cam fallback streaks,
+  explicit re-locks, and any coast-only / rejected-fallback frames are
+  attributable from per-frame debug fields.
 - **Flag ON, live:** after ≥2s occlusion + camNorth re-acquires, ball locks
   to ray∩floor within 1 frame.
 

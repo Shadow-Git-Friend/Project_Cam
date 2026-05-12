@@ -50,6 +50,14 @@ from typing import Callable, Dict, Optional
 import numpy as np
 from launcher_common import apply_correction, load_correction_model, solve_angles_ballistic, world_to_launcher_xy_delta
 
+# Make src/ importable for the closed_loop helpers (safety gates, event logger).
+_REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent.parent
+_SRC = _REPO_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from project_cam.closed_loop import evaluate_joint_gate  # noqa: E402
+
 try:
     import serial
 except ImportError:
@@ -447,6 +455,10 @@ def main():
                     help="Minimum seconds between consecutive `set` commands")
     ap.add_argument("--min-delta-deg", type=float, default=0.5,
                     help="Deadband: only resend if pitch or yaw changed by this much")
+    ap.add_argument("--min-confidence", type=float, default=0.0,
+                    help="Skip samples with conf below this (0 disables; recommended 0.55 for live)")
+    ap.add_argument("--min-cameras", type=int, default=0,
+                    help="Skip samples seen by fewer than N cameras (0 disables; recommended 2 for live)")
     ap.add_argument("--max-staleness-s", type=float, default=1.0,
                     help="Skip aim if joint data is older than this")
     ap.add_argument("--print-every", type=int, default=10,
@@ -562,6 +574,9 @@ def main():
     send_count = 0
     skip_unreach = 0
     skip_stale = 0
+    skip_low_conf = 0
+    skip_low_cams = 0
+    skip_missing = 0
     wl = int(args.wheel_rpm)
     wr = int(args.wheel_rpm)
 
@@ -582,14 +597,23 @@ def main():
                 continue
 
             joint_data = udp.get_joint(target)
-            if joint_data is None:
-                time.sleep(0.05)
-                continue
-
             now = time.time()
-            age = now - joint_data["ts"]
-            if age > args.max_staleness_s:
-                skip_stale += 1
+            gate = evaluate_joint_gate(
+                joint_data,
+                min_confidence=args.min_confidence,
+                min_cameras=args.min_cameras,
+                max_staleness_s=args.max_staleness_s,
+                now=now,
+            )
+            if not gate.ok:
+                if gate.reason == "stale":
+                    skip_stale += 1
+                elif gate.reason == "low_confidence":
+                    skip_low_conf += 1
+                elif gate.reason == "low_camera_count":
+                    skip_low_cams += 1
+                else:
+                    skip_missing += 1
                 time.sleep(0.05)
                 continue
 
@@ -639,7 +663,8 @@ def main():
                 safe_print(
                     f"  [{send_count:5d}] {target:<15} pitch={v_deg:5.1f}  yaw={h_deg:6.1f}  "
                     f"dist={d_m:.2f}m  conf={joint_data['conf']:.2f}  "
-                    f"(stale_skip={skip_stale} unreach_skip={skip_unreach})"
+                    f"(skip stale={skip_stale} unreach={skip_unreach} "
+                    f"lowconf={skip_low_conf} lowcams={skip_low_cams} missing={skip_missing})"
                 )
 
     except KeyboardInterrupt:

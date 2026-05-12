@@ -1,0 +1,90 @@
+%% main.tex -- MSc Thesis, Nazarbayev University
+\documentclass{nuthesis}
+
+%% ---------- METADATA ----------
+\title{Pose Guided Predictive Ballistics for Body Part--Targeted Football Training}
+\author{Arlen Smagulov}
+\degree{Master of Science in Electrical and Computer Engineering}
+\school{School of Engineering and Digital Sciences}
+\department{Department of Electrical and Computer Engineering}
+\supervisor{Prof.\ Sultangali Arzykulov}
+\cosupervisor{Prof.\ Mohammad Hashmi}
+\date{March 2026}
+
+\begin{document}
+
+%% ==================== FRONT MATTER ====================
+% Cover page (no page number)
+\makecover
+
+% Front matter pages: Roman numerals
+\pagenumbering{roman}
+
+% Required manuscript order per MSc(ECE) handbook:
+%   Title, Declaration, Abstract, Acknowledgements, Table of Contents,
+%   List of Abbreviations, List of Tables, List of Figures, then chapters.
+
+% Declaration page (no page number)
+\input{frontmatter/declaration}
+
+% Abstract, Acknowledgements
+\input{frontmatter/abstract}
+\input{frontmatter/acknowledgements}
+
+% Table of Contents
+\cleardoublepage
+\phantomsection
+\markboth{TABLE OF CONTENTS}{TABLE OF CONTENTS}
+\tableofcontents
+
+% List of Abbreviations
+\input{frontmatter/abbreviations}
+
+% List of Tables
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{\texorpdfstring{\MakeUppercase{List of Tables}}{List of Tables}}
+\markboth{LIST OF TABLES}{LIST OF TABLES}
+\listoftables
+
+% List of Figures
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{\texorpdfstring{\MakeUppercase{List of Figures}}{List of Figures}}
+\markboth{LIST OF FIGURES}{LIST OF FIGURES}
+\listoffigures
+
+%% ==================== MAIN CHAPTERS ====================
+% Switch to Arabic numerals for main content
+\cleardoublepage
+\pagenumbering{arabic}
+\setcounter{page}{1}
+\input{chapters/chapter1}
+\input{chapters/chapter2}
+\input{chapters/chapter3}
+\input{chapters/chapter4}
+\input{chapters/chapter5}
+\input{chapters/chapter6}
+
+%% ==================== BACK MATTER ====================
+% Bibliography
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{\texorpdfstring{\MakeUppercase{References}}{References}}
+\markboth{REFERENCES}{REFERENCES}
+{\small
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+}
+
+% Appendices
+\appendix
+\input{backmatter/appendix_a}
+\input{backmatter/appendix_b}
+\input{backmatter/appendix_c}
+\input{backmatter/appendix_d}
+\input{backmatter/appendix_e}
+\input{backmatter/appendix_f}
+\input{backmatter/appendix_g}
+
+\end{document}

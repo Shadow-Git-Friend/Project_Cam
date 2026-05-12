@@ -27,6 +27,7 @@ def run_assessment(
     body_mass_kg: float | None = None,
     calibration_report_path: str | Path | None = None,
     html_output_path: str | Path | None = None,
+    c3d_output_path: str | Path | None = None,
 ) -> dict[str, Any]:
     frames = load_motion(input_path, default_fps=fps)
     config = load_rules(config_path)
@@ -59,6 +60,16 @@ def run_assessment(
         from .render import render_html_report
 
         render_html_report(report, html_output_path)
+    if c3d_output_path:
+        from .exports import write_c3d
+
+        write_c3d(
+            frames=frames,
+            output_path=c3d_output_path,
+            fps=fps,
+            subject_id=athlete_id,
+            session_id=session_id,
+        )
     return report
 
 
@@ -74,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     ap.add_argument("--output", required=True, help="Output report JSON path")
     ap.add_argument("--html-output", default=None, help="Optional output HTML report path")
+    ap.add_argument("--c3d-output", default=None, help="Optional output C3D path (COCO-17 joints as virtual markers, mm units)")
     ap.add_argument("--standing-height-cm", type=float, default=None)
     ap.add_argument("--sitting-height-cm", type=float, default=None)
     ap.add_argument("--body-mass-kg", type=float, default=None)
@@ -95,10 +107,13 @@ def main(argv: list[str] | None = None) -> int:
         body_mass_kg=args.body_mass_kg,
         calibration_report_path=args.calibration_report,
         html_output_path=args.html_output,
+        c3d_output_path=args.c3d_output,
     )
     print(f"[OK] Wrote {report['exercise']} assessment report -> {args.output}")
     if args.html_output:
         print(f"[OK] Wrote HTML assessment report -> {args.html_output}")
+    if args.c3d_output:
+        print(f"[OK] Wrote C3D export -> {args.c3d_output}")
     return 0
 
 

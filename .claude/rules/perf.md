@@ -78,6 +78,14 @@
 - Does **not** modify `triangulate_multi`, `transform_world_point_y`, `ema_update`, or UDP schema.
 - Recommended live flags for bounce-heavy sessions: `--ball-imgsz 960 --ball-single-cam-fallback`.
 
+### Candidate selection gates (2026-04-21)
+- `--ball-max-box-side-px 220` (default on) — rejects any YOLO candidate whose larger bbox side exceeds 220 px. Primary defense against "person curled around ball" being labelled as a ball. A tennis ball at arena distance is <~120 px; 220 keeps close-range legit detections, rejects body/cone-sized blobs.
+- `--ball-min-box-side-px 0` (default off) — lower bound on bbox side; enable (e.g. 6) to filter detector-noise micro-boxes.
+- `--ball-kf-gate-px 150` (default on) — when the ball KF is locked, per-cam selection prefers the candidate whose center is within 150 px of the KF-predicted reprojection. Falls back to highest-conf candidate if no candidate is within gate (so re-acquisitions after long drops still work). Primary defense against markers/cones/bodies when the real ball is currently being tracked.
+- Both gates operate on raw YOLO candidates *before* `robust_triangulate_ball`. They only filter the per-cam "winner" choice; they do not change triangulation, KF dynamics, or UDP schema.
+- Enabling `--ball-kf-gate-px` makes it safe to lower `--ball-conf` 0.40 → 0.25 (the gate filters the extra noise).
+- Set either gate to `0` to disable. Use `0 0 0` trio to A/B test old selection behavior: `--ball-max-box-side-px 0 --ball-min-box-side-px 0 --ball-kf-gate-px 0`.
+
 ### Offline diagnosis tool
 - `Parallel_working/scripts/ball_detection_analyzer.py` — read-only sweep of conf thresholds + top-K over a sequence. Accepts either per-cam frame directories (`--sequence`) or `mosaic2d_*.mp4` 2×2 tiled videos (`--mosaic`). Reports per-cam detection rate, multi-box frequency, bbox aspect ratio histogram, and recovered-vs-0.40 delta.
 

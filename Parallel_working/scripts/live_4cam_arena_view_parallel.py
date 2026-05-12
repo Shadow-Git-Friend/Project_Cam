@@ -1,9 +1,11 @@
 import argparse
+from dataclasses import dataclass, field
 import json
 import math
 import multiprocessing as mp
 import re
 import socket
+import sys
 import threading
 import time
 from collections import deque
@@ -62,6 +64,10 @@ JOINT_NAME_TO_IDX = {
 DERIVED_UDP_JOINTS = {"body_center"}
 
 IDX_TO_JOINT_NAME = {v: k for k, v in JOINT_NAME_TO_IDX.items()}
+BALL_FLIGHT_AIRBORNE = "AIRBORNE"
+BALL_FLIGHT_FLOOR = "FLOOR"
+BALLISTIC_VZ_EMA_ALPHA = 0.35
+BALLISTIC_MAX_VZ_MM_S = 12000.0
 
 # --------------- BLM Demo: ballistic math + correction ---------------
 
@@ -121,6 +127,15 @@ def _blm_correct(xyz, model, mode):
             if ax in model["linear"]:
                 xyz[i] = model["linear"][ax]["a"] * xyz[i] + model["linear"][ax]["b"]
     return xyz
+
+
+@dataclass
+class BallFlightState:
+    mode: str = BALL_FLIGHT_FLOOR
+    last_multicam_pos_mm: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
+    last_multicam_vel_mm_s: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
+    t_last_multicam: float = 0.0
+    frames_since_multicam: int = 0
 
 
 class StageTimer:
@@ -330,6 +345,32 @@ def project_world_to_pixel(point_w, R, tvec, K, D):
     return uv.reshape(2)
 
 
+def ballistic_predict_z(z0, vz, dt_s, g, floor):
+    dt_s = max(0.0, float(dt_s))
+    z_new = float(z0) + float(vz) * dt_s - 0.5 * float(g) * dt_s * dt_s
+    return max(z_new, float(floor))
+
+
+def estimate_ballistic_multicam_velocity(prev_pos_mm, prev_vel_mm_s, curr_pos_mm, dt_s):
+    """Estimate velocity from accepted multi-cam locks with a conservative vz filter."""
+    if dt_s <= 1e-6:
+        return np.zeros(3, dtype=np.float64), 0.0
+    prev_pos_mm = np.asarray(prev_pos_mm, dtype=np.float64)
+    prev_vel_mm_s = np.asarray(prev_vel_mm_s, dtype=np.float64)
+    curr_pos_mm = np.asarray(curr_pos_mm, dtype=np.float64)
+    raw_vel = (curr_pos_mm - prev_pos_mm) / float(dt_s)
+    if not np.isfinite(raw_vel).all():
+        return np.zeros(3, dtype=np.float64), 0.0
+    raw_vz = float(raw_vel[2])
+    filt_vz = raw_vz
+    if np.isfinite(prev_vel_mm_s[2]):
+        filt_vz = ((1.0 - BALLISTIC_VZ_EMA_ALPHA) * float(prev_vel_mm_s[2])
+                   + BALLISTIC_VZ_EMA_ALPHA * raw_vz)
+    vel = raw_vel.copy()
+    vel[2] = float(np.clip(filt_vz, -BALLISTIC_MAX_VZ_MM_S, BALLISTIC_MAX_VZ_MM_S))
+    return vel, raw_vz
+
+
 def project_ray_to_z_plane(obs_norm, R, tvec, target_z):
     """Intersect a single-camera ray with the world plane Z = target_z.
 
@@ -380,6 +421,47 @@ def robust_triangulate_ball(obs_norm, obs_px, proj_mats, extr, intr, min_cams=2,
             return None, [], reproj[worst_cam]
         del active[worst_cam]
     return None, [], None
+
+
+def select_ball_box_for_cam(boxes_xyxyc, kf_pred_uv, kf_gate_px,
+                            min_side_px, max_side_px):
+    """Pick one ball bbox for a single camera from its raw YOLO candidates.
+
+    boxes_xyxyc: iterable of (x1, y1, x2, y2, conf) in source-pixel coords.
+    kf_pred_uv : (u, v) KF-predicted reprojection in this cam, or None.
+    kf_gate_px : accept distance (px) from kf_pred_uv; <=0 disables the gate.
+    min_side_px / max_side_px : accept boxes with max(w, h) in [min, max].
+                                0 on either side disables that bound.
+    Returns (x1, y1, x2, y2, conf) or None.
+    """
+    candidates = []
+    for box in boxes_xyxyc:
+        x1, y1, x2, y2, conf = box
+        w = float(x2 - x1)
+        h = float(y2 - y1)
+        side = max(w, h)
+        if min_side_px > 0 and side < min_side_px:
+            continue
+        if max_side_px > 0 and side > max_side_px:
+            continue
+        candidates.append((float(x1), float(y1), float(x2), float(y2), float(conf)))
+    if not candidates:
+        return None
+
+    if kf_pred_uv is not None and kf_gate_px > 0:
+        gated = []
+        pu, pv = float(kf_pred_uv[0]), float(kf_pred_uv[1])
+        for x1, y1, x2, y2, conf in candidates:
+            cx = 0.5 * (x1 + x2)
+            cy = 0.5 * (y1 + y2)
+            if np.hypot(cx - pu, cy - pv) <= kf_gate_px:
+                gated.append((x1, y1, x2, y2, conf))
+        if gated:
+            gated.sort(key=lambda b: -b[4])
+            return gated[0]
+
+    candidates.sort(key=lambda b: -b[4])
+    return candidates[0]
 
 
 def transform_world_point_y(world_pt, y_max, enabled=True):
@@ -1021,7 +1103,7 @@ class JointKalmanFilter:
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
 
-    def update_step(self, z):
+    def update_step(self, z, measurement_noise_scale=1.0):
         """Update with measurement z = [x, y, z] in mm."""
         z = np.asarray(z, dtype=np.float64)
         if not self._initialized:
@@ -1031,7 +1113,9 @@ class JointKalmanFilter:
             self._initialized = True
             return
         y = z - self.H @ self.x
-        S = self.H @ self.P @ self.H.T + self.R
+        scale = max(1e-6, float(measurement_noise_scale))
+        R = self.R * (scale ** 2)
+        S = self.H @ self.P @ self.H.T + R
         K = self.P @ self.H.T @ np.linalg.inv(S)
         self.x = self.x + K @ y
         self.P = (np.eye(6) - K @ self.H) @ self.P
@@ -1145,6 +1229,26 @@ def main():
                          "Prevents KF depth from drifting without geometric constraint.")
     ap.add_argument("--ball-single-cam-floor-mm", type=float, default=0.0,
                     help="Floor Z (mm) used when the KF has no depth estimate yet. Default 0 (world floor).")
+    ap.add_argument("--ball-ballistic-fallback", action="store_true",
+                    help="Replace the single-cam KF-Z target with a gravity-aware target_z derived from the "
+                         "last accepted multi-cam ball state. Off by default.")
+    ap.add_argument("--ball-gravity-mm-s2", type=float, default=9810.0,
+                    help="Gravity used by the ballistic single-cam fallback (mm/s^2).")
+    ap.add_argument("--ball-bounce-liftoff-vz-mm-s", type=float, default=500.0,
+                    help="Debounced FLOOR->AIRBORNE threshold for multi-cam vertical velocity (mm/s).")
+    ap.add_argument("--ball-single-cam-meas-noise-mult", type=float, default=3.0,
+                    help="Measurement-noise std multiplier applied to KF updates from ballistic single-cam fallback.")
+    ap.add_argument("--ball-max-box-side-px", type=float, default=220.0,
+                    help="Reject ball detections whose larger bbox side exceeds this (px). A tennis ball at "
+                         "arena distance is <~120px; body-sized blobs and cones exceed this. 0 = off.")
+    ap.add_argument("--ball-min-box-side-px", type=float, default=0.0,
+                    help="Reject ball detections whose larger bbox side is below this (px). Filters "
+                         "detector-noise micro-boxes. 0 = off (default).")
+    ap.add_argument("--ball-kf-gate-px", type=float, default=150.0,
+                    help="When the ball KF is locked, prefer per-cam candidates within this pixel radius "
+                         "of the predicted reprojection. Keeps the selector on the tracked ball when "
+                         "cones, markers, or bodies produce competing detections. Falls back to highest-"
+                         "conf if no candidate is within gate. 0 = off.")
     ap.add_argument(
         "--track-ball",
         action=argparse.BooleanOptionalAction,
@@ -1254,6 +1358,19 @@ def main():
     )
     ap.add_argument("--udp-target-conf-min", type=float, default=0.35)
     ap.add_argument("--udp-target-cams-min", type=int, default=2)
+    ap.add_argument(
+        "--session-id",
+        default="",
+        help="Optional session identifier. Embedded in --event-log-output records "
+             "so the live-viewer stream can be joined with the launcher decision log.",
+    )
+    ap.add_argument(
+        "--event-log-output",
+        default="",
+        help="Optional JSONL path for closed-loop event log "
+             "(session_start, target_chosen, athlete_reacted, outcome_scored, session_end). "
+             "Non-blocking writer; never affects render FPS. See src/project_cam/closed_loop/event_log.py.",
+    )
     ap.add_argument("--predict-ahead-ms", type=float, default=0.0,
                      help="Predict joint position this many ms into the future (0 = disabled). "
                           "Used for predictive targeting: compensates for system + ball flight latency.")
@@ -1376,6 +1493,45 @@ def main():
             f"[INFO] UDP target stream enabled -> {args.udp_target_host}:{args.udp_target_port} "
             f"joints={[n for n, _ in udp_target_joint_pairs]}"
         )
+
+    # Closed-loop event logger (non-blocking writer). Tracks the demo narrative:
+    # session_start, target_chosen (rising edge of AIM_OK), athlete_reacted /
+    # outcome_scored (operator keypresses 'r' / 'n'), session_end. Does NOT block
+    # the render loop — emit calls are O(microseconds) queue puts.
+    event_logger = None
+    session_id = args.session_id.strip() if args.session_id else ""
+    if args.event_log_output:
+        _src_dir = Path(__file__).resolve().parent.parent.parent / "src"
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        from project_cam.closed_loop import EventLogger  # noqa: E402
+
+        if not session_id:
+            session_id = f"viewer_{int(time.time())}"
+            print(f"[INFO] --event-log-output set without --session-id; synthesizing {session_id!r}")
+        event_logger = EventLogger(
+            output_path=args.event_log_output,
+            session_id=session_id,
+            source="live_viewer",
+            register_atexit=True,
+        )
+        event_logger.emit(
+            "session_start",
+            {
+                "session_id": session_id,
+                "udp_target_host": args.udp_target_host,
+                "udp_target_port": args.udp_target_port,
+                "udp_target_joints": [n for n, _ in udp_target_joint_pairs],
+                "predict_ahead_ms": args.predict_ahead_ms,
+            },
+        )
+        print(f"[OK] EventLogger enabled: {args.event_log_output} (session={session_id})")
+
+    # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
+    # every time blm_aim transitions from non-AIM_OK to AIM_OK (or the joint name
+    # changes while still AIM_OK), not on every frame.
+    _prev_aim_status = None
+    _prev_aim_joint = None
 
     udp_joint_indices_needed = set()
     for name, idx in udp_target_joint_pairs:
@@ -1550,8 +1706,12 @@ def main():
         measurement_noise=args.ball_kalman_measurement_noise,
         dt=1.0 / max(1, args.fps),
     )
+    ball_flight_state = BallFlightState()
+    ball_liftoff_streak = 0
     ball_coast_count = 0
     ball_frames_since_detect = 10_000
+    ball_frames_since_multicam = 10_000
+    ball_flight_state.frames_since_multicam = ball_frames_since_multicam
     joints_state = np.full((17, 3), np.nan, dtype=np.float32)
     joints_display = np.full((17, 3), np.nan, dtype=np.float32)
     joints_predicted = np.full((17, 3), np.nan, dtype=np.float32)
@@ -1678,14 +1838,48 @@ def main():
                     stream=False,
                     device=args.ball_device,
                 )
+
+                kf_pred_3d = None
+                if (args.ball_kf_gate_px > 0.0
+                        and ball_kf is not None and ball_kf.initialized):
+                    dt_ahead = 1.0 / max(1, args.fps)
+                    kf_pred_3d = ball_kf.predict_ahead(dt_ahead)
+
                 for cam, res in zip(batch_order, ball_results):
                     if res.boxes is None or len(res.boxes) == 0:
                         continue
-                    best = int(res.boxes.conf.argmax().item())
-                    box = res.boxes[best]
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(np.int32)
-                    conf = float(box.conf[0].item())
-                    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+                    xyxy_arr = res.boxes.xyxy.cpu().numpy()
+                    conf_arr = res.boxes.conf.cpu().numpy()
+                    candidates = [
+                        (float(xyxy_arr[i, 0]), float(xyxy_arr[i, 1]),
+                         float(xyxy_arr[i, 2]), float(xyxy_arr[i, 3]),
+                         float(conf_arr[i]))
+                        for i in range(len(conf_arr))
+                    ]
+
+                    kf_pred_uv = None
+                    if kf_pred_3d is not None and cam in extr and cam in intr:
+                        try:
+                            kf_pred_uv = project_world_to_pixel(
+                                kf_pred_3d,
+                                extr[cam]["R"], extr[cam]["tvec"],
+                                intr[cam]["K"], intr[cam]["D"],
+                            )
+                        except Exception:
+                            kf_pred_uv = None
+
+                    chosen = select_ball_box_for_cam(
+                        candidates,
+                        kf_pred_uv,
+                        args.ball_kf_gate_px,
+                        args.ball_min_box_side_px,
+                        args.ball_max_box_side_px,
+                    )
+                    if chosen is None:
+                        continue
+                    x1, y1, x2, y2, conf = chosen
+                    cx = 0.5 * (x1 + x2)
+                    cy = 0.5 * (y1 + y2)
                     und = undistort_points((cx, cy), intr[cam]["K"], intr[cam]["D"])
                     ball_obs[cam] = und
                     ball_obs_px[cam] = np.array([cx, cy], dtype=np.float64)
@@ -1800,17 +1994,28 @@ def main():
 
             timer.start("triang")
             ball_3d = None
+            ball_source = "none"
+            ball_debug_reason = None
+            ball_state_transition = None
             ball_single_cam_used = False
-            if len(ball_obs) >= max(2, args.ball_min_cams):
+            ball_single_cam_target_z = None
+            ball_multicam_vz_raw = None
+            ball_measurement_noise_scale = 1.0
+            ball_multicam_lock_this_frame = False
+            ball_floor_z_mm = float(args.ball_single_cam_floor_mm)
+            ball_min_cams = max(2, args.ball_min_cams)
+            if len(ball_obs) >= ball_min_cams:
                 tri, _used, _rep = robust_triangulate_ball(
                     obs_norm=ball_obs,
                     obs_px=ball_obs_px,
                     proj_mats=proj,
                     extr=extr,
                     intr=intr,
-                    min_cams=max(2, args.ball_min_cams),
+                    min_cams=ball_min_cams,
                     max_reproj_px=args.ball_max_reproj_px,
                 )
+                if tri is None:
+                    ball_debug_reason = "multicam_triangulation_failed"
                 # Max-speed gate only when gap is short enough to be physically meaningful.
                 # After a long drop, treat the new detection as a re-acquisition (no gate).
                 if (tri is not None and ball_kf.initialized
@@ -1821,26 +2026,103 @@ def main():
                     speed = float(np.linalg.norm(tri - prev_pos)) / 1000.0 / elapsed
                     if speed > args.ball_max_speed_mps:
                         tri = None
+                        ball_debug_reason = "multicam_speed_gate"
                 ball_3d = tri
-            elif (args.ball_single_cam_fallback and len(ball_obs) == 1
-                    and ball_frames_since_detect <= args.ball_single_cam_max_frames):
-                # Single-cam fallback: intersect this cam's ray with the KF-predicted Z plane.
-                # Use KF depth if we have a recent lock; else fall back to the floor plane.
+                if tri is not None:
+                    ball_source = "multi"
+                    ball_multicam_lock_this_frame = True
+                    if ball_flight_state.t_last_multicam > 0.0:
+                        dt_multicam = max(1e-3, t_now - ball_flight_state.t_last_multicam)
+                        multicam_vel, ball_multicam_vz_raw = estimate_ballistic_multicam_velocity(
+                            ball_flight_state.last_multicam_pos_mm,
+                            ball_flight_state.last_multicam_vel_mm_s,
+                            tri,
+                            dt_multicam,
+                        )
+                    else:
+                        multicam_vel = np.zeros(3, dtype=np.float64)
+                        ball_multicam_vz_raw = 0.0
+                    # Only accepted multi-cam frames are allowed to promote FLOOR -> AIRBORNE.
+                    if multicam_vel[2] > args.ball_bounce_liftoff_vz_mm_s:
+                        ball_liftoff_streak += 1
+                    else:
+                        ball_liftoff_streak = 0
+                    if ball_liftoff_streak >= 2 and ball_flight_state.mode != BALL_FLIGHT_AIRBORNE:
+                        prev_mode = ball_flight_state.mode
+                        ball_flight_state.mode = BALL_FLIGHT_AIRBORNE
+                        ball_state_transition = f"{prev_mode}->{BALL_FLIGHT_AIRBORNE}"
+                    if tri[2] < ball_floor_z_mm + 30.0 and multicam_vel[2] < 0.0:
+                        prev_mode = ball_flight_state.mode
+                        ball_flight_state.mode = BALL_FLIGHT_FLOOR
+                        if prev_mode != BALL_FLIGHT_FLOOR:
+                            ball_state_transition = f"{prev_mode}->{BALL_FLIGHT_FLOOR}"
+                        ball_liftoff_streak = 0
+                    ball_flight_state.last_multicam_pos_mm = np.asarray(tri, dtype=np.float64).copy()
+                    ball_flight_state.last_multicam_vel_mm_s = np.asarray(multicam_vel, dtype=np.float64).copy()
+                    ball_flight_state.t_last_multicam = t_now
+                    ball_frames_since_multicam = 0
+                    ball_flight_state.frames_since_multicam = 0
+            elif args.ball_single_cam_fallback and len(ball_obs) == 1:
                 cam_solo = next(iter(ball_obs.keys()))
-                if ball_kf.initialized:
-                    dt_ahead = max(1e-3, 1.0 / max(1, args.fps))
-                    target_z = float(ball_kf.predict_ahead(dt_ahead)[2])
+                tri = None
+                if ball_frames_since_multicam > args.ball_single_cam_max_frames:
+                    ball_debug_reason = "single_cam_max_frames_exceeded"
+                elif args.ball_ballistic_fallback:
+                    if ball_flight_state.mode == BALL_FLIGHT_AIRBORNE:
+                        dt_ballistic = max(0.0, t_now - ball_flight_state.t_last_multicam)
+                        target_z = ballistic_predict_z(
+                            ball_flight_state.last_multicam_pos_mm[2],
+                            ball_flight_state.last_multicam_vel_mm_s[2],
+                            dt_ballistic,
+                            args.ball_gravity_mm_s2,
+                            ball_floor_z_mm,
+                        )
+                        if target_z <= ball_floor_z_mm + 1e-3:
+                            prev_mode = ball_flight_state.mode
+                            ball_flight_state.mode = BALL_FLIGHT_FLOOR
+                            if prev_mode != BALL_FLIGHT_FLOOR:
+                                ball_state_transition = f"{prev_mode}->{BALL_FLIGHT_FLOOR}"
+                            ball_liftoff_streak = 0
+                    else:
+                        target_z = ball_floor_z_mm
+                    ball_single_cam_target_z = float(target_z)
+                    if target_z > 4000.0:
+                        tri = None
+                        ball_debug_reason = "ballistic_target_above_ceiling"
+                    else:
+                        tri = project_ray_to_z_plane(
+                            ball_obs[cam_solo],
+                            extr[cam_solo]["R"],
+                            extr[cam_solo]["tvec"],
+                            target_z,
+                        )
+                        if tri is None:
+                            ball_debug_reason = "single_cam_ray_miss"
+                    ball_measurement_noise_scale = args.ball_single_cam_meas_noise_mult
                 else:
-                    target_z = float(args.ball_single_cam_floor_mm)
-                tri = project_ray_to_z_plane(
-                    ball_obs[cam_solo],
-                    extr[cam_solo]["R"],
-                    extr[cam_solo]["tvec"],
-                    target_z,
-                )
+                    # Legacy single-cam fallback: intersect the ray with the KF-predicted Z plane.
+                    # Use KF depth if we have a recent lock; else fall back to the floor plane.
+                    if ball_kf.initialized:
+                        dt_ahead = max(1e-3, 1.0 / max(1, args.fps))
+                        target_z = float(ball_kf.predict_ahead(dt_ahead)[2])
+                    else:
+                        target_z = ball_floor_z_mm
+                    ball_single_cam_target_z = float(target_z)
+                    tri = project_ray_to_z_plane(
+                        ball_obs[cam_solo],
+                        extr[cam_solo]["R"],
+                        extr[cam_solo]["tvec"],
+                        target_z,
+                    )
+                    if tri is None:
+                        ball_debug_reason = "single_cam_ray_miss"
                 if tri is not None and np.isfinite(tri).all():
                     ball_3d = tri
                     ball_single_cam_used = True
+                    ball_source = "single_ballistic" if args.ball_ballistic_fallback else "single_legacy"
+            if not ball_multicam_lock_this_frame:
+                # The liftoff debounce is defined strictly over consecutive accepted multi-cam locks.
+                ball_liftoff_streak = 0
             if ball_3d is not None:
                 # On re-acquisition after a long drop, reset KF to new measurement
                 # so we don't blend with stale velocity.
@@ -1851,10 +2133,13 @@ def main():
                         dt=1.0 / max(1, args.fps),
                     )
                 ball_kf.predict_step()
-                ball_kf.update_step(ball_3d)
+                ball_kf.update_step(ball_3d, measurement_noise_scale=ball_measurement_noise_scale)
                 ball_state = ball_kf.get_position().astype(np.float32)
                 ball_coast_count = 0
                 ball_frames_since_detect = 0
+                if ball_single_cam_used:
+                    ball_frames_since_multicam += 1
+                    ball_flight_state.frames_since_multicam = ball_frames_since_multicam
             elif ball_kf.initialized and ball_coast_count < args.ball_coast_frames:
                 ball_kf.predict_step()
                 # Damp velocity during coast so we don't fly off on bounces/stops.
@@ -1862,6 +2147,7 @@ def main():
                 ball_state = ball_kf.get_position().astype(np.float32)
                 ball_coast_count += 1
                 ball_frames_since_detect += 1
+                ball_source = "coast"
             else:
                 ball_state = None
                 ball_frames_since_detect += 1
@@ -1875,6 +2161,18 @@ def main():
                 else:
                     rec["ball_mm"] = None
                     rec["detected"] = False
+                rec["source"] = ball_source
+                rec["ball_flight_mode"] = ball_flight_state.mode
+                rec["ball_state_transition"] = ball_state_transition
+                rec["ball_frames_since_detect"] = int(ball_frames_since_detect)
+                rec["ball_frames_since_multicam"] = int(ball_frames_since_multicam)
+                rec["ball_liftoff_streak"] = int(ball_liftoff_streak)
+                rec["ball_measurement_noise_scale"] = float(ball_measurement_noise_scale)
+                rec["ball_single_cam_target_z_mm"] = ball_single_cam_target_z
+                rec["ball_last_multicam_pos_mm"] = ball_flight_state.last_multicam_pos_mm.astype(float).tolist()
+                rec["ball_last_multicam_vel_mm_s"] = ball_flight_state.last_multicam_vel_mm_s.astype(float).tolist()
+                rec["ball_multicam_vz_raw_mm_s"] = ball_multicam_vz_raw
+                rec["ball_fallback_reject_reason"] = ball_debug_reason
                 ball_log_fh.write(json.dumps(rec) + "\n")
 
             if run_pose:
@@ -2058,6 +2356,29 @@ def main():
                             "launcher_pos": blm_demo["launcher"],
                             "target_pos": corrected_xyz,
                         }
+                        # Emit target_chosen on rising-edge transition or joint change.
+                        if event_logger is not None and (
+                            _prev_aim_status != "AIM_OK"
+                            or _prev_aim_joint != blm_demo["joint_name"]
+                        ):
+                            event_logger.emit(
+                                "target_chosen",
+                                {
+                                    "joint_name": blm_demo["joint_name"],
+                                    "frame": frame_idx,
+                                    "world_xyz_mm": [
+                                        float(corrected_xyz[0]),
+                                        float(corrected_xyz[1]),
+                                        float(corrected_xyz[2]),
+                                    ],
+                                    "pitch_deg": v_clamped,
+                                    "yaw_deg": h_clamped,
+                                    "distance_m": d_m,
+                                    "correction_mode": blm_demo["correction_mode"],
+                                },
+                            )
+                        _prev_aim_status = "AIM_OK"
+                        _prev_aim_joint = blm_demo["joint_name"]
                     else:
                         blm_aim_data = {
                             "status": "OUT_OF_RANGE",
@@ -2068,12 +2389,14 @@ def main():
                             "launcher_pos": blm_demo["launcher"],
                             "target_pos": corrected_xyz,
                         }
+                        _prev_aim_status = "OUT_OF_RANGE"
                 else:
                     blm_aim_data = {
                         "status": "NO_TARGET",
                         "joint_name": blm_demo["joint_name"],
                         "launcher_pos": blm_demo["launcher"],
                     }
+                    _prev_aim_status = "NO_TARGET"
 
             if args.show_3d and (frame_idx % args.viz_every == 0):
                 if use_cv2_viz:
@@ -2162,8 +2485,31 @@ def main():
 
             # Unified cv2 event pump (handles both 3D and 2D windows)
             if args.show_2d or (args.show_3d and use_cv2_viz):
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                _key = cv2.waitKey(1) & 0xFF
+                if _key == ord("q"):
                     break
+                # Operator scoring for closed-loop demo (only meaningful when event log is on).
+                if event_logger is not None and _key != 255:
+                    if _key == ord("r"):
+                        event_logger.emit(
+                            "athlete_reacted",
+                            {
+                                "frame": frame_idx,
+                                "operator_verdict": "reacted",
+                                "joint_name": _prev_aim_joint,
+                            },
+                        )
+                        print("[EVENT] athlete_reacted recorded")
+                    elif _key == ord("n"):
+                        event_logger.emit(
+                            "outcome_scored",
+                            {
+                                "frame": frame_idx,
+                                "operator_verdict": "no_reaction",
+                                "joint_name": _prev_aim_joint,
+                            },
+                        )
+                        print("[EVENT] no_reaction recorded")
 
             end_to_end_ms = timer.stop("total")
             report = timer.report(frame_idx, args.perf_log_every)
@@ -2204,6 +2550,12 @@ def main():
             cap.release()
         if udp_sock is not None:
             udp_sock.close()
+        if event_logger is not None:
+            try:
+                event_logger.emit("session_end", {"session_id": session_id})
+                event_logger.close()
+            except Exception:
+                pass
         if render_q is not None:
             put_latest_snapshot(render_q, None)
         if render_proc is not None:

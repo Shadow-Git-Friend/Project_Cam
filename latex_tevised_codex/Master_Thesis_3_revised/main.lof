@@ -1,0 +1,39 @@
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {3.1}{\ignorespaces System architecture in action: live 4-camera arena view showing YOLO ball detection (green bounding box), MMPose skeleton overlay (COCO 17-keypoint), and 3D triangulated positions during continuous operation.\relax }}{28}{figure.caption.11}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {4.1}{\ignorespaces Ball static GT grid: 36-point 3D scatter in arena frame.\relax }}{36}{figure.caption.12}%
+\contentsline {figure}{\numberline {4.2}{\ignorespaces Joint-touch trial grid: 9 XY positions and 3 height levels.\relax }}{38}{figure.caption.15}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {5.1}{\ignorespaces Ball static localisation: raw vs corrected 3D error comparison, demonstrating the linear bias correction model reducing mean error from 150.77 mm to 95.17 mm.\relax }}{44}{figure.caption.18}%
+\contentsline {figure}{\numberline {5.2}{\ignorespaces 3D scatter of ground-truth (blue) vs corrected estimated (coloured by error magnitude) ball positions across all 36 trials. The colour bar indicates error norm in mm.\relax }}{45}{figure.caption.19}%
+\contentsline {figure}{\numberline {5.3}{\ignorespaces XY-plane slices at four Z heights (200, 750, 1300, 1800 mm) showing ground-truth (blue circles) vs corrected estimates (red crosses).\relax }}{45}{figure.caption.20}%
+\contentsline {figure}{\numberline {5.4}{\ignorespaces Joint-touch 3D error boxplot by joint type, showing right\_knee (110.03 mm mean), right\_hip (150.38 mm), and left\_shoulder (164.38 mm).\relax }}{47}{figure.caption.23}%
+\contentsline {figure}{\numberline {5.5}{\ignorespaces Joint-touch ground-truth vs estimated positions: 3D scatter plot showing all 62 valid trials with GT markers and estimated positions colour-coded by joint type.\relax }}{48}{figure.caption.24}%
+\contentsline {figure}{\numberline {5.6}{\ignorespaces Mean 3D error by joint type: bar chart confirming the monotonic increase in error from knee to shoulder, consistent with decreasing camera visibility at greater heights.\relax }}{49}{figure.caption.25}%
+\contentsline {figure}{\numberline {5.7}{\ignorespaces Dynamic ball trajectory reconstructions: 3D plots of the four validation clips (\textit {ball\_slow}, \textit {ball\_fast}, \textit {ball\_fast\_ema0.1}, and \textit {no\_ball}) showing start (green) and end (red) markers.\relax }}{49}{figure.caption.26}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {D.1}{\ignorespaces \textit {Arena floor plan with camera positions, AprilTag locations, and world-frame axis overlay on all four live camera feeds.}\relax }}{68}{figure.caption.33}%
+\contentsline {figure}{\numberline {D.2}{\ignorespaces \textit {Extrinsic overlay validation: reprojected AprilTag corners (red/green markers) overlaid on each camera's live frame, confirming calibration accuracy.}\relax }}{69}{figure.caption.34}%
+\contentsline {figure}{\numberline {D.3}{\ignorespaces \textit {3D arena world-frame renders showing camera positions (coloured markers), BLM position (red), coordinate axes, and AprilTag wall positions from three viewing angles.}\relax }}{69}{figure.caption.35}%
+\contentsline {figure}{\numberline {D.4}{\ignorespaces \textit {ChArUco calibration board (A4, 300 dpi, 7 \(\times \) 10 squares, DICT\_4X4\_1000) used for intrinsic calibration of all four cameras.}\relax }}{70}{figure.caption.36}%
+\contentsline {figure}{\numberline {D.5}{\ignorespaces \textit {Intrinsic calibration reprojection error per camera: bar chart showing per-camera mean reprojection error after ChArUco calibration.}\relax }}{71}{figure.caption.37}%
+\contentsline {figure}{\numberline {D.6}{\ignorespaces \textit {Extrinsic calibration RMSE per camera: bar chart showing residual reprojection error after robust PnP optimisation with sigma-clipping.}\relax }}{72}{figure.caption.38}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {E.1}{\ignorespaces \textit {YOLOv26s ball detector training curves: loss, precision, recall, and mAP over 75 training epochs.}\relax }}{73}{figure.caption.39}%
+\contentsline {figure}{\numberline {E.2}{\ignorespaces \textit {Normalised confusion matrix for the YOLOv26s ball detector on the validation set.}\relax }}{73}{figure.caption.40}%
+\contentsline {figure}{\numberline {E.3}{\ignorespaces \textit {Precision-Recall curve for the YOLOv26s ball detector.}\relax }}{74}{figure.caption.41}%
+\contentsline {figure}{\numberline {E.4}{\ignorespaces \textit {Sample training batch: YOLOv26s ball detection annotations on training images.}\relax }}{74}{figure.caption.42}%
+\contentsline {figure}{\numberline {E.5}{\ignorespaces \textit {Validation predictions vs ground truth.}\relax }}{75}{figure.caption.43}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {F.1}{\ignorespaces \textit {Live system smoke test frames showing 4-camera arena view with ball detection (green bounding box), pose skeleton overlay (COCO 17-keypoint), and 3D triangulated positions at three time points during continuous operation.}\relax }}{76}{figure.caption.44}%
+\contentsline {figure}{\numberline {F.2}{\ignorespaces \textit {Smoke test frame at \(t \approx 5.3\) s.}\relax }}{76}{figure.caption.45}%
+\contentsline {figure}{\numberline {F.3}{\ignorespaces \textit {Smoke test frame at \(t \approx 13.3\) s.}\relax }}{77}{figure.caption.46}%
+\contentsline {figure}{\numberline {F.4}{\ignorespaces \textit {Smoke test frame at \(t \approx 21.3\) s.}\relax }}{77}{figure.caption.47}%
+\contentsfinish 
+\contentsfinish 

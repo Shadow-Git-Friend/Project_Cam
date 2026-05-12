@@ -1,0 +1,48 @@
+\cleardoublepage
+\markboth{E. YOLO BALL DETECTOR TRAINING RESULTS}{}
+\chapter{YOLO Ball Detector Training Results}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/yolo_training_curves}
+\caption{\textit{YOLOv26s ball detector training curves: loss, precision, recall, and mAP over 75 training epochs.}}
+\label{fig:e1}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\textwidth]{figures/yolo_confusion_matrix}
+\caption{\textit{Normalised confusion matrix for the YOLOv26s ball detector on the validation set.}}
+\label{fig:e2}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\textwidth]{figures/yolo_pr_curve}
+\caption{\textit{Precision-Recall curve for the YOLOv26s ball detector.}}
+\label{fig:e3}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/yolo_sample_batch}
+\caption{\textit{Sample training batch: YOLOv26s ball detection annotations on training images.}}
+\label{fig:e4}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[t]{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/yolo_val_pred_a}
+\caption*{(a)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/yolo_val_pred_b}
+\caption*{(b)}
+\end{subfigure}
+\caption{\textit{Validation predictions vs ground truth.}}
+\label{fig:e5}
+\end{figure}

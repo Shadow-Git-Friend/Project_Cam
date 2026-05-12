@@ -1,0 +1,178 @@
+\chapter{Ground-Truth Evaluation Protocols}
+
+\section{Ball Static Ground-Truth Dataset}
+
+\subsection{Dataset Design}
+
+A 36-point static dataset evaluates ball localisation across a representative volume of the garage arena. The current repository trial definition uses X positions of 3000, 4000, and 5000 mm; Y positions of 2300, 1600, and 1000 mm; and Z levels of 200, 750, 1300, and 1800 mm. This produces
+
+\[
+3 \times 3 \times 4 = 36
+\]
+
+trials labelled B001--B036. The full coordinate definition is provided in Table~\ref{table:4_1_ball_static_grid}; the table is used instead of a separate scatter plot so that the protocol remains precise and easy to audit.
+
+\begin{table}[h]
+\centering
+\caption{Ball static ground-truth grid definition}
+\label{table:4_1_ball_static_grid}
+\begin{tabular}{|c|c|c|c|}
+\hline
+\textbf{X (mm)} & \textbf{Y (mm)} & \textbf{Z levels (mm)} & \textbf{Trial IDs} \\
+\hline
+3000 & 2300 & 200, 750, 1300, 1800 & B001, B010, B019, B028 \\
+\hline
+4000 & 2300 & 200, 750, 1300, 1800 & B002, B011, B020, B029 \\
+\hline
+5000 & 2300 & 200, 750, 1300, 1800 & B003, B012, B021, B030 \\
+\hline
+3000 & 1600 & 200, 750, 1300, 1800 & B004, B013, B022, B031 \\
+\hline
+4000 & 1600 & 200, 750, 1300, 1800 & B005, B014, B023, B032 \\
+\hline
+5000 & 1600 & 200, 750, 1300, 1800 & B006, B015, B024, B033 \\
+\hline
+3000 & 1000 & 200, 750, 1300, 1800 & B007, B016, B025, B034 \\
+\hline
+4000 & 1000 & 200, 750, 1300, 1800 & B008, B017, B026, B035 \\
+\hline
+5000 & 1000 & 200, 750, 1300, 1800 & B009, B018, B027, B036 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Capture Protocol}
+
+For each trial, the ball centre is positioned at the target coordinate using a rigid holder. The scene is held static for 3--4 seconds while all four cameras record. Trial ID, placement notes, and anomalies are recorded in the session log. The physical ball-centre position is measured against the arena coordinate frame with an estimated placement uncertainty of approximately $\pm 5$ mm.
+
+\subsection{Processing}
+
+Each four-camera clip is processed by the ball ground-truth evaluator. The script extracts YOLO detections, triangulates the ball from valid camera observations, rejects estimates with high reprojection error, and computes the mean 3D position over the stable hold window. The stable window is defined as the middle portion of the clip, excluding the beginning and end to avoid placement and removal transients.
+
+\section{Joint-Touch Ground-Truth Dataset}
+
+\subsection{Dataset Design}
+
+The joint-touch dataset evaluates 3D localisation of three target joints under a controlled physical reference condition. The subject touches a known physical target with the designated joint while holding a static pose.
+
+The current trial grid uses nine XY positions:
+
+\begin{table}[h]
+\centering
+\caption{Joint-touch trial design: XY grid positions (mm)}
+\label{table:4_2_joint_touch_xy}
+\begin{tabular}{|c|c|c|}
+\hline
+\textbf{XY Position Index} & \textbf{X (mm)} & \textbf{Y (mm)} \\
+\hline
+1 & 2600 & 1100 \\
+\hline
+2 & 3600 & 1100 \\
+\hline
+3 & 4600 & 1100 \\
+\hline
+4 & 2600 & 1600 \\
+\hline
+5 & 3600 & 1600 \\
+\hline
+6 & 4600 & 1600 \\
+\hline
+7 & 2600 & 2100 \\
+\hline
+8 & 3600 & 2100 \\
+\hline
+9 & 4600 & 2100 \\
+\hline
+\end{tabular}
+\end{table}
+
+The evaluated joints are \texttt{right\_knee}, \texttt{right\_hip}, and \texttt{left\_shoulder}. Platform/base Z levels are 0, 400, and 640 mm. The nominal joint target heights are defined as base + 500 mm for the right knee, base + 1000 mm for the right hip, and base + 1560 mm for the left shoulder. The total dataset is therefore
+
+\[
+9 \text{ positions} \times 3 \text{ height levels} \times 3 \text{ joints} = 81
+\]
+
+trials, labelled J001--J081.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/figure4_2_joint_touch_grid}
+\caption{Joint-touch trial grid: nine XY positions and three height levels.}
+\label{fig:4_2_joint_touch_grid}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{Joint-touch platform and joint heights}
+\label{table:4_2b_joint_heights}
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+\textbf{Platform Level} & \textbf{Z base (mm)} & \textbf{right\_knee Z} & \textbf{right\_hip Z} & \textbf{left\_shoulder Z} \\
+\hline
+Floor & 0 & 500 & 1000 & 1560 \\
+\hline
+Platform 1 & 400 & 900 & 1400 & 1960 \\
+\hline
+Platform 2 & 640 & 1140 & 1640 & 2200 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Capture Protocol}
+
+For each trial, the subject stands in the arena and touches the physical target marker with the specified body joint. The pose is held for 3--4 seconds. Capture begins from a neutral non-touching pose and includes the transition into the hold, but only the stable hold window is evaluated.
+
+A trial is valid if the joint is detected in enough cameras during the hold window, the detection ratio meets the configured threshold, and no physical placement error is recorded. In the current evaluation, 62 of 81 trials are valid. The missing or invalid trials are primarily associated with occlusion and high target positions, especially shoulder trials at the highest platform level.
+
+\subsection{Processing}
+
+The evaluator triangulates each target joint from valid 2D keypoint observations and computes the mean 3D joint position over the stable hold window. This estimate is compared with the measured physical reference position. The joint-touch protocol is stricter than visual inspection because it assigns a numerical 3D error to each valid trial and records missing or failed trials explicitly.
+
+\section{Dynamic Validation Clips}
+
+Dynamic clips were recorded to observe tracking behaviour under non-static conditions. The \texttt{ball\_slow} clip includes gentle hand-guided motion, the \texttt{ball\_fast} clip includes faster throws, and the \texttt{no\_ball} clip checks false positives when no ball is present. These clips are useful for identifying dropouts, motion-blur sensitivity, and implausible trajectory jumps.
+
+They are not, however, a full closed-loop moving-target validation. They do not measure final ball impact against a moving human joint, and they do not provide an independent ground-truth trajectory for every frame. For this reason, Chapter 5 interprets them as qualitative or partial dynamic evidence rather than as proof that the final autonomous training loop is complete.
+
+\section{Error Metrics and Bias Correction Model}
+
+\subsection{Primary Metrics}
+
+For each valid trial, the 3D Euclidean error is computed as
+
+\begin{equation}
+e = \sqrt{(x_{\text{est}} - x_{\text{gt}})^2 + (y_{\text{est}} - y_{\text{gt}})^2 + (z_{\text{est}} - z_{\text{gt}})^2},
+\label{eqn:4_1_euclidean_error}
+\end{equation}
+
+where $(x_{\text{est}}, y_{\text{est}}, z_{\text{est}})$ is the mean estimated 3D position over the hold window and $(x_{\text{gt}}, y_{\text{gt}}, z_{\text{gt}})$ is the measured ground-truth position. The reported summary statistics are mean error, median error, RMSE, 90th percentile (P90), 95th percentile (P95), and maximum error.
+
+Temporal precision is reported separately as the standard-deviation norm of repeated estimates during the static hold. This distinction matters: high precision with high absolute error indicates a repeatable but biased system, whereas low precision indicates random instability.
+
+\subsection{Axis Bias and Correction Model}
+
+Per-axis bias is computed as
+
+\begin{equation}
+\text{bias}_X = \text{mean}(x_{\text{est}} - x_{\text{gt}}),
+\label{eqn:4_2_bias_x}
+\end{equation}
+
+\begin{equation}
+\text{bias}_Y = \text{mean}(y_{\text{est}} - y_{\text{gt}}),
+\label{eqn:4_3_bias_y}
+\end{equation}
+
+\begin{equation}
+\text{bias}_Z = \text{mean}(z_{\text{est}} - z_{\text{gt}}).
+\label{eqn:4_4_bias_z}
+\end{equation}
+
+The repository includes linear correction models that estimate a scale and offset per axis, for example
+
+\begin{equation}
+x_{\text{corr}} = a_X x_{\text{est}} + b_X .
+\label{eqn:4_5_x_correction}
+\end{equation}
+
+Analogous expressions apply for Y and Z. In this revised thesis, the current raw ground-truth metrics are reported as the primary evidence because they are the most conservative representation of the present calibration bundle. The correction models are discussed as diagnostic and runtime compensation tools, not as independent proof of generalised accuracy. Because the correction parameters are fitted from measured ground-truth trials, a separate held-out validation set is required before corrected metrics can be treated as final performance claims.

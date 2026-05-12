@@ -17,6 +17,7 @@ import math
 import queue
 import signal
 import socket
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -544,19 +545,19 @@ def main():
         help="If set, write one JSON line per target decision for reporting",
     )
     ap.add_argument(
-        "--correction-model",
+        "--session-id",
         default="",
-        help="Path to GT correction model JSON (from evaluate_ball_static_gt.py). "
-             "Default: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_ball/correction_model.json",
+        help="Optional session identifier. Written into every decision-log row and "
+             "into the curated EventLogger stream (--event-log-output). Used to join "
+             "the engineering decision log with the demo-narrative event log.",
     )
     ap.add_argument(
-        "--correction-mode",
-        choices=["none", "bias", "linear"],
-        default="none",
-        help="Correction mode: 'none' = no correction, 'bias' = global mean offset, "
-             "'linear' = per-axis linear fit (most accurate)",
+        "--event-log-output",
+        default="",
+        help="Optional path to write the curated closed-loop EventLogger JSONL stream "
+             "(session_start, aim_command_sent, ball_launched, session_end). Distinct "
+             "from --dry-run-log-jsonl, which is the raw engineering decision log.",
     )
-
     args = ap.parse_args()
 
     if serial is None:
@@ -657,6 +658,40 @@ def main():
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_fp = open(log_path, "a", encoding="utf-8")
         print(f"[OK] Decision log enabled: {log_path}")
+
+    # Resolve session_id once. Empty string is treated as "no session" for
+    # backwards compatibility with existing decision-log consumers.
+    session_id = args.session_id.strip() if args.session_id else ""
+
+    # Optional curated event log (closed-loop demo narrative). Separate from the
+    # raw decision log so each stream stays focused. Both share session_id.
+    event_logger = None
+    if args.event_log_output:
+        # Make src/ importable for closed_loop helpers.
+        _src_dir = Path(__file__).resolve().parent.parent.parent / "src"
+        if str(_src_dir) not in sys.path:
+            sys.path.insert(0, str(_src_dir))
+        from project_cam.closed_loop import EventLogger  # noqa: E402
+
+        if not session_id:
+            session_id = f"launcher_{int(time.time())}"
+            print(f"[INFO] --event-log-output set without --session-id; synthesizing {session_id!r}")
+        event_logger = EventLogger(
+            output_path=args.event_log_output,
+            session_id=session_id,
+            source="launcher_runtime",
+            register_atexit=True,
+        )
+        event_logger.emit(
+            "session_start",
+            {
+                "session_id": session_id,
+                "serial_port": args.serial_port,
+                "shoot_enabled": bool(getattr(args, "shoot_enabled", False)),
+                "correction_mode": args.correction_mode,
+            },
+        )
+        print(f"[OK] EventLogger enabled: {args.event_log_output} (session={session_id})")
     if args.horizontal_only:
         print(
             "[INFO] Horizontal-only mode enabled: "
@@ -742,12 +777,14 @@ def main():
         transformed_launcher_xyz: Optional[dict] = None,
         calculated_pitch_yaw_v: Optional[dict] = None,
         execution_time_ms: Optional[float] = None,
+        decision_reason: Optional[str] = None,
         extra: Optional[dict] = None,
     ):
         if log_fp is None:
             return
         rec = {
             "timestamp": time.time(),
+            "session_id": session_id or None,
             "input_joint_name": joint_name,
             "raw_world_xyz_mm": raw_world_xyz_mm.tolist() if isinstance(raw_world_xyz_mm, np.ndarray) else raw_world_xyz_mm,
             "corrected_world_xyz_mm": corrected_world_xyz_mm.tolist() if isinstance(corrected_world_xyz_mm, np.ndarray) else corrected_world_xyz_mm,
@@ -755,6 +792,7 @@ def main():
             "transformed_launcher_xyz": transformed_launcher_xyz,
             "calculated_pitch_yaw_v": calculated_pitch_yaw_v,
             "decision": decision,
+            "decision_reason": decision_reason,
             "execution_time_ms": execution_time_ms,
         }
         if extra:
@@ -1297,6 +1335,18 @@ def main():
         if log_fp is not None:
             try:
                 log_fp.close()
+            except Exception:
+                pass
+        if event_logger is not None:
+            try:
+                event_logger.emit(
+                    "session_end",
+                    {
+                        "session_id": session_id,
+                        "completed_target_events": completed_target_events,
+                    },
+                )
+                event_logger.close()
             except Exception:
                 pass
         print("[DONE] Launcher runtime stopped")

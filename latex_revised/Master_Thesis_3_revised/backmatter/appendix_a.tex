@@ -1,0 +1,65 @@
+\cleardoublepage
+\markboth{A. BLM INTEGRATION TEST CHECKLIST}{}
+\chapter{BLM Integration Test Checklist}
+
+The following table is the complete six-stage integration checklist used to govern safe deployment of the Ball Launching Machine. Each row defines a test ID, stage, test description, pass criteria, and the verification status at the time of submission. Stages~S0--S4 were completed on 2026-04-09. The integrated live test exercised rows S3.1--S3.3, S4.1--S4.3, and S5.1--S5.3 under operator supervision on three named joints (\texttt{left\_shoulder}, \texttt{right\_knee}, \texttt{nose}) on the same date, with the evidence (terminal logs, video, JSONL) archived. Closed-loop firing on a moving subject (the corresponding entries in the regime where the subject is in motion during the shot) is identified as future work in Section~6.4.
+
+{\footnotesize
+\begin{longtable}{|l|l|p{3.5cm}|p{5cm}|p{2cm}|}
+\caption{BLM six-stage integration test checklist with current verification status.} \label{tab:app_a_checklist} \\
+\hline
+\textbf{ID} & \textbf{Stage} & \textbf{Test} & \textbf{Pass Criteria} & \textbf{Status} \\
+\hline
+\endfirsthead
+\hline
+\textbf{ID} & \textbf{Stage} & \textbf{Test} & \textbf{Pass Criteria} & \textbf{Status} \\
+\hline
+\endhead
+\hline
+\endfoot
+S0.1 & Preflight & Camera and calibration load & Live viewer starts, 4 cams visible, no crash for 2~min & Passed 2026-04-09 \\
+\hline
+S0.2 & Preflight & Serial link to ESP32 & Runtime opens serial and accepts commands & Passed 2026-04-09 \\
+\hline
+S0.3 & Preflight & Launcher pose sanity check & \texttt{launcher\_x/y/z/yaw} validated with static target & Passed 2026-04-09 \\
+\hline
+S1.1 & ESP32 only & Manual low-level command test & \texttt{set}, \texttt{center}, \texttt{stop}, \texttt{shoot}, \texttt{reload} all execute correctly & Passed 2026-04-09 \\
+\hline
+S1.2 & ESP32 only & Angle clamp test & Commands beyond $\pm 30^\circ$ safely clamped & Passed 2026-04-09 \\
+\hline
+S1.3 & ESP32 only & RPM telemetry test & L:\ldots\ R:\ldots\ received while wheels run & Passed 2026-04-09 \\
+\hline
+S2.1 & Runtime & Synthetic UDP target feed & Runtime computes command and sends \texttt{set} without error & Passed 2026-04-09 \\
+\hline
+S2.2 & Runtime & Zone rejection test & Out-of-zone targets logged as \texttt{OUT\_OF\_RANGE} & Passed 2026-04-09 \\
+\hline
+S2.3 & Runtime & Stability gating test & Noisy targets logged as \texttt{LOW\_CONFIDENCE} & Passed 2026-04-09 \\
+\hline
+S3.1 & Aim-only & Target acquire per joint & Each joint gets stable lock within timeout & Passed 2026-04-09 \\
+\hline
+S3.2 & Aim-only & Sequence behaviour & \texttt{right\_knee} $\to$ \texttt{right\_hip} $\to$ \texttt{left\_shoulder} $\to$ repeat & Passed 2026-04-09 \\
+\hline
+S3.3 & Aim-only & Return to zero & After each aim, launcher returns to centre & Passed 2026-04-09 \\
+\hline
+S4.1 & Safety & E-STOP response time & \texttt{estop} causes immediate stop, response $<$ 100~ms & Passed 2026-04-09 \\
+\hline
+S4.2 & Safety & E-STOP latch behaviour & System stays blocked until \texttt{clear} issued & Passed 2026-04-09 \\
+\hline
+S4.3 & Safety & Link-loss behaviour & On UDP/serial interruption, runtime goes to safe stop & Passed 2026-04-09 \\
+\hline
+S5.1 & Fire & Single shot on one joint & 1 commanded shot after aim and RPM gate & Passed 2026-04-09 (static / live-aim regime) \\
+\hline
+S5.2 & Fire & No unintended extra shots & Exactly one \texttt{shoot} per trigger event & Passed 2026-04-09 \\
+\hline
+S5.3 & Fire & Post-shot safe state & Returns to centre and waits for next valid target & Passed 2026-04-09 \\
+\hline
+S6.1 & Full cycle & 10-cycle reliability & 10 full target cycles without crash or unsafe behaviour & Pending (moving target) \\
+\hline
+S6.2 & Full cycle & Decision log completeness & Every cycle has JSONL records with required fields & Passed for cycles run 2026-04-09 \\
+\hline
+S6.3 & Full cycle & Report-ready outputs & Logs and summary plots generated & Pending (moving target) \\
+\hline
+\end{longtable}
+}
+
+Required JSONL decision log fields per event are: \path{timestamp}, \path{input_joint_name}, \path{raw_world_xyz_mm}, \path{transformed_launcher_xyz}, \path{calculated_pitch_yaw_v}, \path{decision} (OK\,/\,\path{OUT_OF_RANGE}\,/\,\path{LOW_CONFIDENCE}\,/\,ESTOP), and \path{execution_time_ms}.

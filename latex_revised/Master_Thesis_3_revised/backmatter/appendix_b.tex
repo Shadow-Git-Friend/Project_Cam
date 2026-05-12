@@ -1,0 +1,58 @@
+\cleardoublepage
+\markboth{B. KEY SCRIPT LISTINGS}{}
+\chapter{Key Script Listings}
+
+\section*{B.1 Live 4-Camera Arena View with UDP Target Streaming}
+
+Canonical live visual command:
+
+\begin{lstlisting}[language=bash, caption={Live 4-camera arena view command}, label={lst:live4cam}]
+cd /home/hanush/Desktop/Project_Cam
+./venv/bin/python garage_lab_combined/scripts/live_4cam_arena_view.py \
+--config garage_lab_combined/config/cameras.yaml \
+--intrinsics-dir garage_lab_combined/cal/intrinsics \
+--extrinsics garage_lab_combined/cal/extrinsics/extrinsics_main.json \
+--dimensions garage_lab_combined/cal/extrinsics/Dimensions.txt \
+--ball-device cuda:0 \
+--pose-device cpu \
+--show-3d
+\end{lstlisting}
+
+\section*{B.2 Launcher Runtime Controller (UDP to Serial)}
+
+\begin{lstlisting}[language=bash, caption={Launcher runtime controller invocation}, label={lst:launcherruntime}]
+./venv/bin/python garage_lab_combined/scripts/launcher_runtime_from_udp.py \
+--serial-port /dev/ttyUSB0 \
+--launcher-x-mm 600 \
+--launcher-y-mm 1560 \
+--launcher-z-mm 500 \
+--launcher-yaw-deg 0 \
+--targets left_shoulder right_hip right_knee \
+--dry-run-log-jsonl session_log.jsonl
+\end{lstlisting}
+
+\section*{B.3 Ball Static Ground-Truth Evaluation}
+
+\begin{lstlisting}[language=bash, caption={Ball static ground-truth evaluation}, label={lst:ballgt}]
+./venv/bin/python garage_lab_combined/scripts/evaluate_ball_static_gt.py \
+--session-dir garage_lab_combined/gt_eval/ball_tuning_20260306 \
+--intrinsics-dir garage_lab_combined/cal/intrinsics \
+--extrinsics garage_lab_combined/cal/extrinsics/extrinsics_main.json \
+--conf 0.45 \
+--ball-min-cams 2 \
+--ball-max-reproj-px 14 \
+--ball-ema-alpha 0.25
+\end{lstlisting}
+
+\section*{B.4 Joint-Touch Ground-Truth Evaluation}
+
+\begin{lstlisting}[language=bash, caption={Joint-touch ground-truth evaluation}, label={lst:jointgt}]
+./venv/bin/python garage_lab_combined/scripts/evaluate_pose_joint_touch_gt.py \
+--session-dir garage_lab_combined/gt_eval/joint_tuning_20260310 \
+--intrinsics-dir garage_lab_combined/cal/intrinsics \
+--extrinsics garage_lab_combined/cal/extrinsics/extrinsics_main.json \
+--conf 0.45 \
+--pose-conf 0.35 \
+--pose-min-cams 3 \
+--ball-ema-alpha 0.25
+\end{lstlisting}

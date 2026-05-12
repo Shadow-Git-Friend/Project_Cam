@@ -1,0 +1,166 @@
+Here is the committee’s slide-by-slide evaluation based on the Nazarbayev University MSc ECE Handbook guidelines, followed by the simulated Q&A questions for your defense. 
+
+### **SLIDE EVALUATIONS**
+
+**Slide 1 - Title**
+*   **Scores (1-10):** 
+    *   **LS:** C1:9, C2:9, C3:9, C5:8, C6:N/A (Clear start, sets professional tone). 
+    *   **CS:** C1:9, C2:9, C3:8, C5:9, C6:N/A (Clean layout, standard compliance). 
+    *   **EE:** C1:8, C2:8, C3:9, C5:8, C6:N/A (Appropriate title, good institutional branding).
+*   **Flags:** None.
+*   **Rewrite:** *(No rewrite needed; complies with NU standards).*
+
+**Slide 2 - Motivation**
+*   **Scores (1-10):** 
+    *   **LS:** C1:8, C2:7, C3:7, C5:8, C6:7 (Missing literature citations). 
+    *   **CS:** C1:8, C2:8, C3:7, C5:8, C6:7 (Good imagery, but lacks academic grounding). 
+    *   **EE:** C1:8, C2:7, C3:8, C5:7, C6:7 (Needs to establish the theoretical context per handbook guidelines).
+*   **Flags:** Missing literature link. Handbook strictly requires contextualizing ideas in relation to other theories/works.
+*   **Rewrite:** 
+    *   Current launchers operate in open-loop mode, unable to adapt to athlete position.
+    *   MoCap systems (e.g., Vicon, OptiTrack) offer sub-millimeter precision but cost $50k+ and lack actuation.
+    *   Low-cost camera pipelines can bridge the gap for pose-guided ball delivery.
+    *   Goal: Develop an affordable, pose-reactive aiming system.
+
+**Slide 3 - Problem Statement & Objectives**
+*   **Scores (1-10):** 
+    *   **LS:** C1:9, C2:9, C3:7, C5:9, C6:9 (Excellent honesty on limitations, but slightly cluttered). 
+    *   **CS:** C1:8, C2:9, C3:8, C5:9, C6:9 (Clear, measurable objectives aligning with thesis). 
+    *   **EE:** C1:9, C2:8, C3:7, C5:8, C6:8 (Good use of exact data, layout is a bit dense).
+*   **Flags:** Cluttered layout. 
+*   **Rewrite:** 
+    *   **Obj 1:** Static ball localization (Target: <120 mm; Achieved: 95.17 mm corrected mean).
+    *   **Obj 2:** 3D joint localization (Target: <180 mm; Achieved: 143.38 mm over 62 valid trials).
+    *   **Obj 3:** Safe integration (Completed 6-stage protocol S0–S4; E-STOP <100 ms).
+    *   **Obj 4:** Practicality (Commodity hardware, ~$200 perception cost).
+    *   **Limitation:** Closed-loop firing at moving subjects remains future work.
+
+**Slide 4 - Background & Research Gap**
+*   **Scores (1-10):** 
+    *   **LS:** C1:8, C2:8, C3:8, C5:9, C6:8 (Table is effective). 
+    *   **CS:** C1:8, C2:9, C3:9, C5:9, C6:8 (Highlights gap clearly). 
+    *   **EE:** C1:8, C2:8, C3:8, C5:8, C6:8 (Needs direct citations to literature [e.g., 40, 41] in the table).
+*   **Flags:** Missing literature citations in the table (must cite robotic table tennis/serving robots).
+*   **Rewrite:** 
+    *   **Lab MoCap (OptiTrack/Vicon):** $50k+, <1mm accuracy, no launcher integration.
+    *   **Commercial Launchers (Lobster Elite):** $200-$4k, no perception, open-loop only.
+    *   **Research Prototypes [40, 41]:** $2k-$10k, fixed-zone targeting, 50-100mm accuracy.
+    *   **This Work:** ~$200 cost, joint-level live-aim tracking, static/live-aim validated.
+
+**Slide 5 - Key Technical Components**
+*   **Scores (1-10):** 
+    *   **LS:** C1:8, C2:8, C3:8, C5:8, C6:8 (Good summary of novelty). 
+    *   **CS:** C1:8, C2:8, C3:8, C5:8, C6:8 (Logical sequence). 
+    *   **EE:** C1:8, C2:7, C3:7, C5:7, C6:8 (A bit text-heavy).
+*   **Flags:** Cluttered. Keep to maximum 6 concise bullets.
+*   **Rewrite:** 
+    *   Low-cost pose-reactive aiming on commodity hardware.
+    *   4-camera 3D targeting pipeline (95.17 mm corrected ball mean).
+    *   High-speed YOLO-Pose loop (6.2 ms/frame batched TRT FP16).
+    *   Six-stage safety architecture (E-STOP <100 ms).
+    *   Multi-modal voice command interface via UDP.
+    *   Reproducible GT datasets (36-pt ball grid, 81-trial joint protocol).
+
+**Slide 6 & 7 - Proposed System & Pipeline**
+*   **Scores (1-10):** 
+    *   **LS:** C1:9, C2:9, C3:8, C5:8, C6:9 (Excellent technical detail on timing). 
+    *   **CS:** C1:9, C2:9, C3:9, C5:8, C6:9 (Strong justification of approach). 
+    *   **EE:** C1:8, C2:8, C3:8, C5:8, C6:9 (Clearly demonstrates viability).
+*   **Flags:** None. Excellent demonstration of technical competency and system methodology.
+*   **Rewrite:** 
+    *   4x USB Cameras (Capture: 4ms)
+    *   YOLO-Pose inference (Batched: 6.2ms)
+    *   SVD-DLT Triangulation + Kalman filtering (1.0ms + 0.7ms)
+    *   Ballistic Solver + Safety Gating (1.5ms)
+    *   ESP32 Actuation (Serial transmission: ~2ms)
+    *   **Total Runtime:** ~15ms (Well within 67ms budget for 15 FPS).
+
+**Slide 8 & 9 - Hardware & Software**
+*   **Scores (1-10):** 
+    *   **LS:** C1:8, C2:8, C3:8, C5:N/A, C6:9 (Cost constraints and software tools well justified). 
+    *   **CS:** C1:8, C2:8, C3:8, C5:N/A, C6:9 (Practical implications highlighted). 
+    *   **EE:** C1:9, C2:8, C3:8, C5:N/A, C6:9 (Shows deep understanding of edge deployment).
+*   **Flags:** None.
+*   **Rewrite:** 
+    *   Hardware: 4x Hikvision USB ($120), ESP32 MCU ($8), NEMA-23 Steppers ($90).
+    *   Mechanical: Worm-gear reducers (self-locking for safety).
+    *   Software: YOLO-Pose + TensorRT FP16 for real-time edge inference.
+    *   Control: Python supervisor to ESP32 firmware (921,600 baud serial).
+
+**Slide 10 - Methodology & Calibration**
+*   **Scores (1-10):** 
+    *   **LS:** C1:8, C2:9, C3:8, C5:N/A, C6:9 (Sound test procedures). 
+    *   **CS:** C1:9, C2:9, C3:9, C5:N/A, C6:9 (Methodology aligns with thesis). 
+    *   **EE:** C1:8, C2:8, C3:8, C5:N/A, C6:8 (Good coverage of metrics).
+*   **Flags:** None.
+*   **Rewrite:** 
+    *   Intrinsic: ChArUco board calibration.
+    *   Extrinsic: 24 AprilTags for robust PnP world-frame registration.
+    *   GT Datasets: 36-point ball grid and 81-trial joint-touch protocol.
+    *   Safety Validation: S0-S4 checklists completed with JSONL logging.
+
+**Slide 11 - Key Results**
+*   **Scores (1-10):** 
+    *   **LS:** C1:9, C2:9, C3:9, C5:N/A, C6:10 (Accurate, objective reporting of results). 
+    *   **CS:** C1:9, C2:9, C3:9, C5:N/A, C6:9 (Interpretation is sound). 
+    *   **EE:** C1:9, C2:9, C3:9, C5:N/A, C6:9 (Exact data from thesis used flawlessly).
+*   **Flags:** None.
+*   **Rewrite:** 
+    *   **Ball Accuracy:** 95.17 mm corrected mean error.
+    *   **Joint Accuracy:** 143.38 mm mean error (62 valid trials).
+    *   **Per-Joint Breakdown:** right_knee (110.0 mm), right_hip (150.4 mm), left_shoulder (164.4 mm).
+    *   **Safety:** E-STOP latch response <100 ms.
+    *   **Performance:** 15 FPS live pipeline maintained.
+
+**Slide 13 - Limitations & Challenges**
+*   **Scores (1-10):** 
+    *   **LS:** C1:10, C2:9, C3:9, C5:N/A, C6:9 (Crucial adherence to thesis boundary). 
+    *   **CS:** C1:9, C2:9, C3:9, C5:N/A, C6:9. 
+    *   **EE:** C1:9, C2:9, C3:9, C5:N/A, C6:9.
+*   **Flags:** None. The explicit separation of validated vs. unvalidated regimes is critical for passing.
+*   **Rewrite:** 
+    *   Validation covers static aim-only and controlled single-shot live tracking.
+    *   Z-axis bias (-103mm raw) impacts uncorrected triangulation due to camera elevation.
+    *   Joint error increases with height (knee: 110mm vs shoulder: 164mm) due to visibility angles.
+    *   **Unvalidated:** Moving-target closed-loop firing.
+
+**Slide 14 & 15 - Conclusions, Future Work, Ethics**
+*   **Scores (1-10):** 
+    *   **LS:** C1:9, C2:9, C3:9, C5:N/A, C6:9 (Strong ethical compliance). 
+    *   **CS:** C1:9, C2:9, C3:9, C5:N/A, C6:9 (Applicability to real life noted). 
+    *   **EE:** C1:9, C2:9, C3:8, C5:N/A, C6:9 (Good awareness of standards).
+*   **Flags:** None.
+*   **Rewrite:** 
+    *   Demonstrated low-cost (~$200) pose-guided aiming system.
+    *   Passed S0-S4 safety integration (aligned with ISO 12100, ISO 13849).
+    *   Future Work 1: Closed-loop moving target firing.
+    *   Future Work 2: Empirical RPM-to-velocity calibration.
+    *   Ethics: System poses dual-use risks; hardware E-STOP and voice-gating mitigate automated-firing hazards.
+
+---
+
+### **COMMITTEE Q&A SIMULATION (CRITERION 4)**
+
+To calculate your final grade and provide your model answers and final committee sheet, **please reply with your answers to the following 12 questions**. I will then grade your responses (Pass/Weak/Fail), provide the model answers using your thesis data, and generate the final grading matrix.
+
+**Methodology**
+1. Why did you choose a four-camera setup instead of a single depth camera like the Intel RealSense?
+2. Explain your extrinsic calibration process. Why use AprilTags on the walls rather than a standard bundle adjustment approach?
+3. Your pipeline uses DLT/SVD for triangulation followed by a reprojection-error rejection loop. Why is this robust rejection necessary for the ball but handled differently for joints?
+
+**Results**
+4. The raw static ball data showed a significant Z-axis bias of -103 mm. What caused this specific geometric bias?
+5. Your joint-touch trials show a clear error hierarchy: 110 mm for the right knee, up to 164 mm for the left shoulder. Explain this discrepancy.
+6. You applied a linear axis correction model that reduced the mean ball error from 150.77 mm to 95.17 mm. Why might this corrected figure underestimate the true generalization error?
+
+**Safety & Ethics**
+7. Walk me through the hardware E-STOP design. How does it align with ISO 13849-1 requirements?
+8. Your thesis outlines a six-stage integration protocol. Why did you stop at Stage S4 for the live test, and what exactly does S5/S6 require?
+9. On page 64 of your thesis, you address the "dual-use consideration." Defend why it is ethical to develop an autonomous targeting system.
+
+**Novelty**
+10. How does your system functionally differ from a commercial Lobster Elite machine?
+11. How does your system differ from a Category B laboratory MoCap system like Vicon or OptiTrack?
+
+**Future Work**
+12. You clearly state that moving-target closed-loop firing is unvalidated. What specific technical step (hint: related to the flywheel RPM) must be completed before the Kalman filter’s predict-ahead output can be safely used for moving targets?

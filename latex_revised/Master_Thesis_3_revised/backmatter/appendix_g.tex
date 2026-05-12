@@ -1,0 +1,92 @@
+\cleardoublepage
+\markboth{G. BLM FIRMWARE AND VOICE GRAMMAR REFERENCE}{}
+\chapter{BLM Firmware and Voice Grammar Reference}
+
+This appendix collects the two reference tables that complete the description of the runtime: the full BLM firmware command map and the voice-grammar phrase set.
+
+\section*{G.1 BLM Firmware Command Map}
+
+The complete \texttt{control\_12\_full.ino} command set, including the manual jog and live-tuning commands not shown in the main-body Table~3.2, is reproduced in Table~\ref{tab:app_g_commands}. All commands are newline-terminated ASCII over a 921~600~baud USB-serial link. The parser performs an exact-token match on the lower-cased input; argument parsing is whitespace-delimited.
+
+{\footnotesize
+\begin{longtable}{|l|l|p{6cm}|p{2cm}|}
+\caption{Full BLM firmware command set (\texttt{control\_12\_full.ino}).} \label{tab:app_g_commands} \\
+\hline
+\textbf{Command} & \textbf{Syntax} & \textbf{Effect} & \textbf{Category} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Command} & \textbf{Syntax} & \textbf{Effect} & \textbf{Category} \\
+\hline
+\endhead
+\hline
+\endfoot
+set     & \texttt{set V H WL WR}  & Set pitch V, yaw H (degrees, both clamped to $\pm30^\circ$), left wheel WL and right wheel WR (RPM) & Aim/fire \\ \hline
+shoot   & \texttt{shoot}          & Fire one shot; firmware-gated by RPM check ($\geq 400$~RPM on both wheels) & Aim/fire \\ \hline
+reload  & \texttt{reload}         & Retract pusher to back limit, dispense one ball, wait for ball-limit switch (or 10~s timeout), return to IDLE & Aim/fire \\ \hline
+center  & \texttt{center}         & Return all axes to zero & Aim/fire \\ \hline
+stop    & \texttt{stop}           & Immediate stop of all motors & Aim/fire \\ \hline
+setzero & \texttt{setzero}        & Register the current position as logical zero & Aim/fire \\ \hline
+info    & \texttt{info}           & Print angles, RPMs, feeder state, all three limit-switch states, and live-tuning values & Diagnostic \\ \hline
+jv      & \texttt{jv}\textit{n}   & Step pitch axis by \textit{n} steps (signed) & Manual jog \\ \hline
+jh      & \texttt{jh}\textit{n}   & Step yaw axis by \textit{n} steps (signed) & Manual jog \\ \hline
+jf      & \texttt{jf}\textit{n}   & Step pusher by \textit{n} steps (signed) & Manual jog \\ \hline
+js      & \texttt{js}\textit{n}   & Set servo angle to \textit{n} (0--180) & Manual jog \\ \hline
+jsset       & \texttt{jsset}\textit{v}      & Set servo angle for the dispense flap (live tunable, no reflash) & Live tuning \\ \hline
+jfspeedset  & \texttt{jfspeedset}\textit{v} & Set pusher stepper speed (live tunable) & Live tuning \\ \hline
+jfaccelset  & \texttt{jfaccelset}\textit{v} & Set pusher stepper acceleration (live tunable) & Live tuning \\ \hline
+\end{longtable}
+}
+
+\section*{G.2 Voice-Bridge Grammar}
+
+The Vosk-based speech-recognition front-end uses a closed grammar to map utterances to runtime tokens. The 16 phrases recognised by the system are shown in Table~\ref{tab:app_g_grammar}. Each phrase produces a single token over UDP port~5006 to the live runtime; the runtime then dispatches the token through the same target-selection or command path used for keyboard input. The voice front-end does not bypass any safety gate.
+
+\begin{table}[htbp]
+\centering
+\caption{Voice-bridge grammar: utterances and runtime tokens.}
+\label{tab:app_g_grammar}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Utterance} & \textbf{Token} & \textbf{Action in the runtime} \\
+\hline
+\multicolumn{3}{|l|}{\textbf{COCO joint reselection}} \\
+\hline
+``nose''            & \texttt{nose}            & Set target joint to \texttt{nose} \\
+\hline
+``left shoulder''   & \texttt{left\_shoulder}  & Set target joint to \texttt{left\_shoulder} \\
+\hline
+``right shoulder''  & \texttt{right\_shoulder} & Set target joint to \texttt{right\_shoulder} \\
+\hline
+``left hip''        & \texttt{left\_hip}       & Set target joint to \texttt{left\_hip} \\
+\hline
+``right hip''       & \texttt{right\_hip}      & Set target joint to \texttt{right\_hip} \\
+\hline
+``left knee''       & \texttt{left\_knee}      & Set target joint to \texttt{left\_knee} \\
+\hline
+``right knee''      & \texttt{right\_knee}     & Set target joint to \texttt{right\_knee} \\
+\hline
+``left wrist''      & \texttt{left\_wrist}     & Set target joint to \texttt{left\_wrist} \\
+\hline
+``right wrist''     & \texttt{right\_wrist}    & Set target joint to \texttt{right\_wrist} \\
+\hline
+``left ankle''      & \texttt{left\_ankle}     & Set target joint to \texttt{left\_ankle} \\
+\hline
+``right ankle''     & \texttt{right\_ankle}    & Set target joint to \texttt{right\_ankle} \\
+\hline
+\multicolumn{3}{|l|}{\textbf{Control verbs}} \\
+\hline
+``shoot'' / ``go''  & \texttt{shoot}           & Fire one shot (subject to all safety gates) \\
+\hline
+``reload''          & \texttt{reload}          & Reload feeder \\
+\hline
+``pause''           & \texttt{pause}           & Suspend the targeting loop \\
+\hline
+``resume''          & \texttt{resume}          & Resume the targeting loop \\
+\hline
+``quit''            & \texttt{quit}            & Stop the runtime cleanly \\
+\hline
+\end{tabular}
+\end{table}
+
+The grammar is intentionally small: a closed vocabulary improves recognition accuracy with the offline Vosk acoustic model and avoids out-of-vocabulary tokens being mapped to unintended actions. Phrases are recognised when they appear at the start of an utterance; trailing speech is ignored.

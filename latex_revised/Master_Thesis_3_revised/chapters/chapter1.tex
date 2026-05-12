@@ -1,0 +1,75 @@
+\chapter{Chapter 1: Introduction}
+
+\section{Motivation and Problem Statement}
+
+Sports training demands repetition, precision, and adaptability. An athlete practising ball reception, whether in football, basketball, volleyball, or rehabilitation, benefits most from a delivery system that challenges them at the right position, at the right time, and directed at the right part of their body. For decades, automated ball-launching machines have provided the repetition. They have not provided the precision, and they have not provided the adaptability.
+
+Every commercial ball launcher on the market today operates in what this thesis terms an \textbf{open-loop} mode. The coach or athlete programmes a fixed trajectory: a specific launch angle, a specific wheel speed producing a specific ball velocity, and a fixed interval between shots. The machine then executes that programme indefinitely. It carries no sensors, has no awareness of where the athlete is, and cannot distinguish a stationary from a moving subject. Whether the intended target is the athlete's right knee at a height of 380~mm or their left shoulder at 1600~mm, the launcher fires the same trajectory it was programmed to fire, and the athlete must place themselves in the path of the projectile.
+
+This thesis addresses that limitation. High-performance athletic training requires a delivery system that responds to where the athlete is, rather than executing a fixed area-of-effect programme. To the best of the author's knowledge, no available off-the-shelf system delivers this combination of perception, decision, and actuation at a price point and operational complexity that match domestic and small-club training contexts.
+
+The accessibility gap can be characterised by contrasting two ends of the existing market. Commercial open-loop launchers such as the Lobster Elite Liberty, Spinshot Player, and iPong Pro are widely available and relatively inexpensive (USD 200 to USD 2{,}000), but they are tools rather than systems: they have no sensors and no decision logic. At the other end, professional laboratory motion-capture installations such as OptiTrack \cite{ref30}, Vicon \cite{ref8}, and PhaseSpace \cite{ref31} can reconstruct the full three-dimensional position of every joint on a human body to sub-millimetre accuracy in real time. However, those systems cost USD 50{,}000 to over USD 200{,}000, require dedicated calibrated studio environments, demand that subjects wear reflective markers, and crucially have no integrated actuation: they observe, but they do not act. The cost and operational complexity place them outside the reach of community sports clubs, physiotherapy practices, school athletic programmes, and individual training environments where adaptive delivery would be most valuable.
+
+The Ball Launching Machine (BLM) described in this thesis is neither of these. It is not a conventional launcher that a human programmes and forgets. It is a perception-guided actuator: a system that continuously observes the athlete through four calibrated commodity cameras, reconstructs the three-dimensional position of specific body joints in real time, computes the required pitch angle, yaw angle, and ball speed to reach the selected joint, and autonomously commands the physical launcher to aim and (after a structured set of safety checks) fire. The operator does not set the angle. No human pre-programmes the path. The launcher decides its own aim based on where the person is and which body part has been selected as the target.
+
+The right knee, right hip, and left shoulder were chosen as the body parts to evaluate because they span a range of heights and represent three distinct training tasks: low-ball reception, mid-body interception, and overhead or upper-body challenges. The 3D coordinates of these joints are produced every frame by the COCO 17-keypoint pose estimation back-end and are smoothed and predicted by a constant-velocity Kalman filter before being sent to the ballistic solver. As the athlete moves, the target coordinate is updated and the solver recomputes the aim parameters.
+
+The central thesis of this work is therefore the transition from a fixed, human-programmed firing path to an autonomous, pose-reactive targeting system that can be assembled from commodity hardware and validated under a structured safety protocol in a real, uncontrolled environment.
+
+\section{Research Objectives}
+
+This work is guided by four research questions:
+
+\textbf{RQ1: Static ball localisation accuracy.} Can a four-camera multi-view triangulation pipeline using commodity USB cameras attain a mean 3D localisation error below 120~mm for a stationary ball in a typical domestic garage arena?
+
+\textbf{RQ2: Pose joint localisation accuracy.} Can the multi-view pose-estimation pipeline attain a mean 3D joint-localisation error below 180~mm for the right knee, right hip, and left shoulder, sufficient to direct a launcher at those joints?
+
+\textbf{RQ3: Safety-gated integration.} Can the integrated perception-to-actuation pipeline be brought up safely on real hardware in a domestic setting, using a structured incremental six-stage validation protocol, including a controlled live test in which the system aims at and fires upon named human joints under operator supervision?
+
+\textbf{RQ4: Multi-modal control wiring.} Can a hands-free training-mode interface be constructed that couples the visual targeting loop to an offline speech-recognition front-end, supports operator-issued joint reselection at run-time, and integrates with the same safety-gated runtime used for keyboard control?
+
+Chapter~4 specifies the validation protocols that produce numerical answers to these questions, and Chapter~5 presents the corresponding results. RQ4 is assessed at the level of integration wiring and dry-run behaviour; closed-loop firing on a moving human subject under voice control is identified as future work in Section~6.4.
+
+\section{Scope and Constraints}
+
+The work is bounded as follows.
+
+\textbf{Physical environment.} A domestic garage arena measuring 6230~mm (X) $\times$ 3050~mm (Y) $\times$ 2950~mm (Z), with four cameras mounted at fixed positions near the ceiling perimeter.
+
+\textbf{Hardware.} Four Hikvision DS-E12 USB webcams; one custom Ball Launching Machine consisting of a NEMA-23 driven 2-DOF gimbal, a counter-rotating flywheel pair, and a DRV8825-driven pusher feeder; one ESP32 microcontroller running the \texttt{control\_12\_full.ino} firmware over a 921~600~baud USB-serial link. Total perception hardware cost is approximately USD~200; the BLM mechanical and electronic platform is shared with the laboratory's wider robotics work.
+
+\textbf{Software.} Python 3.10 with OpenCV \cite{ref27}, Ultralytics YOLO \cite{ref14}, MMPose \cite{ref17}, NumPy \cite{ref28}, and SciPy \cite{ref29} for the perception pipeline; NVIDIA TensorRT \cite{ref38_tensorrt} for accelerated inference; the Vosk offline speech-recognition toolkit \cite{ref41_vosk} for the multi-modal control front-end. All components are open-source.
+
+\textbf{Subject.} Single-person evaluation. Multi-person scenarios are not in scope.
+
+\textbf{Stage of integration.} The perception-to-actuation pipeline has been validated in aim-only mode (motors active, no projectile loaded) and in controlled static and live-aim single-shot trials, including an integrated live test on 2026-04-09 in which the system aimed at and fired upon three named joints under operator supervision. Fully autonomous closed-loop firing at a moving human subject (where the athlete is in motion during the shot, rather than holding a designated pose) is the immediate next experimental milestone and is identified as future work in Section~6.4. The thesis is presented as a strong but partial validation of the pose-guided ballistics concept; conclusions in Chapter~6 are stated accordingly.
+
+\textbf{Lighting.} Controlled indoor lighting. Outdoor and natural-lighting performance has not been evaluated.
+
+\section{Statement of Novelty and Contributions}
+
+The following four claims represent the original contributions of this work.
+
+\textbf{Novelty Claim 1: An autonomous, pose-reactive aiming machine.}
+Commercially available ball launchers are passive instruments: a human sets the direction and the machine repeats. The BLM presented here changes that relationship. The launcher autonomously computes pitch, yaw, and wheel-speed set-points from real-time 3D joint coordinates derived from multi-view human pose estimation, then issues commands to the actuators through a safety-gated runtime. The operator selects which joint to target but does not specify the trajectory. The aim is decided by the system from the live observation of the athlete. Within the validation regimes reached in this thesis (static aim-only and controlled single-shot fire at named joints), this constitutes, to the best of the author's knowledge, a qualitative departure from the surveyed commercial ball machines. The closed-loop regime in which the human subject is moving while the projectile is in flight remains as future work.
+
+\textbf{Novelty Claim 2: A low-cost multi-camera pose-to-launch pipeline.}
+Prior research on closed-loop sports targeting has typically employed depth cameras (such as Intel RealSense \cite{ref32} or structured-light systems) or has been conducted in controlled laboratory environments with professional motion-capture infrastructure. This work demonstrates that four commodity USB cameras at approximately USD~30 each, an open-source detection and pose-estimation stack (Ultralytics YOLO and YOLO-Pose / MMPose), and an AprilTag-based extrinsic calibration workflow can attain sub-200~mm 3D joint-targeting accuracy in a real, uncontrolled domestic arena. The total perception hardware cost is approximately USD~200, one to three orders of magnitude lower than analogous laboratory systems. This finding shows that the core capability of pose-reactive ball delivery is realisable outside the laboratory and is accessible to practitioners without specialised infrastructure.
+
+\textbf{Novelty Claim 3: A structured, evidence-based safety-gated integration protocol.}
+To the best of the author's knowledge, no previously published work on vision-guided ball launchers includes a reproducible and evidence-based methodology for staged validation. This thesis contributes a six-stage incremental integration checklist (preflight, ESP32-only, runtime-without-cameras, live aim-only, safety verification, controlled fire) with per-stage pass criteria and mandatory decision logging. Stages~S0--S4 were completed on real hardware on 2026-04-09, including a controlled integrated live test that aimed at and fired upon three named joints under operator supervision. The hardware E-STOP latch responds in under 100~milliseconds, and every actuation decision is recorded to a structured JSONL file (timestamp, target joint, raw 3D world coordinate, computed pitch/yaw, wheel RPM, decision outcome \path{OK}\,/\,\path{OUT_OF_RANGE}\,/\,\path{LOW_CONFIDENCE}\,/\,\path{ESTOP}). The protocol is intended to be reproducible for any vision-guided actuated system being deployed in an uncontrolled environment.
+
+\textbf{Novelty Claim 4: A multi-modal hands-free training-mode interface.}
+The runtime exposes a UDP inter-process channel that couples the visual targeting loop to an offline speech-recognition front-end (Vosk). A 16-phrase grammar maps natural utterances to COCO joint names and to control verbs (\texttt{shoot}, \texttt{reload}, \texttt{pause}, \texttt{resume}, \texttt{quit}). An auto-reload mode keeps the wheels spinning, the joint target persistent, and the next \texttt{go} firing the same joint, producing a rapid-fire training cadence without the operator touching the keyboard. This wiring is fully integrated with the same safety-gated runtime used for keyboard control, including the RPM and zone gates. The interface has been validated in dry-run and live aim-only mode; closed-loop voice-controlled firing on a moving subject is future work.
+
+\section{Thesis Structure}
+
+Chapter~2 reviews the relevant literature in seven areas: multi-view 3D reconstruction, camera calibration, real-time object and pose estimation under edge-deployment constraints, Kalman filtering in sports and human-motion tracking, ballistic modelling and stepper-driven actuation, voice-command interfaces in human--robot interaction, and safety architecture for autonomous actuated systems. It concludes with a critical comparison against the closest existing systems and an explicit justification of the major design choices made in this thesis.
+
+Chapter~3 presents the full system design and methodology, covering the arena set-up, the mechanical and electronic hardware (gimbal, flywheel pair, pusher, ESP32, power architecture), the firmware finite-state machine, the supervisor--microcontroller communication stack, the multi-camera calibration and synchronisation, the 3D triangulation and Kalman prediction pipelines, the ball-detection robustness layer, the multi-modal voice-command integration, the ballistic solver, and the safety architecture.
+
+Chapter~4 specifies the ground-truth and acceptance protocols: the 36-point static ball dataset, the 81-trial joint-touch dataset, the dynamic validation clips, the YOLO-Pose versus MMPose ablation, the Kalman-prediction tuning grid, the ball-detection analyser sweep, and the BLM six-stage integration protocol.
+
+Chapter~5 presents the quantitative results for each protocol, including per-joint error, axis bias, the corrected pipeline, the YOLO-Pose backend ablation, the Kalman-prediction improvement, the ball-detection robustness gains, and the integrated live-test outcomes.
+
+Chapter~6 states the conclusions, assesses each research-question objective, identifies the limitations, and lays out a concrete roadmap for future work, including the closed-loop moving-target firing milestone, the empirical RPM-to-velocity ballistic calibration, and the Virtual 3D Goal concept.

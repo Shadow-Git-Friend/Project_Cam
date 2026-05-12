@@ -1,0 +1,66 @@
+\chapter{Introduction}
+
+\section{Motivation and Problem Statement}
+
+Sports training depends on repetition, precision, and adaptation. An athlete practising reception, reaction, or rehabilitation exercises benefits most when a delivery system can challenge the correct body region at the correct time. Conventional ball-launching machines provide repetition, but they generally do not perceive the athlete and therefore cannot adapt their delivery to the athlete's current pose.
+
+Most commercial ball launchers operate in an open-loop mode. A coach or athlete sets a fixed launch angle, wheel speed, spin setting, and timing pattern. The machine then repeats this program regardless of whether the athlete is standing, crouching, moving laterally, or temporarily outside the intended target region. This architecture is useful for repetitive drills, but it cannot target a named body joint such as the right knee, right hip, or left shoulder in response to the athlete's current position.
+
+The gap is not simply a lack of accurate sensing. At one end of the spectrum are commercial open-loop launchers such as tennis, table-tennis, and football training machines. They are relatively accessible, but they do not close the perception-to-actuation loop. At the other end are professional motion-capture systems such as OptiTrack \cite{ref30}, Vicon \cite{ref8}, and PhaseSpace \cite{ref31}. These systems can reconstruct human motion with high precision, but they require expensive infrastructure, calibrated studio environments, and, in many cases, reflective markers. They observe motion but are not integrated with a low-cost projectile-delivery machine for ordinary training environments.
+
+This thesis investigates a middle path: a low-cost, markerless, multi-camera system that estimates selected body joints in three-dimensional space and computes the aim parameters required by a physical Ball Launching Machine (BLM). The system uses four calibrated cameras, open-source detection and pose-estimation software, multi-view triangulation, a ballistic solver, and a staged safety architecture. The intended long-term capability is pose-reactive ball delivery. The present thesis validates the perception and targeting pipeline and documents partial integration, but it does not claim that full autonomous closed-loop firing at a moving human target has been completed.
+
+The selected joints--right knee, right hip, and left shoulder--cover low, mid-body, and upper-body target regions. They also expose different technical difficulties: the knee is often visible from several cameras, the hip is partly occluded by the torso, and the shoulder is near the upper portion of the camera volume and is frequently affected by self-occlusion. These three joints therefore provide a useful set of body-part targets for evaluating whether a low-cost multi-camera system can support pose-guided aiming.
+
+\section{Research Objectives}
+
+This work is guided by three research questions:
+
+\textbf{RQ1:} Can a four-camera multi-view triangulation pipeline achieve a mean 3D localisation error below 120 mm for a stationary ball in a domestic garage arena?
+
+\textbf{RQ2:} Can a human pose-estimation and triangulation pipeline achieve a mean 3D joint localisation error below 180 mm for the right knee, right hip, and left shoulder under a controlled joint-touch protocol?
+
+\textbf{RQ3:} Can the perception-to-actuation pipeline be integrated with a real Ball Launching Machine using a reproducible staged safety methodology, while clearly separating verified static and aim-only tests from future moving-target closed-loop firing?
+
+Chapter 4 defines the evaluation protocols used to answer these questions, and Chapter 5 reports the corresponding quantitative results. The answer to each question is intentionally framed with its limitations: the current evaluation is a partial validation of the system, not a complete demonstration of autonomous moving-target training.
+
+\section{Scope and Constraints}
+
+The scope of the thesis is defined as follows.
+
+\textbf{Physical environment:} The experimental arena is a domestic garage measuring 6230 mm (X) $\times$ 3050 mm (Y) $\times$ 2950 mm (Z). Four cameras are mounted near the perimeter at elevated positions. All reported coordinates use the arena world frame in millimetres.
+
+\textbf{Hardware:} The perception system uses four Hikvision DS-E12 USB cameras. The actuation platform is a custom Ball Launching Machine with stepper-driven pan/tilt axes, wheel-motor ball projection, and ESP32-based low-level control. The perception hardware cost is approximately USD 200.
+
+\textbf{Software:} The implementation uses Python 3.10 with OpenCV \cite{ref27}, Ultralytics YOLO \cite{ref14}, an open-source human pose-estimation backend based on the COCO 17-keypoint convention \cite{ref16, ref17}, NumPy \cite{ref28}, and SciPy \cite{ref29}. The repository also contains performance-oriented runtime paths and calibration manifests; the thesis reports only results supported by the documented ground-truth evaluations.
+
+\textbf{Subject configuration:} The evaluation is limited to a single-person setting. Multi-person tracking and target identity assignment are outside the scope of the present thesis.
+
+\textbf{Stage of integration:} The system has been evaluated through static ball localisation, static joint-touch localisation, live tracking clips, aim-only launcher tests, and controlled static firing/logging stages. A full closed-loop validation in which the launcher autonomously fires at a moving human target has not been completed and is treated as future work.
+
+\textbf{Lighting and deployment conditions:} Experiments were conducted indoors under controlled lighting. Outdoor conditions, strong natural-light variation, and broader deployment environments are not evaluated.
+
+\section{Statement of Novelty and Contributions}
+
+The thesis makes three contributions. Each contribution is stated in a conservative form consistent with the current evidence.
+
+\textbf{Contribution 1: Pose-Reactive Aiming Architecture.}
+The work integrates multi-camera 3D pose estimation with a ballistic targeting module for a physical BLM. Unlike an open-loop launcher, the system computes aim parameters from a live or recorded 3D target joint rather than from a fixed pre-programmed drill. The demonstrated contribution is the architecture and partial integration of this pose-to-aim loop; full autonomous moving-target firing remains future work.
+
+\textbf{Contribution 2: Low-Cost Multi-Camera Perception Pipeline.}
+The thesis demonstrates a low-cost four-camera perception pipeline using commodity USB cameras, ChArUco intrinsic calibration, AprilTag extrinsic calibration, YOLO-based ball detection, human pose estimation, and DLT/SVD triangulation. Under the current repository calibration bundle, the system achieves high repeatability in static holds and a global valid-trial joint mean error just below 180 mm. The results are promising but show systematic calibration bias, particularly in the vertical direction; therefore, they should be interpreted as partial validation of the perception backbone rather than final proof of ball-delivery accuracy.
+
+\textbf{Contribution 3: Safety-Gated Integration Methodology.}
+The thesis formalises a staged BLM integration protocol covering calibration checks, serial communication, aim-only tests, safety gating, controlled firing, and future full-cycle reliability tests. The protocol requires explicit pass criteria and structured JSONL decision logs containing fields such as timestamp, target joint, 3D world coordinate, computed pitch and yaw, and decision state. This provides a reproducible engineering procedure for progressing from perception experiments to physically actuated tests in a domestic environment.
+
+\section{Thesis Structure}
+
+Chapter 2 reviews multi-camera reconstruction, calibration, detection, human pose estimation, ballistic modelling, and safety, with emphasis on how this thesis differs from the closest commercial, motion-capture, and research systems.
+
+Chapter 3 describes the system design and methodology, including the arena frame, hardware architecture, calibration workflow, triangulation, ballistic solver, and safety architecture.
+
+Chapter 4 defines the ground-truth evaluation protocols for static ball localisation, joint-touch localisation, dynamic validation clips, and error metrics.
+
+Chapter 5 reports the quantitative results and interprets them as partial validation. It explicitly distinguishes static perception accuracy from uncompleted full closed-loop moving-target validation.
+
+Chapter 6 summarises the contributions, evaluates each research objective, identifies limitations, and outlines the future work required for full autonomous moving-target firing.

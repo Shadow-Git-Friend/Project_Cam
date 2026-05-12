@@ -1,0 +1,65 @@
+\cleardoublepage
+\markboth{A. BLM INTEGRATION TEST CHECKLIST}{}
+\chapter{BLM Integration Test Checklist}
+
+The following table is the six-stage integration checklist used to govern safe deployment of the Ball Launching Machine. Each row defines a test ID, stage, test description, and pass criteria. The checklist is a staged validation protocol; completion of later firing and full-cycle stages is future work unless separate evidence is recorded for a specific test session.
+
+{\small
+\begin{longtable}{|l|l|p{4.5cm}|p{5.5cm}|}
+\caption{BLM six-stage integration test checklist} \label{tab:app_a_checklist} \\
+\hline
+\textbf{ID} & \textbf{Stage} & \textbf{Test} & \textbf{Pass Criteria} \\
+\hline
+\endfirsthead
+\hline
+\textbf{ID} & \textbf{Stage} & \textbf{Test} & \textbf{Pass Criteria} \\
+\hline
+\endhead
+\hline
+\endfoot
+S0.1 & Preflight & Camera and calibration load & Live viewer starts, 4 cams visible, no crash for 2~min \\
+\hline
+S0.2 & Preflight & Serial link to ESP32 & Runtime opens serial and accepts commands \\
+\hline
+S0.3 & Preflight & Launcher pose sanity check & launcher\_x/y/z/yaw validated with static target \\
+\hline
+S1.1 & ESP32 only & Manual low-level command test & set, center, stop, shoot, reload all execute correctly \\
+\hline
+S1.2 & ESP32 only & Angle clamp test & Commands beyond $\pm 30$ deg safely clamped \\
+\hline
+S1.3 & ESP32 only & RPM telemetry test & L: \ldots\ R: \ldots\ received while wheels run \\
+\hline
+S2.1 & Runtime & Synthetic UDP target feed & Runtime computes command and sends set without error \\
+\hline
+S2.2 & Runtime & Zone rejection test & Out-of-zone targets logged as OUT\_OF\_RANGE \\
+\hline
+S2.3 & Runtime & Stability gating test & Noisy targets logged as LOW\_CONFIDENCE \\
+\hline
+S3.1 & Aim-only & Target acquire per joint & Each joint gets stable lock within timeout \\
+\hline
+S3.2 & Aim-only & Sequence behaviour & right\_knee $\to$ right\_hip $\to$ left\_shoulder $\to$ repeat \\
+\hline
+S3.3 & Aim-only & Return to zero & After each aim, launcher returns to centre \\
+\hline
+S4.1 & Safety & E-STOP response time & estop causes immediate stop, response $<$ 100~ms \\
+\hline
+S4.2 & Safety & E-STOP latch behaviour & System stays blocked until clear issued \\
+\hline
+S4.3 & Safety & Link-loss behaviour & On UDP/serial interruption, runtime goes to safe stop \\
+\hline
+S5.1 & Fire & Single shot on one joint & 1 commanded shot after aim and RPM gate \\
+\hline
+S5.2 & Fire & No unintended extra shots & Exactly one shoot per trigger event \\
+\hline
+S5.3 & Fire & Post-shot safe state & Returns to centre and waits for next valid target \\
+\hline
+S6.1 & Full cycle & 10-cycle reliability & 10 full target cycles without crash or unsafe behaviour \\
+\hline
+S6.2 & Full cycle & Decision log completeness & Every cycle has JSONL records with required fields \\
+\hline
+S6.3 & Full cycle & Report-ready outputs & Logs and summary plots generated \\
+\hline
+\end{longtable}
+}
+
+Required JSONL decision log fields per event are: \texttt{timestamp}, \texttt{input\_joint\_name}, \texttt{raw\_world\_xyz\_mm}, \texttt{transformed\_launcher\_xyz}, \texttt{calculated\_pitch\_yaw\_v}, \texttt{decision} (OK\,/\,OUT\_OF\_RANGE\,/\,LOW\_CONFIDENCE\,/\,ESTOP), and \texttt{execution\_time\_ms}.

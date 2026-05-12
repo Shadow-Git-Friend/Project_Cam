@@ -1,0 +1,149 @@
+\chapter{Chapter 2: Literature Review and Background Theory}
+
+\section{Multi-Camera 3D Reconstruction}
+
+Recovering the three-dimensional position of an object from two-dimensional image observations is a classical problem in computer vision. The theoretical foundation is the pinhole camera model, which expresses the projection of a 3D point $\mathbf{P} = (X, Y, Z)$ to an image point $\mathbf{p} = (u, v)$ as:
+
+\begin{equation}
+s \cdot [u, v, 1]^T = K \cdot [R \mid T] \cdot [X, Y, Z, 1]^T \label{eq:2_1}
+\end{equation}
+
+where $K$ is the $3 \times 3$ intrinsic matrix encoding focal length and principal point, $R$ is the $3 \times 3$ rotation matrix, $T$ is the $3 \times 1$ translation vector representing the camera's pose in the world frame, and $s$ is the projection depth scalar \cite{ref1}.
+
+When the same point is observed in two or more calibrated cameras simultaneously, its 3D position can be recovered by triangulation. The geometric principle is epipolar: the projection rays from each camera, drawn through the corresponding 2D observation, must intersect at the true 3D point in the noise-free case \cite{ref2}. In practice, image noise and residual calibration error mean that the rays do not exactly intersect. The Direct Linear Transform (DLT) formulation expresses triangulation as a homogeneous linear system whose least-squares solution is obtained by Singular Value Decomposition (SVD) \cite{ref1}.
+
+Triangulation accuracy depends on two principal factors: the quality of camera calibration and the number of cameras with valid simultaneous observations. With a single observing camera the problem is under-constrained; with exactly two cameras the depth estimate is sensitive to baseline length and to any calibration error \cite{ref4}. With three or more cameras the system becomes over-determined and the least-squares solution is more robust to per-camera noise. This redundancy motivates the minimum-camera-count thresholds used in the present work (Section~3.6).
+
+Multi-camera 3D reconstruction has been applied extensively in sports science, including ball tracking in tennis \cite{ref5}, football \cite{ref6}, and cricket \cite{ref7}, and full-body motion capture in biomechanics research \cite{ref8}. These applications typically use carefully calibrated synchronised cameras in purpose-built environments. The contribution of the present work is to demonstrate equivalent reconstruction capability with commodity hardware in a domestic, uncontrolled arena.
+
+\section{Camera Calibration Techniques}
+
+\subsection{Intrinsic Calibration}
+
+Intrinsic calibration recovers the imaging-model parameters: focal lengths $(f_x, f_y)$, principal point $(c_x, c_y)$, and lens-distortion coefficients. The widely adopted approach due to Zhang \cite{ref9} uses a planar calibration pattern observed from multiple viewpoints, solving for intrinsics and extrinsics simultaneously through homography decomposition followed by non-linear reprojection-error minimisation.
+
+This work uses a ChArUco calibration board, which combines a chessboard pattern with embedded ArUco markers. ChArUco offers two advantages over plain chessboards: individual square corners can be identified even under partial occlusion, and the embedded ArUco IDs provide unambiguous corner labelling that avoids the corner-order ambiguity of plain patterns \cite{ref10, ref46_charuco_aruco}. The board used in this work has $5 \times 7$ squares of 21.5~cm.
+
+\subsection{Extrinsic Calibration}
+
+Extrinsic calibration recovers each camera's position and orientation $(R, T)$ in a common world frame. This is a prerequisite for multi-view triangulation: every camera must share the same world coordinate system if its rays are to be intersected with those of the others.
+
+AprilTag fiducial markers, developed at the University of Michigan \cite{ref11}, are widely used for this purpose. Each tag encodes a unique binary identifier and presents four corners whose 3D positions can be recovered from a single image when the tag size is known, using the Perspective-n-Point (PnP) algorithm. When multiple tags at known world positions are detected, the camera pose is recovered by minimising reprojection error across all tag corners. Robust estimation, such as Random Sample Consensus (RANSAC) \cite{ref12} and iteratively re-weighted least squares with sigma-clipping, suppresses the influence of incorrectly detected or mis-measured tags.
+
+\section{Object Detection for Sports Applications}
+
+Real-time object detection has been transformed by the YOLO (You Only Look Once) family \cite{ref13}, which formulates detection as a single-pass regression predicting bounding boxes and class probabilities in one forward pass. Subsequent versions (YOLOv5, YOLOv8, YOLO11, YOLO26) have refined the accuracy--speed trade-off, allowing real-time deployment on commodity GPU hardware \cite{ref14}.
+
+Ball detection in sports is challenging compared with general object detection: the ball is small in pixel area, frequently partially occluded, blurred at high velocities, and easily confused with similarly shaped background objects (markers, cones, even tightly curled human figures). Prior work has used background subtraction, colour-based filtering, and learned detectors \cite{ref5, ref6}. The present work uses the Ultralytics YOLO11 / YOLO26 family, with a confidence threshold tuned per experiment in the range 0.25--0.45 to balance detection recall against the rate of false positives.
+
+For deployment on the live system, the YOLO weights are exported through NVIDIA TensorRT \cite{ref38_tensorrt} to FP16 with a dynamic-batch profile, enabling four-camera batched inference on a single forward call. This deployment path is critical for keeping per-frame inference within the 15~FPS budget; a static-batch engine of the form expected by older Ultralytics defaults silently fails when the runtime supplies a 4-image batch.
+
+\section{Human Pose Estimation}
+
+Human pose estimation is the task of recovering the spatial configuration of a person's body from image data. The standard formulation is keypoint detection: estimating the 2D (or 3D) coordinates of a defined set of anatomical landmarks from one or more views \cite{ref15, ref47_pose_review}.
+
+The COCO keypoint format defines 17 landmarks (nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles), and has become the dominant benchmark standard \cite{ref16}. \textbf{Top-down} approaches first detect persons with a bounding-box detector and then run a specialised keypoint network on each crop, generally achieving higher per-keypoint accuracy than \textbf{bottom-up} approaches that detect all keypoints first and group them afterwards.
+
+The MMPose framework \cite{ref17} implements both paradigms and provides pre-trained models on COCO benchmarks. The original submission of this thesis used a top-down MMPose pipeline with the HRNet backbone \cite{ref18}, which has demonstrated strong COCO performance.
+
+\subsection{Real-time pose estimation under edge-deployment constraints}
+
+A practical limitation of the original two-stage MMPose top-down pipeline is end-to-end latency. The detector and the keypoint network are run sequentially per image, and the per-image budget at 1280$\times$720 with the HRNet backbone exceeds 30~ms on the available consumer GPU; with four cameras the budget is breached, forcing the system to drop frames or skip pose inference.
+
+YOLO-Pose \cite{ref37_yolopose} is a single-stage formulation that predicts keypoints jointly with detection in one forward pass through a YOLO backbone. The accuracy gap to top-down two-stage architectures is small on standard benchmarks, while the inference cost is reduced because there is no separate detector network and no per-person crop loop. With TensorRT FP16 deployment on a YOLO11m-Pose backbone, a four-camera batch is processed in approximately 6.2~ms in the present setup, compared with approximately 38.5~ms per image for the MMPose two-stage pipeline. This advantage is the basis for the YOLO-Pose backend used in the present submission, with the original MMPose pipeline retained as a reference back-end and as the basis for the joint-touch ground-truth evaluation of Chapter~5.
+
+\section{Kalman Filtering for Sports and Human-Motion Tracking}
+
+The Kalman filter \cite{ref39_kalman1960, ref40_baryam_kf} is a recursive Bayesian estimator that produces an optimal (in a minimum-variance sense) estimate of the state of a linear Gaussian dynamic system from a sequence of noisy measurements. For tracking moving objects, a constant-velocity (CV) model with state $\mathbf{x} = [X, Y, Z, \dot{X}, \dot{Y}, \dot{Z}]^\top$ and process noise driven by acceleration is a standard choice. The CV model is appropriate when the object's motion is approximately ballistic over the prediction horizon, which is a reasonable approximation for human walking and jogging at the time-scales of interest in this thesis (200--400~ms).
+
+In the context of vision-guided ball delivery, the Kalman filter plays two roles. First, it acts as a per-frame smoother that produces a stable position estimate from noisy multi-view triangulations. Second, by extrapolating the filter forward without a measurement update, it produces a \textit{predicted} position at a future time-step, which compensates for the round-trip latency between visual observation and projectile arrival. This second role is important whenever the projectile flight time is non-negligible compared with the perception cadence.
+
+The CV assumption breaks down for highly non-linear motion, in particular for jumps and rapid decelerations, where an interacting-multiple-model (IMM) filter or an explicitly ballistic model would perform better. The present work adopts the CV model as a deliberate trade-off: it captures the dominant walking and jogging regimes that constitute the majority of training-mode interactions, while remaining cheap enough to run per-joint at 15~FPS without GPU resources. The limitations of the CV assumption on jump motion are characterised explicitly in Chapter~5.
+
+\section{Ballistic Modelling and Actuator Control}
+
+A ball projected from a launcher at initial speed $v_0$, pitch angle $\theta$, and yaw angle $\phi$ follows a parabolic trajectory under gravity (neglecting air resistance for a first-order approximation). The equations of motion are:
+
+\begin{equation}
+x(t) = v_0 \cdot \cos(\theta) \cdot \cos(\phi) \cdot t \label{eq:2_2}
+\end{equation}
+
+\begin{equation}
+y(t) = v_0 \cdot \cos(\theta) \cdot \sin(\phi) \cdot t \label{eq:2_3}
+\end{equation}
+
+\begin{equation}
+z(t) = v_0 \cdot \sin(\theta) \cdot t - \frac{1}{2} \cdot g \cdot t^2 \label{eq:2_4}
+\end{equation}
+
+with $g = 9810$~mm/s$^2$. Given a target point $(T_x, T_y, T_z)$ and a launcher origin $(B_x, B_y, B_z)$, equations~(\ref{eq:2_2})--(\ref{eq:2_4}) admit two valid pitch angles for a fixed range and height difference: a high arc and a low arc. The low-arc solution is preferred in this system because it minimises flight time and therefore the targeting uncertainty introduced by athlete movement during the ball's flight \cite{ref19}. Aerodynamic drag and Magnus-effect lateral force from spinning wheels are second-order corrections; for the present validation regime (controlled indoor distances of 2000--5000~mm) they are absorbed into the empirical correction model rather than modelled explicitly.
+
+Stepper motors are an appropriate actuation mechanism for launcher pan/tilt: their open-loop step counting provides predictable angular displacement without continuous position feedback, and their holding torque is sufficient to maintain aim against the vibration produced by the wheel motors \cite{ref20}. Worm-gear reducers between the steppers and the gimbal axes provide self-locking behaviour: the output cannot back-drive the input under external torque, which means that on power loss the gimbal holds its aim without electrical holding current.
+
+\section{Voice-Command Interfaces in Human--Robot Interaction}
+
+Speech-based command channels for actuated systems are well established in human--robot interaction, where they typically supplement keyboard or gestural input as a hands-free modality \cite{ref48_voice_hri}. For embedded and offline deployment, modern open-source automatic speech-recognition (ASR) toolkits such as Vosk \cite{ref41_vosk} provide acoustic and language models that run on commodity CPUs without cloud dependency, suitable for a closed laboratory or training-arena deployment where audio data should not leave the local network.
+
+A practical engineering question for this class of system is how to integrate the ASR front-end with the existing application without introducing additional dependency-resolution failures (e.g.\ \texttt{pyaudio}, \texttt{vosk}, audio device drivers) into the production runtime's Python environment. The approach used in this work is to run the ASR producer in a separate Python interpreter and communicate with the main application via UDP, an approach analogous to common practice in robotics middlewares where the audio I/O subsystem is isolated from the planning subsystem.
+
+\section{Safety in Autonomous Actuated Systems}
+
+Any system that combines computer-vision-based decision-making with physical actuation must address safety as a first-class design concern. The relevant engineering frame is given by the machine safety standards: IEC~62061 (functional safety of safety-related machinery control systems) \cite{ref21}, ISO~10218 (safety of industrial robots) \cite{ref26}, and ISO~13849-1 (safety-related parts of control systems) \cite{ref44_iso13849} all require that automated systems implement a defined safe state and a reliable means of transitioning to that state under fault conditions. IEC~60204-1 \cite{ref45_iec60204} prescribes the electrical-equipment design rules (control-circuit voltages, ground topology, fuse sizing) that apply to the BLM's 24~V motor rail.
+
+An Emergency Stop (E-STOP) function, mandatory under ISO~12100 \cite{ref22}, must interrupt hazardous motion immediately and latch in the stopped state until a deliberate human reset action is taken. Response-time requirements vary by hazard level; for a domestic-training ball launcher with no proximity hazard to the operator during normal operation, a response time below 200~ms is considered acceptable practice. The system described in this thesis achieves a measured E-STOP response time below 100~ms.
+
+The wider principle of incremental validation, in which each subsystem is exercised in isolation before integration and each integration stage before full operation, is standard practice in safety-critical embedded systems development \cite{ref23} and is formalised in this work as the six-stage BLM test checklist (Section~3.13 and Appendix~A).
+
+\section{Summary, Critical Comparison, and Research Gap}
+
+The following table organises existing systems into three categories and positions this work against them.
+
+\begin{table}[htbp]
+\caption{Existing system categories and their limitations}
+\label{tab:2_1}
+\begin{tabular}{|p{2cm}|p{3cm}|p{1.8cm}|p{1.8cm}|p{3.5cm}|}
+\hline
+\textbf{Category} & \textbf{Example Systems} & \textbf{Cost (approx.)} & \textbf{Accuracy} & \textbf{Limitations} \\
+\hline
+A: Commercial Open-Loop Launchers & Lobster Elite Liberty, Spinshot Player, iPong Pro & USD 200--2{,}000 & N/A (no sensing) & No perception; fixed paths; cannot target athlete \\
+\hline
+B: Professional Lab Motion Capture & OptiTrack \cite{ref30}, Vicon \cite{ref8}, PhaseSpace \cite{ref31} & USD 50{,}000--200{,}000+ & \textless{}1~mm (with markers) & Lab-only; no actuation; requires markers; inaccessible \\
+\hline
+C: Research Prototype Vision Systems & Robot tennis / table tennis, ball-serving robots \cite{ref24, ref25} & USD 2{,}000--10{,}000 & 50--100~mm (ball only) & Fixed-zone targeting; lab environments; no joint-level targeting \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Category A.} Commercial open-loop launchers dominate sports-training deployment globally. Their limitation is not cost; it is architecture. They cannot perform perception-guided targeting at any budget, because they have no sensors and no decision logic.
+
+\textbf{Category B.} Professional motion-capture installations exist in biomechanics laboratories and elite sports-science institutes. Their accuracy is exemplary, but their deployment model places them outside the reach of community sports clubs, school programmes, and physiotherapy practices. They observe but they do not act: no Category B system in the surveyed literature integrates with a ball launcher.
+
+\textbf{Category C.} Robotic table-tennis and tennis-serving systems \cite{ref24, ref25} are the closest research analogues to the present work. They demonstrate vision-guided launching, but their target is a fixed zone on the court, not a named anatomical joint on a moving human. They typically operate in controlled laboratory environments and rely on stereo camera pairs or depth sensors that cost substantially more than the commodity USB cameras used here.
+
+\subsection{Why the observed accuracy gap is acceptable}
+
+The corrected ball-localisation mean error reported in Chapter~5 (95.17~mm) is roughly an order of magnitude worse than Category-B motion capture (\textless{}1~mm) and is the same order as Category-C ball-only research prototypes (50--100~mm). Joint localisation (143.38~mm mean) is similarly above motion-capture performance. This thesis does not claim accuracy superiority over those analogues. It claims that the combined capability--cost envelope is novel: a system that performs joint-level targeting (which Category B cannot do, and Category C does not attempt) and that drives a physical ballistic actuator (which Category B does not include) at a hardware cost one to three orders of magnitude lower than the comparable laboratory infrastructure. For training applications where the goal is to challenge the athlete to a specific body part rather than to land within a millimetre of it, the present accuracy is sufficient: a knee-targeted shot at 110~mm mean error is well within the natural reach span of a player's leg.
+
+\subsection{Design-choice justification}
+
+Each of the major design decisions in this thesis can be tied to a specific limitation of the analogue systems summarised above.
+
+\textbf{Four commodity USB cameras} (rather than a stereo pair or a depth sensor): chosen for cost, domestic deployability, and self-occlusion redundancy. With four cameras, one camera can be obstructed by the athlete's body without dropping below the three-camera minimum required for reliable joint triangulation. Stereo and structured-light depth sensors of comparable specification are individually two to three times more expensive and offer no redundancy.
+
+\textbf{ChArUco intrinsics and AprilTag-wall extrinsics} (rather than full bundle adjustment or simultaneous-localisation-and-mapping): chosen so that the calibration procedure is reproducible by a non-expert operator using printed paper targets and a simple capture script. The accuracy cost relative to bundle adjustment is small at the present arena dimensions, and the operational cost is much lower.
+
+\textbf{DLT/SVD triangulation} (rather than non-linear least-squares with iterative refinement): chosen for the per-frame compute budget at 15~FPS. SVD on a $2N \times 4$ system for $N \le 4$ cameras is sub-millisecond on the host CPU; an iterative non-linear method would not improve accuracy enough to justify the additional cost in this regime.
+
+\textbf{YOLO-Pose primary, MMPose reference} (rather than MMPose only): chosen because YOLO-Pose's single-pass formulation reduces four-camera batched inference latency by approximately 6.2$\times$ when deployed through TensorRT FP16. The accuracy gap to MMPose is small (within 5~mm jitter on the 3D output, see Chapter~5), and the latency saving is what allows the joint pipeline to run within the 15~FPS budget alongside the ball detector.
+
+\textbf{Constant-velocity Kalman filter for prediction} (rather than IMM or explicit ballistic modelling): chosen to handle the dominant walk and jog regimes at low compute cost. The CV assumption is known to fail on jumps; this is acknowledged explicitly and the system's behaviour on jump motion is reported in Chapter~5 rather than glossed over.
+
+\textbf{Minimum three cameras for joint triangulation, two for ball} (rather than a uniform threshold): chosen because joint observations are noisier than ball-centre observations (the ball is a near-rigid colour blob; a joint is a learned keypoint estimate). The asymmetry uses the available redundancy where it matters most.
+
+\textbf{ESP32 single-microcontroller architecture at 921~600~baud} (rather than a two\mbox{-}microcontroller stack with a slower link): chosen so that the supervisor-to-actuator round-trip fits inside a 1~ms window and is therefore negligible relative to the 67~ms perception cycle. The single-MCU design also removes the inter-microcontroller serial bridge that was a known failure mode in the precursor laboratory platform.
+
+\textbf{Multi-modal voice-command via UDP IPC} (rather than embedding the ASR client in the main runtime): chosen so that the production runtime's Python environment is not contaminated by audio-driver and \texttt{pyaudio} dependency churn. The voice subsystem can be restarted or replaced without disturbing the perception or actuation paths.
+
+\subsection{Research gap}
+
+Taking the comparison and justification together, the research gap addressed by this thesis is precisely stated: \textbf{no prior system combines commodity multi-camera 3D reconstruction, real-time human-joint localisation from open-source pose estimation, predictive Kalman filtering for projectile lead-time compensation, and a safety-gated physical ballistic controller targeting named anatomical joints, deployed and validated end-to-end in an uncontrolled domestic environment at low cost}. The validation regime reached in this thesis is static aim-only and controlled live-aim single-shot fire on named joints; closed-loop firing on a moving human subject remains as the immediate next milestone.

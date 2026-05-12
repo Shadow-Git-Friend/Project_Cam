@@ -185,6 +185,17 @@
 - Cleanup pass: identified `voice_commands/` (old prototype, 48K), `weights-20260413T135335Z-3-001/` (raw download, 340M), legacy `output/frames_*/` dumps (~713M), `sync_frames/` (2.6G), `synchronized_video/` (1.2G) as deletion candidates. Awaiting user confirmation before purge.
 - Next: (1) Confirm & purge legacy folders, (2) RPM→m/s calibration (Phase 0 close-out), (3) Test voice + auto-reload in live lab, (4) Phase 1.1 `common.py` refactor if time permits pre-defense.
 
+### 2026-04-21 — Ball selection gates (size + KF) + mosaic render fix
+- **Mosaic render bug fixed** (`Parallel_working/scripts/render_ball_detection_mosaic.py`): analyzer JSONL records bboxes in native 1280×720 per-cam pixel space, but the renderer resized tiles to 640×360 default and drew bboxes at original coords → boxes clamped against tile edges, appearing offset from the ball. Now scales by `tile_w/src_w, tile_h/src_h` and draws a center cross. All 16 `detections_{672,960}_mosaic.mp4` regenerated.
+- **Visual audit findings** (user): three false-positive modes — (1) ball lost during fast motion (blur streaks below conf=0.40), (2) body curled around ball detected as ball, (3) training cones / AprilTag markers occasionally flagged as balls.
+- **New candidate-selection gates in `live_4cam_arena_view_parallel.py`** (applied before triangulation; geometry-safe):
+  - `--ball-max-box-side-px 220` (default on) — rejects oversized blobs (body/cone). Primary fix for (2).
+  - `--ball-min-box-side-px 0` (default off) — optional micro-box filter.
+  - `--ball-kf-gate-px 150` (default on) — when KF locked, prefer candidates within 150 px of KF-predicted reprojection. Falls back to highest-conf if no gated candidate (so re-acquisitions still work). Primary fix for (3) and contributor to (1) (makes lowering `--ball-conf` 0.40→0.25 safe).
+- Gates are flag-off with `--ball-*-px 0` for A/B regression against prior behavior.
+- New helper: `select_ball_box_for_cam(boxes, kf_pred_uv, kf_gate_px, min_side, max_side)` — unit-tested.
+- Next: live arena test with `--ball-imgsz 960 --ball-single-cam-fallback --ball-ballistic-fallback` + defaults on the new gates; compare 3D trajectory stability vs pre-gate runs. If stable, consider lowering `--ball-conf` default 0.40→0.25.
+
 ### 2026-04-20 — Ball detection diagnosis + single-cam fallback + Gemini review
 - **Tier 0 additions from second-pass review + Gemini/tree review analysis landed.** New `suggestions.md` section (Tier verdicts for gemini3.1pro.md, industrial-tree critique). Safe additions only; pre-defense freeze intact.
 - **Ball detection offline analyzer** (`Parallel_working/scripts/ball_detection_analyzer.py`): sweeps conf thresholds + top-K on either per-cam frame directories OR `mosaic2d_*.mp4` 2×2 tiled videos. Reveals how many detections the current conf=0.40 threshold silently discards.

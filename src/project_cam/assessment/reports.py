@@ -41,7 +41,7 @@ def build_report(
     calibration_gate = build_calibration_gate(calibration)
     demo_verdict = build_demo_verdict(compliance, calibration_gate, rep_quality)
     flags = evaluate_flags(exercise, rules, quality, metrics, compliance, calibration, metric_confidence, demo_verdict)
-    movement_quality = build_movement_quality(flags, rep_quality, compliance, demo_verdict)
+    movement_quality = build_movement_quality(flags, rep_quality, compliance, demo_verdict, rules=rules)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -126,29 +126,50 @@ def build_movement_quality(
     rep_quality: list[dict[str, Any]],
     compliance: dict[str, Any],
     demo_verdict: dict[str, Any],
+    rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Movement-quality verdict derived from coaching flags and rep scoring.
+    """Movement-quality verdict derived from review-severity flags and rep scoring.
 
     Distinct from data_quality (which measures tracking confidence). A session
-    can score 99 on data quality and still need review here.
+    can score 99 on data quality and still need review here. Which severities
+    trigger "Needs review" is configured per-exercise via
+    `movement_quality.review_flag_severities` (default: ["coaching"]). Note that
+    `info` is reserved for observation-only signals and must never escalate.
     """
+    review_severities = _review_severities(rules)
+    review_flags = [f for f in flags if f.get("severity") in review_severities]
     coaching_flags = [f for f in flags if f.get("severity") == "coaching"]
     has_unscored = any(rep.get("status") == "unscored" for rep in rep_quality)
     if demo_verdict.get("status") == "calibration_failed":
         label, status = "Cannot score", "blocked"
     elif compliance.get("status") != "ok" or has_unscored:
         label, status = "Needs review", "needs_review"
-    elif coaching_flags:
+    elif review_flags:
         label, status = "Needs review", "needs_review"
     else:
         label, status = "Looks good", "good"
     return {
         "status": status,
         "label": label,
+        "review_severities": sorted(review_severities),
+        "review_flag_count": len(review_flags),
+        "review_flag_codes": [f.get("code") for f in review_flags],
         "coaching_flag_count": len(coaching_flags),
         "coaching_flag_codes": [f.get("code") for f in coaching_flags],
         "unscored_rep_count": sum(1 for rep in rep_quality if rep.get("status") == "unscored"),
     }
+
+
+def _review_severities(rules: dict[str, Any] | None) -> set[str]:
+    if not rules:
+        return {"coaching"}
+    mq = rules.get("movement_quality") or {}
+    severities = mq.get("review_flag_severities")
+    if not isinstance(severities, list) or not severities:
+        return {"coaching"}
+    cleaned = {str(s).strip() for s in severities if str(s).strip()}
+    cleaned.discard("info")  # info is reserved for observation-only; never escalates.
+    return cleaned or {"coaching"}
 
 
 def _data_quality_label(score: float) -> str:

@@ -1,0 +1,228 @@
+\begin{thebibliography}{34}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Inc.(2024{\natexlab{a}})]{ref30}
+NaturalPoint Inc.
+\newblock Optitrack motion capture systems, 2024{\natexlab{a}}.
+\newblock URL \url{https://optitrack.com}.
+
+\bibitem[Windolf et~al.(2008)Windolf, Götzen, and Morlock]{ref8}
+M.~Windolf, N.~Götzen, and M.~Morlock.
+\newblock Systematic accuracy and precision analysis of video motion capturing
+  systems --- exemplified on the vicon-460 system.
+\newblock \emph{Journal of Biomechanics}, 41\penalty0 (12):\penalty0
+  2776--2780, 2008.
+
+\bibitem[Inc.(2024{\natexlab{b}})]{ref31}
+PhaseSpace Inc.
+\newblock Phasespace impulse x2e motion capture system, 2024{\natexlab{b}}.
+\newblock URL \url{https://phasespace.com}.
+
+\bibitem[Bradski(2000)]{ref27}
+G.~Bradski.
+\newblock The opencv library.
+\newblock \emph{Dr. Dobb's Journal of Software Tools}, 25\penalty0
+  (11):\penalty0 120--125, 2000.
+
+\bibitem[Jocher et~al.(2025)Jocher, Chaurasia, and Qiu]{ref14}
+G.~Jocher, A.~Chaurasia, and J.~Qiu.
+\newblock Ultralytics yolov26, 2025.
+\newblock URL \url{https://github.com/ultralytics/ultralytics}.
+
+\bibitem[Contributors(2020)]{ref17}
+MMPose Contributors.
+\newblock Openmmlab pose estimation toolbox and benchmark, 2020.
+\newblock GitHub repository.
+
+\bibitem[Harris et~al.(2020)Harris, Millman, van~der Walt, Gommers, Virtanen,
+  Cournapeau, Wieser, Taylor, Berg, Smith, Kern, Picus, Hoyer, van Krevelen,
+  Brett, Haldane, del Río, Wiebe, Peterson, Gérard-Marchant, Sheppard, Reddy,
+  Weckesser, Abbasi, Gohlke, and Oliphant]{ref28}
+C.~R. Harris, K.~J. Millman, S.~J. van~der Walt, R.~Gommers, P.~Virtanen,
+  D.~Cournapeau, E.~Wieser, J.~Taylor, S.~Berg, N.~J. Smith, R.~Kern, M.~Picus,
+  S.~Hoyer, M.~H. van Krevelen, M.~Brett, A.~Haldane, J.~F. del Río, M.~Wiebe,
+  P.~Peterson, P.~Gérard-Marchant, K.~Sheppard, T.~Reddy, W.~Weckesser,
+  H.~Abbasi, C.~Gohlke, and T.~E. Oliphant.
+\newblock Array programming with numpy.
+\newblock \emph{Nature}, 585\penalty0 (7825):\penalty0 357--362, 2020.
+
+\bibitem[Virtanen et~al.(2020)Virtanen, Gommers, Oliphant, Haberland, Reddy,
+  Cournapeau, Burovski, Peterson, Weckesser, Bright, van~der Walt, Brett,
+  Wilson, Millman, Mayorov, Nelson, Jones, Kern, Larson, Carey, Polat, Feng,
+  Moore, VanderPlas, Laxalde, Perktold, Cimrman, Henriksen, Quintero, Harris,
+  Archibald, Ribeiro, Pedregosa, and van Mulbregt]{ref29}
+P.~Virtanen, R.~Gommers, T.~E. Oliphant, M.~Haberland, T.~Reddy, D.~Cournapeau,
+  E.~Burovski, P.~Peterson, W.~Weckesser, J.~Bright, S.~J. van~der Walt,
+  M.~Brett, J.~Wilson, K.~J. Millman, N.~Mayorov, A.~R.~J. Nelson, E.~Jones,
+  R.~Kern, E.~Larson, C.~J. Carey, İ. Polat, Y.~Feng, E.~W. Moore,
+  J.~VanderPlas, D.~Laxalde, J.~Perktold, R.~Cimrman, I.~Henriksen, E.~A.
+  Quintero, C.~R. Harris, A.~M. Archibald, A.~H. Ribeiro, F.~Pedregosa, and
+  P.~van Mulbregt.
+\newblock Scipy 1.0: fundamental algorithms for scientific computing in python.
+\newblock \emph{Nature Methods}, 17\penalty0 (3):\penalty0 261--272, 2020.
+
+\bibitem[Hartley and Zisserman(2004)]{ref1}
+R.~Hartley and A.~Zisserman.
+\newblock \emph{Multiple View Geometry in Computer Vision}.
+\newblock Cambridge University Press, Cambridge, UK, 2nd edition, 2004.
+
+\bibitem[Longuet-Higgins(1981)]{ref2}
+H.~C. Longuet-Higgins.
+\newblock A computer algorithm for reconstructing a scene from two projections.
+\newblock \emph{Nature}, 293:\penalty0 133--135, 1981.
+
+\bibitem[Kanade and Okutomi(1994)]{ref4}
+T.~Kanade and M.~Okutomi.
+\newblock A stereo matching algorithm with an adaptive window: theory and
+  experiment.
+\newblock \emph{IEEE Transactions on Pattern Analysis and Machine
+  Intelligence}, 16\penalty0 (9):\penalty0 920--932, 1994.
+
+\bibitem[Pingali et~al.(1998)Pingali, Jean, and Carlbom]{ref5}
+G.~Pingali, Y.~Jean, and I.~Carlbom.
+\newblock Real time tracking for enhanced tennis broadcasts.
+\newblock In \emph{Proceedings of IEEE Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 260--265, Santa Barbara, CA, 1998.
+
+\bibitem[Kamble et~al.(2019)Kamble, Keskar, and Bhurchandi]{ref6}
+P.~R. Kamble, A.~G. Keskar, and K.~M. Bhurchandi.
+\newblock Ball tracking in sports: a survey.
+\newblock \emph{Artificial Intelligence Review}, 52\penalty0 (3):\penalty0
+  1655--1705, 2019.
+
+\bibitem[Ltd.(2023)]{ref7}
+Hawk-Eye~Innovations Ltd.
+\newblock Hawk-eye ball tracking technology, technical overview document, 2023.
+
+\bibitem[Zhang(2000)]{ref9}
+Z.~Zhang.
+\newblock A flexible new technique for camera calibration.
+\newblock \emph{IEEE Transactions on Pattern Analysis and Machine
+  Intelligence}, 22\penalty0 (11):\penalty0 1330--1334, 2000.
+
+\bibitem[Garrido-Jurado et~al.(2014)Garrido-Jurado, Muñoz-Salinas,
+  Madrid-Cuevas, and Marín-Jiménez]{ref10}
+S.~Garrido-Jurado, R.~Muñoz-Salinas, F.~J. Madrid-Cuevas, and M.~J.
+  Marín-Jiménez.
+\newblock Automatic generation and detection of highly reliable fiducial
+  markers under occlusion.
+\newblock \emph{Pattern Recognition}, 47\penalty0 (6):\penalty0 2280--2292,
+  2014.
+
+\bibitem[Olson(2011)]{ref11}
+E.~Olson.
+\newblock Apriltag: A robust and flexible visual fiducial system.
+\newblock In \emph{Proceedings of IEEE International Conference on Robotics and
+  Automation (ICRA)}, pages 3400--3407, Shanghai, China, 2011.
+
+\bibitem[Fischler and Bolles(1981)]{ref12}
+M.~A. Fischler and R.~C. Bolles.
+\newblock Random sample consensus: a paradigm for model fitting with
+  applications to image analysis and automated cartography.
+\newblock \emph{Communications of the ACM}, 24\penalty0 (6):\penalty0 381--395,
+  1981.
+
+\bibitem[Redmon et~al.(2016)Redmon, Divvala, Girshick, and Farhadi]{ref13}
+J.~Redmon, S.~Divvala, R.~Girshick, and A.~Farhadi.
+\newblock You only look once: unified, real-time object detection.
+\newblock In \emph{Proceedings of IEEE Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 779--788, Las Vegas, NV, 2016.
+
+\bibitem[Cao et~al.(2021)Cao, Hidalgo, Simon, Wei, and Sheikh]{ref15}
+Z.~Cao, G.~Hidalgo, T.~Simon, S.~E. Wei, and Y.~Sheikh.
+\newblock Openpose: realtime multi-person 2d pose estimation using part
+  affinity fields.
+\newblock \emph{IEEE Transactions on Pattern Analysis and Machine
+  Intelligence}, 43\penalty0 (1):\penalty0 172--186, 2021.
+
+\bibitem[Lin et~al.(2014)Lin, Maire, Belongie, Hays, Perona, Ramanan, Dollár,
+  and Zitnick]{ref16}
+T.~Y. Lin, M.~Maire, S.~Belongie, J.~Hays, P.~Perona, D.~Ramanan, P.~Dollár,
+  and C.~L. Zitnick.
+\newblock Microsoft coco: common objects in context.
+\newblock In \emph{Proceedings of European Conference on Computer Vision
+  (ECCV)}, pages 740--755, Zurich, Switzerland, 2014.
+
+\bibitem[Sun et~al.(2019)Sun, Xiao, Liu, and Wang]{ref18}
+K.~Sun, B.~Xiao, D.~Liu, and J.~Wang.
+\newblock Deep high-resolution representation learning for visual recognition.
+\newblock \emph{IEEE Transactions on Pattern Analysis and Machine
+  Intelligence}, 43\penalty0 (10):\penalty0 3349--3364, 2019.
+
+\bibitem[Meriam and Kraige(2012)]{ref19}
+J.~L. Meriam and L.~G. Kraige.
+\newblock \emph{Engineering Mechanics: Dynamics}.
+\newblock Wiley, Hoboken, NJ, 7th edition, 2012.
+
+\bibitem[Jones(2016)]{ref20}
+M.~T. Jones.
+\newblock \emph{Embedded Systems Design with the Atmel AVR Microcontroller}.
+\newblock Cengage Learning, Boston, MA, 2016.
+
+\bibitem[Commission(2021)]{ref21}
+International~Electrotechnical Commission.
+\newblock Iec 62061: Safety of machinery --- functional safety of
+  safety-related control systems, 2021.
+
+\bibitem[for Standardization(2011{\natexlab{a}})]{ref26}
+International~Organization for Standardization.
+\newblock Iso 10218-1: Robots and robotic devices --- safety requirements for
+  industrial robots --- part 1: Robots, 2011{\natexlab{a}}.
+
+\bibitem[for Standardization(2011{\natexlab{b}})]{ref22}
+International~Organization for Standardization.
+\newblock Iso 12100: Safety of machinery --- general principles for design,
+  2011{\natexlab{b}}.
+
+\bibitem[Sommerville(2016)]{ref23}
+I.~Sommerville.
+\newblock \emph{Software Engineering}.
+\newblock Pearson, Harlow, UK, 10th edition, 2016.
+
+\bibitem[Muelling et~al.(2013)Muelling, Kober, Kroemer, and Peters]{ref24}
+K.~Muelling, J.~Kober, O.~Kroemer, and J.~Peters.
+\newblock Learning to select and generalise striking movements in robot table
+  tennis.
+\newblock \emph{International Journal of Robotics Research}, 32\penalty0
+  (3):\penalty0 263--279, 2013.
+
+\bibitem[Fässler et~al.(1990)Fässler, Beyer, and Wen]{ref25}
+H.~Fässler, H.~A. Beyer, and J.~T. Wen.
+\newblock A robot ping pong player: optimized mechanics, high performance 3d
+  vision and intelligent sensor control.
+\newblock \emph{Robotersysteme}, 6:\penalty0 161--170, 1990.
+
+\bibitem[Cadena et~al.(2016)Cadena, Carlone, Carrillo, Latif, Scaramuzza,
+  Neira, Reid, and Leonard]{ref36}
+C.~Cadena, L.~Carlone, H.~Carrillo, Y.~Latif, D.~Scaramuzza, J.~Neira, I.~Reid,
+  and J.~J. Leonard.
+\newblock Past, present, and future of simultaneous localization and mapping:
+  toward the robust-perception age.
+\newblock \emph{IEEE Transactions on Robotics}, 32\penalty0 (6):\penalty0
+  1309--1332, 2016.
+
+\bibitem[Zhang et~al.(2022)Zhang, Sun, Jiang, Yu, Weng, Yuan, Luo, Liu, and
+  Wang]{ref33}
+Y.~Zhang, P.~Sun, Y.~Jiang, D.~Yu, F.~Weng, Z.~Yuan, P.~Luo, W.~Liu, and
+  X.~Wang.
+\newblock Bytetrack: multi-object tracking by associating every detection box.
+\newblock In \emph{Proceedings of European Conference on Computer Vision
+  (ECCV)}, pages 1--21, Tel Aviv, Israel, 2022.
+
+\bibitem[Du et~al.(2023)Du, Zhao, Song, Zhao, Su, Gong, and Meng]{ref34}
+Y.~Du, Z.~Zhao, Y.~Song, Y.~Zhao, F.~Su, T.~Gong, and H.~Meng.
+\newblock Strongsort: make deepsort great again.
+\newblock \emph{IEEE Transactions on Multimedia}, 25:\penalty0 8725--8737,
+  2023.
+
+\bibitem[Ltd.(2024)]{ref35}
+Footbot Ltd.
+\newblock Footbot interactive football training system, technical product
+  description, 2024.
+\newblock URL \url{https://www.footbot.io}.
+
+\end{thebibliography}

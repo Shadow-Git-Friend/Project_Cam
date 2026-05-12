@@ -1,0 +1,97 @@
+\chapter{Conclusions and Future Work}
+
+\section{Summary of Contributions}
+
+This thesis presented a low-cost, multi-camera, pose-guided BLM system and evaluated its main perception and integration components. The work should be understood as a partial validation of an integrated architecture rather than as a completed demonstration of autonomous moving-target firing.
+
+\textbf{Contribution 1, Pose-Reactive Aiming Architecture:} The thesis integrates markerless multi-camera 3D joint localisation with ballistic aim computation for a physical BLM. The system can compute pitch, yaw, and wheel-speed commands from selected 3D target joints instead of relying on a fixed pre-programmed trajectory. The current evidence supports the architecture and static/aim-only integration, but not yet full autonomous firing at a moving human target.
+
+\textbf{Contribution 2, Low-Cost Multi-Camera Perception Pipeline:} The perception system uses four commodity USB cameras, ChArUco intrinsic calibration, AprilTag extrinsic calibration, YOLO-based ball detection, pose estimation, and DLT/SVD triangulation. Under the current calibration bundle, the raw ball static evaluation gives a mean error of 156.90 mm, and the joint-touch evaluation gives a mean error of 178.98 mm over valid trials. These values are not motion-capture-grade, but they show that a low-cost system can produce repeatable 3D measurements in a domestic arena.
+
+\textbf{Contribution 3, Safety-Gated Integration Protocol:} The thesis defines and applies a staged validation methodology for progressing from perception tests to physically actuated BLM operation. The methodology includes preflight checks, ESP32 command tests, synthetic-target runtime tests, live aim-only operation, safety verification, controlled firing, and future full-cycle tests. Structured decision logging provides traceability for each actuation decision.
+
+\section{Objectives Achievement}
+
+This section revisits the research questions from Section 1.2 using the results in Chapter 5.
+
+\textbf{RQ1: Ball 3D Localisation Accuracy.} The target was a mean static ball localisation error below 120 mm. The current raw evaluation over 36 static ball trials gives a mean error of 156.90 mm, RMSE of 172.05 mm, and P95 of 288.34 mm. Therefore, RQ1 is not fully satisfied under the current raw evaluation. The low temporal precision value (3.09 mm mean standard-deviation norm) indicates that the system is repeatable, but a systematic calibration bias remains.
+
+\textbf{RQ2: Human Pose Joint Localisation Accuracy.} The target was a mean joint localisation error below 180 mm. The current joint-touch evaluation gives a mean error of 178.98 mm over 62 valid trials, narrowly satisfying the global mean criterion for valid static holds. However, 19 of 81 planned trials are missing or failed, and the left shoulder and right hip have higher mean errors than the right knee. RQ2 is therefore satisfied only with important qualifications.
+
+\textbf{RQ3: Safe Staged Integration.} The target was to integrate the perception-to-actuation pipeline using a reproducible safety methodology. The staged checklist, safety gates, E-STOP/latch behaviour, and JSONL logging structure are implemented and documented. However, full closed-loop firing at a moving subject has not been completed. RQ3 is therefore partially satisfied.
+
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.25}
+\caption{Research question achievement summary}
+\label{tab:6_1}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.24\textwidth}>{\raggedright\arraybackslash}p{0.22\textwidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.18\textwidth}@{}}
+\toprule
+\textbf{Research Question} & \textbf{Target} & \textbf{Current Result} & \textbf{Status} \\
+\midrule
+RQ1: Ball 3D localisation & Mean error below 120 mm & 156.90 mm raw mean & Not fully satisfied \\
+RQ2: Joint 3D localisation & Mean error below 180 mm & 178.98 mm over 62 valid trials & Satisfied with limitations \\
+RQ3: Safe integration & Staged safety validation and BLM integration & Safety-gated partial integration; no moving-target closed-loop firing & Partial \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Limitations}
+
+\textbf{No full moving-target closed-loop validation.} The most important limitation is that the system has not been validated in a complete autonomous loop with a moving human target and measured projectile outcome. The current evaluation supports perception and partial integration, not final training-system performance.
+
+\textbf{Systematic calibration bias.} The current raw results show substantial axis bias, especially in the vertical direction. Bias-correction models exist in the repository, but independent held-out validation is needed before corrected results can be claimed as final accuracy.
+
+\textbf{Visibility and occlusion.} Joint localisation requires enough camera views of the target joint. The 19 missing or failed joint-touch trials show that self-occlusion and high target positions remain practical limitations. This issue is especially relevant for shoulder-level targeting.
+
+\textbf{Joint-touch ground-truth uncertainty.} The physical contact protocol approximates the anatomical joint centre. The contact point, clothing, body pose, and target marker geometry can introduce errors that are not purely vision-system errors.
+
+\textbf{Ballistic model not fully calibrated.} The solver uses a simplified projectile model and an empirical wheel-speed mapping. Drag, spin, ball compression, and wheel slip are not fully modelled. Final projectile delivery accuracy requires a dedicated RPM-to-exit-velocity and impact-position calibration campaign.
+
+\textbf{Single-person, single-arena evaluation.} The experiments were conducted in one domestic arena and under controlled indoor lighting. Generalisation to different subjects, different camera layouts, outdoor lighting, and multi-person scenes remains untested.
+
+\textbf{Safety certification not claimed.} The safety architecture is ISO-informed and suitable for staged research validation, but it has not undergone third-party certification. Any deployment beyond a supervised research environment would require additional hazard analysis and formal review.
+
+\section{Future Work}
+
+\subsection{Closed-Loop Autonomous Firing and Moving-Target Prediction}
+
+The immediate next step is a controlled validation campaign for full closed-loop operation. This should begin with static human-subject firing under strict safety controls, then progress to slow moving-target trials, and only then to realistic training motion. The key missing measurement is the relationship between the selected target joint, the predicted future joint position, the fired ball trajectory, and the actual impact or crossing point.
+
+Moving-target firing also requires prediction. The system must estimate where the target joint will be when the ball arrives, not only where it is at the current video frame. The repository contains runtime paths for filtering and prediction, but moving-target prediction must be validated against measured trajectories before it is used for final performance claims.
+
+\subsection{Independent Calibration and Bias-Correction Validation}
+
+The current bias-correction models should be evaluated on held-out trials or a newly collected validation grid. A suitable protocol would fit correction parameters on one subset of measured positions and report accuracy on a separate subset. This would determine whether the correction generalises within the working volume or only improves the fitting set.
+
+\subsection{Empirical Ballistic Calibration Map}
+
+The BLM requires an empirical calibration map relating wheel RPM, pitch, yaw, and measured ball trajectory. A radar chronograph or photogate setup could estimate exit speed, while the existing multi-camera system could record the 3D trajectory and impact/crossing point. This would allow the solver to compensate for drag, spin, wheel slip, and mechanical offsets.
+
+\subsection{Camera Placement and Self-Recalibration}
+
+The current elevated camera geometry contributes to Z-axis sensitivity. Future work should test alternative mounting heights and wider baselines, especially to improve shoulder-level visibility. A SLAM-based or tag-monitoring approach \cite{ref36} could also detect calibration drift automatically by monitoring reprojection error over time.
+
+\subsection{Multi-Person Tracking and Joint Assignment}
+
+The current system assumes one person in the arena. Multi-person operation would require identity tracking across cameras and across time, along with an operator interface for selecting the intended target person. Algorithms such as ByteTrack \cite{ref33} and StrongSORT \cite{ref34} are possible starting points, but they must be adapted to multi-view skeleton association.
+
+\subsection{Virtual 3D Goal for Impact Measurement}
+
+A software-defined Virtual 3D Goal could turn the perception system into a measurement tool for projectile outcome. A plane or volume would be defined in the arena frame near the intended target. When the tracked ball crosses that plane, the system would record crossing point, velocity, time, and offset from the intended joint. This idea is inspired by instrumented training systems such as Footbot \cite{ref35}, but would use the existing low-cost camera infrastructure rather than physical goal sensors.
+
+\section{Professional and Ethical Considerations}
+
+\textbf{Physical safety:} A ball launcher can cause injury, especially if aimed at the face, head, or bystanders. Live firing must remain supervised, with a clear exclusion zone, protective equipment when appropriate, and a verified E-STOP path. The staged validation protocol should be treated as mandatory, not optional.
+
+\textbf{Video data and privacy:} The evaluation involves video recordings of a human subject. Data should remain local unless explicit consent is obtained, and public figures should avoid identifying participants unnecessarily.
+
+\textbf{Open-source reproducibility:} The project repository is valuable because it records calibration files, evaluation scripts, runtime scripts, and ground-truth reports. Future releases should preserve this traceability so that reported metrics can be checked against the exact calibration bundle and dataset.
+
+\textbf{Dual-use risk:} A system that tracks human body parts and directs a projectile toward them has possible misuse outside sports training. Any future deployment should preserve operator control, explicit target selection, bounded operating zones, and fail-safe interruption paths.
+
+\section{Final Conclusion}
+
+The thesis demonstrates that an affordable four-camera system can estimate selected human joints and static ball positions in 3D, compute BLM aim commands, and support staged safety-gated integration. The strongest evidence is the repeatability of the perception pipeline and the near-threshold joint-touch performance in a real domestic arena. The main unresolved issue is not the absence of a pipeline, but the remaining gap between partial validation and complete closed-loop proof. A full submission-ready conclusion must therefore be careful: this work establishes a credible perception-to-aim foundation for pose-reactive ball delivery, while autonomous moving-target firing and independently validated projectile accuracy remain future work.

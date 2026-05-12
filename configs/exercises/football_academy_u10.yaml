@@ -29,7 +29,11 @@ defaults: &defaults
     min_confidence_score: 45
     max_left_right_angle_asymmetry_deg: 25
     max_knee_line_deviation_ratio: 0.20
-    max_knee_valgus_signed_ratio: 0.12
+    # Tuned 2026-05-11 from data/raw/athlete_001_squat_{clean,valgus}.jsonl:
+    # clean max-side max = 0.0121; valgus max-side max = 0.0304. Threshold 0.020
+    # sits 1.65x above clean and 0.66x of valgus, so clean does not fire and
+    # valgus does. See scripts/tune_valgus_threshold.py for the measurement.
+    max_knee_valgus_signed_ratio: 0.020
   segmentation:
     min_rom_deg: 25
   movement_quality:
@@ -59,7 +63,7 @@ exercises:
       min_confidence_score: 45
       max_left_right_angle_asymmetry_deg: 25
       max_knee_line_deviation_ratio: 0.20
-      max_knee_valgus_signed_ratio: 0.12
+      max_knee_valgus_signed_ratio: 0.020
       bottom_knee_angle_max_deg: 115
 
   single_leg_squat:
@@ -82,7 +86,8 @@ exercises:
       min_confidence_score: 50
       max_left_right_angle_asymmetry_deg: 35
       max_knee_line_deviation_ratio: 0.25
-      max_knee_valgus_signed_ratio: 0.18
+      # Single-leg squat tolerates more natural sway, so 1.5x the bilateral threshold.
+      max_knee_valgus_signed_ratio: 0.030
       bottom_knee_angle_max_deg: 125
 
 deferred_exercises:
