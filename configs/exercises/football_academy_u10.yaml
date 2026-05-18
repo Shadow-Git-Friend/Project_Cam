@@ -48,6 +48,7 @@ exercises:
       min_pelvis_travel_mm: 150
       enter_angle_deg: 90
       exit_angle_deg: 120
+      descent_angle_deg: 150
       min_rep_duration_s: 0.3
       max_rep_duration_s: 8.0
       max_missing_frame_ratio: 0.30
@@ -66,33 +67,33 @@ exercises:
       max_knee_valgus_signed_ratio: 0.020
       bottom_knee_angle_max_deg: 115
 
-  single_leg_squat:
+  push_up:
     <<: *defaults
-    description: "Single-leg squat screen for control, symmetry, and knee-line deviation."
+    description: "Bilateral push-up rep count and trunk-alignment screen."
     segmentation:
-      min_pelvis_travel_mm: 110
-      enter_angle_deg: 105
-      exit_angle_deg: 130
+      descent_angle_deg: 150
+      enter_angle_deg: 100
+      exit_angle_deg: 150
+      min_rom_deg: 50
       min_rep_duration_s: 0.3
       max_rep_duration_s: 8.0
       max_missing_frame_ratio: 0.30
-      pelvis_ema_alpha: 1.0
     protocol:
       min_fps: 15
-      min_reps: 3
-      min_rom_deg: 45
+      min_reps: 5
+      min_rom_deg: 50
       min_valid_frame_ratio: 0.60
     thresholds:
-      min_confidence_score: 50
-      max_left_right_angle_asymmetry_deg: 35
-      max_knee_line_deviation_ratio: 0.25
-      # Single-leg squat tolerates more natural sway, so 1.5x the bilateral threshold.
-      max_knee_valgus_signed_ratio: 0.030
-      bottom_knee_angle_max_deg: 125
+      min_confidence_score: 45
+      max_left_right_angle_asymmetry_deg: 25
+      max_knee_line_deviation_ratio: 0.20
+      max_knee_valgus_signed_ratio: 0.020
+      bottom_elbow_angle_max_deg: 100
+      max_trunk_alignment_error_deg: 20
 
 deferred_exercises:
-  push_up:
-    reason: "Deferred until squat/single-leg squat repeatability is proven in garage tests."
+  single_leg_squat:
+    reason: "Removed from the active screen - single-leg balance is hard to perform reliably for the demo athlete."
   plank:
     reason: "Deferred until Kairat demo scope expands beyond squat screening."
   countermovement_jump:

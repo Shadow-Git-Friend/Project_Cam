@@ -6,14 +6,19 @@ from pathlib import Path
 
 
 class KairatHardeningTests(unittest.TestCase):
-    def test_demo_config_exposes_only_squat_and_single_leg_squat(self):
+    def test_demo_config_exposes_squat_and_push_up(self):
         from project_cam.assessment.rules import load_rules
 
         config = load_rules("configs/exercises/football_academy_u10.yaml")
 
-        self.assertEqual(set(config["exercises"].keys()), {"squat", "single_leg_squat"})
+        self.assertEqual(
+            set(config["exercises"].keys()),
+            {"squat", "push_up"},
+        )
         self.assertIn("deferred_exercises", config)
-        self.assertIn("push_up", config["deferred_exercises"])
+        self.assertNotIn("push_up", config["deferred_exercises"])
+        self.assertIn("single_leg_squat", config["deferred_exercises"])
+        self.assertIn("plank", config["deferred_exercises"])
 
     def test_pelvis_z_travel_detects_squat_rep_and_records_rep_quality(self):
         from project_cam.assessment.reports import build_report

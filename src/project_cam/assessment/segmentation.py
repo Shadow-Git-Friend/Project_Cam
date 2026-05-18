@@ -8,6 +8,7 @@ from typing import Any
 SIGNAL_BY_EXERCISE = {
     "squat": ("angles_deg", "knee"),
     "single_leg_squat": ("angles_deg", "knee"),
+    "push_up": ("angles_deg", "elbow"),
 }
 
 
