@@ -130,5 +130,29 @@ class RepCounterTrackingTests(unittest.TestCase):
         self.assertLess(counter.state.tracking_quality, 0.5)
 
 
+class DashboardTests(unittest.TestCase):
+    def test_render_dashboard_returns_bgr_canvas(self):
+        import numpy as np
+
+        from project_cam.assessment.live_trainer.dashboard import render_dashboard
+        from project_cam.assessment.live_trainer.rep_state import RepState
+
+        state = RepState(rep_count=3, status="DOWN", phase="BOTTOM",
+                         current_angle=92.0, depth_pct=80.0,
+                         tracking_quality=0.9, tracking_ok=True, cue="Good form")
+        joints = _squat_joints(92.0, 850.0)
+        canvas = render_dashboard("squat", state, joints, width=900, height=720)
+
+        self.assertEqual(canvas.shape, (720, 900, 3))
+        self.assertEqual(canvas.dtype, np.uint8)
+
+    def test_render_dashboard_handles_missing_joints(self):
+        from project_cam.assessment.live_trainer.dashboard import render_dashboard
+        from project_cam.assessment.live_trainer.rep_state import RepState
+
+        canvas = render_dashboard("push_up", RepState(), [None] * 17)
+        self.assertEqual(canvas.shape[2], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
