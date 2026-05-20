@@ -1331,6 +1331,18 @@ def main():
                     help="Debounced FLOOR->AIRBORNE threshold for multi-cam vertical velocity (mm/s).")
     ap.add_argument("--ball-single-cam-meas-noise-mult", type=float, default=3.0,
                     help="Measurement-noise std multiplier applied to KF updates from ballistic single-cam fallback.")
+    ap.add_argument("--pushup-ankle-single-cam-fallback", action="store_true",
+                    help="When only 1 cam sees a push-up ankle AND per-athlete leg priors are locked, "
+                         "project that cam's ray to the floor Z-plane and accept if the resulting "
+                         "tibia length matches the prior AND the foot is within reach of the hip. "
+                         "Off by default; ignored unless --coach-overlay --coach-exercise push_up is set.")
+    ap.add_argument("--pushup-ankle-single-cam-max-frames", type=int, default=8,
+                    help="Max consecutive frames an ankle can be filled by single-cam fallback before "
+                         "the system forces a NaN drop. Prevents indefinite drift when the athlete's "
+                         "foot is genuinely no longer on the floor.")
+    ap.add_argument("--pushup-ankle-floor-mm", type=float, default=0.0,
+                    help="World Z (mm) of the floor surface the ankle ray intersects. Override for "
+                         "thick mats (e.g. 15 mm gymnastics mat -> --pushup-ankle-floor-mm 15).")
     ap.add_argument("--ball-max-box-side-px", type=float, default=220.0,
                     help="Reject ball detections whose larger bbox side exceeds this (px). A tennis ball at "
                          "arena distance is <~120px; body-sized blobs and cones exceed this. 0 = off.")
@@ -1637,6 +1649,12 @@ def main():
     coach_roi_cls = None
     coach_keypoint_stabilizer = None
     coach_pushup_floor_anchor = None
+    coach_leg_prior_acc = None
+    coach_leg_validator = None
+    coach_leg_priors = None
+    coach_evaluate_ankle_fallback = None
+    coach_ankle_fallback_streak = {15: 0, 16: 0}
+    coach_was_acquired = False
     if args.coach_overlay:
         ensure_project_src_on_path()
         from project_cam.assessment.kinematics import frame_kinematics as _coach_frame_kinematics  # noqa: E402
@@ -1648,6 +1666,11 @@ def main():
             repair_overlay_keypoints as _coach_repair_overlay_keypoints,
             render_coach_overlay as _coach_render_overlay,
             select_best_camera as _coach_select_best_camera,
+        )
+        from project_cam.assessment.live_trainer.leg_priors import (  # noqa: E402
+            LegChainValidator3D as _LegChainValidator3D,
+            LegPriorAccumulator as _LegPriorAccumulator,
+            evaluate_ankle_fallback as _evaluate_ankle_fallback,
         )
         from project_cam.assessment.live_trainer.rep_state import make_counter as _coach_make_counter  # noqa: E402
         from project_cam.assessment.rules import DEFAULT_CONFIG_PATH, exercise_rules, load_rules  # noqa: E402
@@ -1666,6 +1689,15 @@ def main():
         # None for squats so the squat floor path is bit-identical.
         if args.coach_exercise == "push_up":
             coach_pushup_floor_anchor = _PushupFloorAnchor()
+            # Per-athlete leg-bone priors learned during acquisition window.
+            # Validator drops 3D leg joints whose bone length is anatomically
+            # impossible BEFORE the EMA blends them into joints_state, so
+            # confidently-wrong triangulations cannot poison downstream
+            # consumers (UDP target stream, overlay, 3D arena). Squat path
+            # leaves these as None.
+            coach_leg_prior_acc = _LegPriorAccumulator()
+            coach_leg_validator = _LegChainValidator3D
+            coach_evaluate_ankle_fallback = _evaluate_ankle_fallback
         print(f"[INFO] Coach overlay enabled for {args.coach_exercise}")
 
     # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
@@ -2350,6 +2382,98 @@ def main():
                         joints_cam_state[j] = 0
                         joints_conf_state[j] = 0.0
 
+                # Per-athlete leg-prior validation: observe stable plank
+                # frames to learn femur/tibia lengths, then drop any
+                # post-triangulation leg joint whose parent-bone length is
+                # outside +/- 15% of the learned prior. Operates on the
+                # freshly triangulated joints BEFORE the EMA below, so a
+                # confidently-wrong leg cannot corrupt joints_state.
+                # Gated on push-up coach mode + acquired set; safe-default
+                # off for squat / BLM / 3D-only runs.
+                if (
+                    coach_leg_prior_acc is not None
+                    and coach_leg_validator is not None
+                    and coach_state is not None
+                    and bool(getattr(coach_state, "acquired", False))
+                ):
+                    coach_leg_prior_acc.observe(
+                        joints_3d_now, joints_cam_state, frame_idx
+                    )
+                    if coach_leg_priors is None:
+                        coach_leg_priors = coach_leg_prior_acc.try_lock()
+                    if coach_leg_priors is not None:
+                        drops = coach_leg_validator.filter_drops(
+                            joints_3d_now, coach_leg_priors
+                        )
+                        for _drop_j in drops:
+                            joints_3d_now.pop(_drop_j, None)
+                            joints_cam_state[_drop_j] = 0
+                            joints_conf_state[_drop_j] = 0.0
+
+                # Single-camera ankle fallback: when an ankle has exactly one
+                # contributing camera AND per-athlete priors are locked AND
+                # the same-side hip/knee were multi-cam triangulated this
+                # frame, project the ankle's lone ray to the floor Z-plane
+                # and accept it if the proposal passes the tibia + hip-distance
+                # gates. The gates are what stop the raised-foot ray from
+                # landing on far floor clutter. Opt-in via flag.
+                if (
+                    args.pushup_ankle_single_cam_fallback
+                    and coach_evaluate_ankle_fallback is not None
+                    and coach_leg_priors is not None
+                    and coach_state is not None
+                    and bool(getattr(coach_state, "acquired", False))
+                ):
+                    for _ank_j, _hip_j, _knee_j in ((15, 11, 13), (16, 12, 14)):
+                        # Already triangulated (>=2 cams) OR already given up.
+                        if _ank_j in joints_3d_now or int(joints_cam_state[_ank_j]) != 1:
+                            # Reset streak on either acceptance or N/A.
+                            if _ank_j in joints_3d_now:
+                                coach_ankle_fallback_streak[_ank_j] = 0
+                            continue
+                        if coach_ankle_fallback_streak[_ank_j] >= int(args.pushup_ankle_single_cam_max_frames):
+                            # Cap reached: refuse to drift indefinitely.
+                            joints_cam_state[_ank_j] = 0
+                            joints_conf_state[_ank_j] = 0.0
+                            continue
+                        # Find the lone observation for this ankle.
+                        _solo_cam = None
+                        for _cam in batch_order:
+                            _und_map = pose_und_by_cam.get(_cam)
+                            if _und_map and _ank_j in _und_map:
+                                _solo_cam = _cam
+                                break
+                        if _solo_cam is None:
+                            continue
+                        # Hip and knee must be multi-cam triangulated this frame.
+                        _knee_pt = joints_3d_now.get(_knee_j)
+                        _hip_pt = joints_3d_now.get(_hip_j)
+                        if _knee_pt is None or _hip_pt is None:
+                            continue
+                        _proposal = coach_evaluate_ankle_fallback(
+                            ankle_idx=_ank_j,
+                            obs_norm=pose_und_by_cam[_solo_cam][_ank_j],
+                            R=extr[_solo_cam]["R"],
+                            tvec=extr[_solo_cam]["tvec"],
+                            target_z_mm=float(args.pushup_ankle_floor_mm),
+                            knee_pt=_knee_pt,
+                            hip_pt=_hip_pt,
+                            priors=coach_leg_priors,
+                        )
+                        if _proposal is None:
+                            # Gate rejected: keep ankle dropped (NaN downstream).
+                            joints_cam_state[_ank_j] = 0
+                            joints_conf_state[_ank_j] = 0.0
+                            continue
+                        # Accept, but downweight confidence so the EMA leans
+                        # on history more than this single-camera estimate.
+                        joints_3d_now[_ank_j] = _proposal
+                        joint_last_seen_frame[_ank_j] = frame_idx
+                        _solo_conf = float(per_cam_pose_curr[_solo_cam][1][_ank_j])
+                        joints_conf_state[_ank_j] = max(0.0, min(1.0, _solo_conf * 0.5))
+                        joints_cam_state[_ank_j] = 1
+                        coach_ankle_fallback_streak[_ank_j] += 1
+
                 for j, pt in joints_3d_now.items():
                     prev = None if force_pose_snap else (joints_state[j] if np.isfinite(joints_state[j]).all() else None)
                     # Adaptive EMA: snap faster on large movements (jumps, lunges)
@@ -2416,6 +2540,21 @@ def main():
                 )
                 coach_metrics = coach_frame_kinematics(coach_frame)
                 coach_state = coach_counter.update(coach_metrics)
+                # On acquisition release (set abandoned), reset the leg-prior
+                # accumulator and clear the locked priors so the next athlete /
+                # next set re-learns from scratch instead of inheriting a stale
+                # length.
+                _acquired_now = bool(getattr(coach_state, "acquired", False))
+                if (
+                    coach_leg_prior_acc is not None
+                    and coach_was_acquired
+                    and not _acquired_now
+                ):
+                    coach_leg_prior_acc.reset()
+                    coach_leg_priors = None
+                    coach_ankle_fallback_streak[15] = 0
+                    coach_ankle_fallback_streak[16] = 0
+                coach_was_acquired = _acquired_now
             timer.stop("coach")
 
             timer.start("udp")
