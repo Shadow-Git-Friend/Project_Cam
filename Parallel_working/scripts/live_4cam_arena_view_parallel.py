@@ -1636,11 +1636,13 @@ def main():
     coach_render_overlay = None
     coach_roi_cls = None
     coach_keypoint_stabilizer = None
+    coach_pushup_floor_anchor = None
     if args.coach_overlay:
         ensure_project_src_on_path()
         from project_cam.assessment.kinematics import frame_kinematics as _coach_frame_kinematics  # noqa: E402
         from project_cam.assessment.live_trainer.coach_overlay import (  # noqa: E402
             OverlayKeypointStabilizer as _CoachKeypointStabilizer,
+            PushupFloorAnchor as _PushupFloorAnchor,
             StableRoi as _CoachStableRoi,
             crop_frame_to_roi as _coach_crop_frame_to_roi,
             repair_overlay_keypoints as _coach_repair_overlay_keypoints,
@@ -1659,6 +1661,11 @@ def main():
         coach_render_overlay = _coach_render_overlay
         coach_roi_cls = _CoachStableRoi
         coach_keypoint_stabilizer = _CoachKeypointStabilizer()
+        # Push-up floor anchor: gates ankles into the floor guide only after
+        # they have passed leg-chain validation for a sustained streak. Left
+        # None for squats so the squat floor path is bit-identical.
+        if args.coach_exercise == "push_up":
+            coach_pushup_floor_anchor = _PushupFloorAnchor()
         print(f"[INFO] Coach overlay enabled for {args.coach_exercise}")
 
     # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
@@ -2697,6 +2704,7 @@ def main():
                         overlay_kpts,
                         overlay_scores,
                         projected_floor=zone_poly,
+                        pushup_floor_anchor=coach_pushup_floor_anchor,
                     )
                     cv2.putText(
                         coach_canvas,
