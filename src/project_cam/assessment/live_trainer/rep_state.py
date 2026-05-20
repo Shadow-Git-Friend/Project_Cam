@@ -26,8 +26,22 @@ _TRUNK_CUE = "Trunk bent - keep body straight"
 _ACQUIRE_PUSHUP_CUE = "Get into push-up position"
 
 # The trunk-alignment cue runs through the ankles; only trust it when both
-# ankles were triangulated from at least this many cameras.
+# ankles were triangulated from at least this many cameras for at least the
+# streak length below. A single-frame fluke of multi-cam ankle geometry must
+# not be enough to raise a form cue on a straight-trunk push-up.
 _TRUNK_CUE_MIN_ANKLE_CAMS = 2
+_TRUNK_CUE_ANKLE_STREAK_FRAMES = 5
+
+# Push-up elbow-angle velocity clamp. Per-frame changes above this magnitude
+# in the averaged left/right elbow signal are treated as occlusion / mislabel
+# spikes and coasted on the prior value. A jump that *persists* across the
+# sustained-streak length below is accepted as real fast motion. Anatomical
+# elbow angular velocity in a child's push-up rarely exceeds ~500 deg/s; at
+# 15 FPS that is ~33 deg/frame. 60 deg/frame leaves comfortable headroom for
+# real motion while still rejecting single-frame teleports.
+_PUSHUP_SIGNAL_MAX_DELTA_DEG_PER_FRAME = 60.0
+_PUSHUP_SIGNAL_SUSTAINED_STREAK = 2
+
 _WAITING_PHASE = "WAITING"
 
 # Frames a rep verdict stays on screen before the coaching line clears
@@ -88,6 +102,13 @@ class RepCounter:
         self._cycle_frames = 0          # tracked frames in the current cycle
         self._acquire_frames = 0        # consecutive clean-plank frames seen
         self._release_frames = 0        # consecutive non-plank frames seen
+        # Temporal gates for push-up tracking quality. The trunk cue needs
+        # several consecutive multi-cam ankle frames before it can fire; the
+        # elbow signal rejects single-frame teleports above an anatomical
+        # velocity threshold. Both reset when a set is abandoned.
+        self._trunk_ankle_streak = 0
+        self._prev_signal_raw: float | None = None
+        self._signal_anomaly_streak = 0
         if config.exercise == "push_up":
             # Push-ups start un-acquired: nothing is counted until the athlete
             # is verified to be in a plank for several consecutive frames.
@@ -134,7 +155,8 @@ class RepCounter:
                 return self.state
             self.state.acquired = True
 
-        angle = self._smooth(float(raw))
+        raw_signal = self._clamp_pushup_signal_velocity(float(raw))
+        angle = self._smooth(raw_signal)
         pelvis_z = _pelvis_z(metrics)
         form_cue = self._form_cue(metrics)
         self.state.current_angle = angle
@@ -186,10 +208,14 @@ class RepCounter:
 
     def _form_cue(self, metrics: dict[str, Any]) -> str:
         if self.config.exercise == "push_up":
-            if not self._trunk_cue_reliable(metrics):
-                # trunk_to_leg runs through the ankles; with the feet weakly
-                # tracked the angle is noise, so the cue is suppressed rather
-                # than fired falsely on a straight torso.
+            # Advance the ankle-reliability streak every push-up frame so a
+            # single fluky ankle measurement cannot satisfy the trunk gate.
+            self._update_trunk_ankle_streak(metrics)
+            if not self._trunk_cue_reliable():
+                # trunk_to_leg runs through the ankles; until they have been
+                # reliably tracked for a sustained streak the angle is noise,
+                # so the cue is suppressed rather than fired falsely on a
+                # straight torso.
                 return ""
             trunk_angle = _mean_metric(metrics.get("angles_deg") or {}, "trunk_to_leg")
             if trunk_angle is not None:
@@ -320,13 +346,16 @@ class RepCounter:
             and _as_float(angles.get("right_elbow")) is not None
         )
 
-    def _trunk_cue_reliable(self, metrics: dict[str, Any]) -> bool:
-        """Whether the trunk-alignment cue can be trusted this frame.
+    def _update_trunk_ankle_streak(self, metrics: dict[str, Any]) -> None:
+        """Advance or reset the ankle-reliability streak for this frame."""
+        if self._frame_ankles_reliable(metrics):
+            self._trunk_ankle_streak += 1
+        else:
+            self._trunk_ankle_streak = 0
 
-        The cue is derived from the shoulder-hip-ankle angle, so it is only
-        meaningful when both ankles were triangulated from enough cameras. A
-        foot pinned to background clutter must not raise a form cue.
-        """
+    @staticmethod
+    def _frame_ankles_reliable(metrics: dict[str, Any]) -> bool:
+        """True only when both ankles cleared the per-frame camera-count bar."""
         cams = (metrics.get("quality") or {}).get("joint_cams") or []
         for ankle_idx in (15, 16):  # left_ankle, right_ankle
             if ankle_idx >= len(cams):
@@ -337,6 +366,44 @@ class RepCounter:
             except (TypeError, ValueError):
                 return False
         return True
+
+    def _trunk_cue_reliable(self) -> bool:
+        """Whether the trunk-alignment cue can be trusted this frame.
+
+        The cue is derived from the shoulder-hip-ankle angle, so it is only
+        meaningful when both ankles have been triangulated from enough cameras
+        for a sustained streak. A foot pinned to background clutter for a
+        single frame must not raise a form cue.
+        """
+        return self._trunk_ankle_streak >= _TRUNK_CUE_ANKLE_STREAK_FRAMES
+
+    def _clamp_pushup_signal_velocity(self, raw: float) -> float:
+        """Reject single-frame teleports in the push-up signal angle.
+
+        Per-frame deltas above ``_PUSHUP_SIGNAL_MAX_DELTA_DEG_PER_FRAME`` are
+        treated as occlusion / mislabel spikes and coasted on the prior raw
+        value, so the state machine does not advance or close a cycle from a
+        one-frame elbow jump near a phase transition. A jump that *persists*
+        across ``_PUSHUP_SIGNAL_SUSTAINED_STREAK`` consecutive frames is
+        accepted as real fast motion.
+        """
+        if self._prev_signal_raw is None:
+            self._prev_signal_raw = raw
+            self._signal_anomaly_streak = 0
+            return raw
+        delta = abs(raw - self._prev_signal_raw)
+        if delta <= _PUSHUP_SIGNAL_MAX_DELTA_DEG_PER_FRAME:
+            self._prev_signal_raw = raw
+            self._signal_anomaly_streak = 0
+            return raw
+        self._signal_anomaly_streak += 1
+        if self._signal_anomaly_streak >= _PUSHUP_SIGNAL_SUSTAINED_STREAK:
+            # Sustained jump -> the spike turned out to be real fast motion.
+            self._prev_signal_raw = raw
+            self._signal_anomaly_streak = 0
+            return raw
+        # Coast on the prior value: do not let the spike enter the EMA.
+        return self._prev_signal_raw
 
     def _signal_stable(self, metrics: dict[str, Any]) -> bool:
         """Reject frames where the two signal-joint sides disagree wildly.
@@ -380,6 +447,11 @@ class RepCounter:
         self._top_pelvis_z = None
         self._cycle_outcome = None
         self._cue_hold = 0
+        # Reset the per-set temporal gates: a brand-new acquisition must
+        # re-prove ankle reliability and re-seed the elbow velocity history.
+        self._trunk_ankle_streak = 0
+        self._prev_signal_raw = None
+        self._signal_anomaly_streak = 0
 
     def _depth_pct(self, angle: float) -> float:
         span = self.config.top_angle_deg - self.config.bottom_angle_deg

@@ -181,6 +181,133 @@ class RepCounterPushUpTests(unittest.TestCase):
         self.assertEqual(counter.state.rep_count, 1)
 
 
+def _metrics_with_ankle_cams(joints, ankle_cams):
+    """Build kinematics for push-up tests with explicit ankle camera counts."""
+    from project_cam.assessment.kinematics import frame_kinematics
+
+    conf = [0.95 if p is not None else 0.0 for p in joints]
+    cams = [3 if p is not None else 0 for p in joints]
+    cams[15] = int(ankle_cams)
+    cams[16] = int(ankle_cams)
+    return frame_kinematics({"joints": joints, "joint_conf": conf, "joint_cams": cams})
+
+
+class RepCounterTrunkCueAnkleStreakTests(unittest.TestCase):
+    """A single fluky frame of multi-cam ankle tracking must not be enough to
+    let the trunk cue fire -- the cue is anchored on the shoulder-hip-ankle
+    triangle, so ankle geometry has to be reliable over several frames before
+    we trust the resulting trunk angle.
+    """
+
+    def test_trunk_cue_blocked_until_ankle_streak_satisfied(self):
+        counter = _make("push_up")
+        # Acquire the set with ankles weakly tracked. The acquisition gate
+        # ignores ankles, so the set still acquires; the trunk streak starts
+        # at 0 because every acquisition frame has ankle_cams=1.
+        for elbow in _PUSHUP_REP[:4]:
+            counter.update(_metrics_with_ankle_cams(
+                _pushup_joints(elbow, hip_drop_mm=200.0), ankle_cams=1))
+        self.assertTrue(counter.state.acquired)
+
+        # Four good-ankle frames -> streak builds to 4, still below the
+        # required threshold of 5. Trunk cue must remain suppressed even
+        # though the trunk is visibly bent.
+        for elbow in _PUSHUP_REP[4:8]:
+            counter.update(_metrics_with_ankle_cams(
+                _pushup_joints(elbow, hip_drop_mm=200.0), ankle_cams=3))
+        self.assertNotIn("trunk", counter.state.cue.lower())
+
+    def test_trunk_cue_fires_once_ankle_streak_satisfied(self):
+        counter = _make("push_up")
+        # Acquire with weak ankles so the streak starts at zero.
+        for elbow in _PUSHUP_REP[:4]:
+            counter.update(_metrics_with_ankle_cams(
+                _pushup_joints(elbow, hip_drop_mm=200.0), ankle_cams=1))
+        self.assertTrue(counter.state.acquired)
+
+        # Five+ good-ankle frames on a bent-trunk plank -> streak satisfied,
+        # trunk cue may now fire.
+        for elbow in _PUSHUP_REP[4:]:
+            counter.update(_metrics_with_ankle_cams(
+                _pushup_joints(elbow, hip_drop_mm=200.0), ankle_cams=3))
+        self.assertIn("trunk", counter.state.cue.lower())
+
+    def test_trunk_cue_blocked_when_ankle_cams_flicker(self):
+        """A streak that resets on every other frame must never satisfy the
+        ankle gate, even across many push-up frames."""
+        counter = _make("push_up")
+        for elbow in _PUSHUP_REP[:4]:
+            counter.update(_metrics_with_ankle_cams(
+                _pushup_joints(elbow, hip_drop_mm=200.0), ankle_cams=3))
+        self.assertTrue(counter.state.acquired)
+
+        # Repeated bent-trunk frames with ankles flickering between cams=1 and
+        # cams=3. The streak never reaches the threshold, so the cue stays off.
+        for idx, elbow in enumerate(_PUSHUP_REP[4:] * 3):
+            cams = 3 if idx % 2 == 0 else 1
+            counter.update(_metrics_with_ankle_cams(
+                _pushup_joints(elbow, hip_drop_mm=200.0), ankle_cams=cams))
+        self.assertNotIn("trunk", counter.state.cue.lower())
+
+
+class RepCounterElbowVelocityClampTests(unittest.TestCase):
+    """An impossible per-frame elbow-angle jump (occlusion / mislabel near a
+    phase transition) must not be allowed to advance or close the rep cycle.
+    The clamp rejects the spike and coasts on the prior value; a *sustained*
+    jump across multiple consecutive frames is accepted as real fast motion."""
+
+    def test_single_frame_elbow_spike_does_not_open_a_cycle(self):
+        counter = _make("push_up")
+        # Settle a stable plank, locked-out at the top.
+        for _ in range(6):
+            counter.update(_metrics(_pushup_joints(170)))
+        self.assertTrue(counter.state.acquired)
+        self.assertEqual(counter.state.status, "UP")
+
+        # One-frame spike to elbow=30 (delta ~140 deg/frame, anatomically
+        # impossible at 15 FPS). Without the clamp the EMA would drop
+        # current_angle below the descent gate and flip status to DOWN.
+        counter.update(_metrics(_pushup_joints(30)))
+
+        self.assertEqual(counter.state.status, "UP")
+        self.assertGreater(counter.state.current_angle, 150.0)
+
+    def test_single_frame_elbow_spike_does_not_close_a_cycle(self):
+        counter = _make("push_up")
+        # Acquire and descend to the bottom of a push-up.
+        for _ in range(6):
+            counter.update(_metrics(_pushup_joints(170)))
+        for elbow in (158, 140, 122, 105, 92, 88):
+            counter.update(_metrics(_pushup_joints(elbow)))
+        self.assertEqual(counter.state.status, "DOWN")
+        rep_count_before = counter.state.rep_count
+
+        # One-frame spike up to elbow=180 (delta ~92 deg/frame). The clamp
+        # must reject the spike so the cycle is not falsely closed.
+        counter.update(_metrics(_pushup_joints(180)))
+
+        self.assertEqual(counter.state.status, "DOWN")
+        self.assertEqual(counter.state.rep_count, rep_count_before)
+
+    def test_sustained_elbow_change_is_accepted_after_streak(self):
+        counter = _make("push_up")
+        for _ in range(6):
+            counter.update(_metrics(_pushup_joints(170)))
+        # Sustained drop to 80 across multiple frames: the clamp coasts the
+        # first anomaly frame then accepts the new value once it persists.
+        for _ in range(4):
+            counter.update(_metrics(_pushup_joints(80)))
+        self.assertLess(counter.state.current_angle, 120.0)
+
+    def test_normal_pushups_still_count_with_velocity_clamp(self):
+        counter = _make("push_up")
+        for _ in range(5):
+            for elbow in _PUSHUP_REP:
+                counter.update(_metrics(_pushup_joints(elbow)))
+        self.assertEqual(counter.state.rep_count, 5)
+        self.assertEqual(counter.state.incomplete_count, 0)
+
+
 class RepCounterTrackingTests(unittest.TestCase):
     def test_missing_leg_joints_show_low_tracking_no_false_reps(self):
         counter = _make("squat")

@@ -427,5 +427,207 @@ class OverlayKeypointStabilizerTests(unittest.TestCase):
         self.assertTrue(np.allclose(out_kpts[13], [800.0, 600.0]))
 
 
+class FloorAnchorIdsTests(unittest.TestCase):
+    """A push-up floor guide must default to the wrists (the actual hand-floor
+    contacts); ankles are advisory and only joined in after a temporal-validity
+    gate. Squat behaviour is unchanged."""
+
+    def test_pushup_floor_defaults_to_wrists_only(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            compute_floor_anchor_ids,
+        )
+
+        kpts, scores = _pose_2d()
+        ids = compute_floor_anchor_ids("push_up", kpts, scores, allow_ankles=False)
+        self.assertEqual(sorted(ids), [9, 10])
+
+    def test_pushup_floor_adds_ankles_only_when_explicitly_allowed(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            compute_floor_anchor_ids,
+        )
+
+        kpts, scores = _pose_2d()
+        ids = compute_floor_anchor_ids("push_up", kpts, scores, allow_ankles=True)
+        self.assertEqual(sorted(ids), [9, 10, 15, 16])
+
+    def test_pushup_floor_drops_ankles_that_fail_validation(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            compute_floor_anchor_ids,
+        )
+
+        kpts, scores = _pose_2d()
+        scores[15] = 0.0  # validate_leg_chain zeroed this ankle
+        ids = compute_floor_anchor_ids("push_up", kpts, scores, allow_ankles=True)
+        # The remaining valid ankle (16) is still added; the dropped one isn't.
+        self.assertEqual(sorted(ids), [9, 10, 16])
+
+    def test_squat_floor_uses_ankles_regardless_of_flag(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            compute_floor_anchor_ids,
+        )
+
+        kpts, scores = _pose_2d()
+        ids_default = compute_floor_anchor_ids("squat", kpts, scores, allow_ankles=False)
+        ids_allow = compute_floor_anchor_ids("squat", kpts, scores, allow_ankles=True)
+        self.assertEqual(sorted(ids_default), [15, 16])
+        self.assertEqual(sorted(ids_allow), [15, 16])
+
+
+class PushupFloorAnchorTests(unittest.TestCase):
+    """Ankle floor anchoring needs a sustained streak of valid ankles, not a
+    single fluke frame."""
+
+    def test_anchor_blocks_ankles_until_streak_reached(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            PushupFloorAnchor,
+        )
+
+        anchor = PushupFloorAnchor(required_streak=5)
+        kpts, scores = _pose_2d()
+        for _ in range(4):
+            self.assertFalse(anchor.update(kpts, scores))
+        self.assertTrue(anchor.update(kpts, scores))
+
+    def test_anchor_resets_on_invalid_frame(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            PushupFloorAnchor,
+        )
+
+        anchor = PushupFloorAnchor(required_streak=5)
+        kpts, scores = _pose_2d()
+        for _ in range(6):
+            anchor.update(kpts, scores)
+        self.assertTrue(anchor.allow_ankles)
+
+        bad_kpts, bad_scores = _pose_2d()
+        bad_scores[15] = 0.0  # one ankle invalidated by leg-chain validator
+        self.assertFalse(anchor.update(bad_kpts, bad_scores))
+        self.assertFalse(anchor.allow_ankles)
+
+    def test_anchor_is_only_satisfied_when_both_ankles_are_valid(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            PushupFloorAnchor,
+        )
+
+        anchor = PushupFloorAnchor(required_streak=3)
+        kpts, scores = _pose_2d()
+        only_left, only_left_scores = _pose_2d()
+        only_left_scores[16] = 0.0  # right ankle missing for several frames
+        for _ in range(5):
+            self.assertFalse(anchor.update(only_left, only_left_scores))
+        # Now both ankles valid -> streak builds from scratch.
+        self.assertFalse(anchor.update(kpts, scores))
+        self.assertFalse(anchor.update(kpts, scores))
+        self.assertTrue(anchor.update(kpts, scores))
+
+
+class RenderOverlayFloorAnchorTests(unittest.TestCase):
+    """``render_coach_overlay`` must default the push-up floor to wrists when
+    no anchor is supplied, and forward an anchor through to the floor guide."""
+
+    def test_pushup_floor_y_is_pulled_to_wrists_without_anchor(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            render_coach_overlay,
+        )
+        from project_cam.assessment.live_trainer.rep_state import RepState
+
+        frame = np.full((720, 1280, 3), 38, dtype=np.uint8)
+        kpts, scores = _pose_2d(center_x=640.0, center_y=340.0)
+        state = RepState(rep_count=0, status="DOWN", phase="BOTTOM",
+                         current_angle=96.0, depth_pct=82.0,
+                         tracking_quality=0.9, tracking_ok=True,
+                         acquired=True, cue="")
+
+        canvas = render_coach_overlay(frame, "push_up", state, {}, kpts, scores)
+
+        floor_y = _floor_line_y(canvas, frame)
+        wrist_y = int(kpts[9, 1])
+        ankle_y = int(kpts[15, 1])
+        self.assertIsNotNone(floor_y)
+        # The floor line must sit on the wrists' y-level (within a few px for
+        # rounding), not pulled down toward the ankles.
+        self.assertLess(abs(floor_y - wrist_y), 8)
+        self.assertGreater(abs(floor_y - ankle_y), 80)
+
+    def test_pushup_floor_includes_ankles_when_anchor_streak_satisfied(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            PushupFloorAnchor,
+            render_coach_overlay,
+        )
+        from project_cam.assessment.live_trainer.rep_state import RepState
+
+        frame = np.full((720, 1280, 3), 38, dtype=np.uint8)
+        kpts, scores = _pose_2d(center_x=640.0, center_y=340.0)
+        state = RepState(rep_count=0, status="DOWN", phase="BOTTOM",
+                         current_angle=96.0, depth_pct=82.0,
+                         tracking_quality=0.9, tracking_ok=True,
+                         acquired=True, cue="")
+        anchor = PushupFloorAnchor(required_streak=1)
+        anchor.update(kpts, scores)  # immediately satisfies the streak
+
+        canvas = render_coach_overlay(
+            frame, "push_up", state, {}, kpts, scores,
+            pushup_floor_anchor=anchor,
+        )
+
+        floor_y = _floor_line_y(canvas, frame)
+        wrist_y = int(kpts[9, 1])
+        ankle_y = int(kpts[15, 1])
+        self.assertIsNotNone(floor_y)
+        # With both wrists and ankles contributing, the median y sits between
+        # them -- specifically *below* both wrists.
+        self.assertGreater(floor_y, wrist_y + 10)
+        self.assertLess(floor_y, ankle_y - 10)
+
+    def test_squat_floor_unchanged_when_anchor_is_present(self):
+        from project_cam.assessment.live_trainer.coach_overlay import (
+            PushupFloorAnchor,
+            render_coach_overlay,
+        )
+        from project_cam.assessment.live_trainer.rep_state import RepState
+
+        frame = np.full((720, 1280, 3), 38, dtype=np.uint8)
+        kpts, scores = _pose_2d(center_x=640.0, center_y=340.0)
+        state = RepState(rep_count=0, status="DOWN", phase="BOTTOM",
+                         current_angle=96.0, depth_pct=82.0,
+                         tracking_quality=0.9, tracking_ok=True,
+                         acquired=True, cue="")
+        anchor = PushupFloorAnchor(required_streak=1)
+        anchor.update(kpts, scores)
+
+        canvas = render_coach_overlay(
+            frame, "squat", state, {}, kpts, scores,
+            pushup_floor_anchor=anchor,  # must be ignored for squats
+        )
+
+        floor_y = _floor_line_y(canvas, frame)
+        ankle_y = int(kpts[15, 1])
+        self.assertIsNotNone(floor_y)
+        self.assertLess(abs(floor_y - ankle_y), 8)
+
+
+def _floor_line_y(canvas: np.ndarray, original: np.ndarray) -> int | None:
+    """Locate the y-coordinate of the cyan floor line drawn by the overlay.
+
+    The floor guide is the only near-horizontal cyan band added by the
+    overlay; isolating pixels that match the floor-line color and were
+    not present in the input frame gives a robust y-locator without
+    re-implementing the drawing code in the test.
+    """
+    diff = np.any(canvas != original, axis=2)
+    # Floor-line BGR is (76, 210, 228); allow small tolerance.
+    floor_mask = (
+        (np.abs(canvas[..., 0].astype(np.int16) - 76) < 25)
+        & (np.abs(canvas[..., 1].astype(np.int16) - 210) < 25)
+        & (np.abs(canvas[..., 2].astype(np.int16) - 228) < 25)
+        & diff
+    )
+    rows = np.where(np.any(floor_mask, axis=1))[0]
+    if rows.size == 0:
+        return None
+    # The brightest band sits at the median y of the matched pixels.
+    return int(np.median(rows))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,13 @@ _LEG_FULL_MIN_RATIO = 0.60   # hip->ankle span when the knee was dropped
 _LEG_FULL_MAX_RATIO = 3.2
 _LEG_AXIS_MIN_COS = 0.5      # leg must extend within ~60 deg of the body axis
 
+# Push-up floor anchor. Wrists are the actual hand-floor contacts and are
+# anchored by default; ankles are only joined into the floor line after they
+# have been continuously valid (passed leg-chain validation) for several
+# consecutive frames, so a single-frame fluke cannot pull the floor line off
+# the hands.
+_PUSHUP_FLOOR_ANKLE_STREAK_FRAMES = 5
+
 _PHASE_COLOR = {
     "STANDING": _GREEN, "TOP": _GREEN,
     "DESCENDING": _AMBER, "LOWERING": _AMBER,
@@ -350,6 +357,75 @@ def _lower_body_quality(pose: tuple[Any, Any]) -> float:
     return float(np.clip(np.mean(vals), 0.0, 1.0))
 
 
+def compute_floor_anchor_ids(
+    exercise: str,
+    kpts: Any,
+    scores: Any,
+    allow_ankles: bool = False,
+) -> list[int]:
+    """Pick the joint indices the floor guide should ride on for ``exercise``.
+
+    Push-ups default to wrists (9, 10) -- the actual hand-floor contacts that
+    a coach sees on the mat. Ankles (15, 16) are advisory and are joined in
+    only when ``allow_ankles`` is True *and* each ankle currently passes the
+    overlay's own validity check (which folds in ``validate_leg_chain``).
+    Squats are unchanged: ankles only, since the wrists swing high overhead.
+    """
+    pts = _coerce_kpts(kpts)
+    scr = _coerce_scores(scores)
+    if exercise == "push_up":
+        ids = [idx for idx in (9, 10) if _valid_joint(pts, scr, idx)]
+        if allow_ankles:
+            ids.extend(idx for idx in (15, 16) if _valid_joint(pts, scr, idx))
+        return ids
+    return [idx for idx in (15, 16) if _valid_joint(pts, scr, idx)]
+
+
+class PushupFloorAnchor:
+    """Temporal validity gate for joining ankles into the push-up floor guide.
+
+    Wrists are the reliable hand-floor contact in a push-up. Ankles slip in
+    and out of multi-camera triangulation as the body folds over them in
+    oblique views; a one-frame fluke of "both ankles look valid" must not be
+    enough to start pulling the floor line up toward the feet. This class
+    tracks a streak of consecutive frames in which both ankles pass the
+    overlay's own ``_valid_joint`` check and only reports ``allow_ankles`` as
+    True once the streak has reached the required length.
+
+    Intended use: one instance per coach session, updated once per rendered
+    frame with the post-``validate_leg_chain`` keypoints/scores, then passed
+    into ``render_coach_overlay`` so the floor guide can decide whether to
+    include ankles this frame.
+    """
+
+    def __init__(self, required_streak: int = _PUSHUP_FLOOR_ANKLE_STREAK_FRAMES):
+        self.required_streak = max(1, int(required_streak))
+        self._streak = 0
+
+    @property
+    def streak(self) -> int:
+        return self._streak
+
+    @property
+    def allow_ankles(self) -> bool:
+        return self._streak >= self.required_streak
+
+    def update(self, kpts: Any, scores: Any) -> bool:
+        """Advance the streak for this frame and return ``allow_ankles``.
+
+        Both ankles must currently be valid (post-validation) for the streak
+        to increment; otherwise it resets to zero so an isolated good frame
+        cannot count toward the required length.
+        """
+        pts = _coerce_kpts(kpts)
+        scr = _coerce_scores(scores)
+        if _valid_joint(pts, scr, 15) and _valid_joint(pts, scr, 16):
+            self._streak += 1
+        else:
+            self._streak = 0
+        return self.allow_ankles
+
+
 class OverlayKeypointStabilizer:
     """Temporal smoother for the coach-overlay 2D keypoints.
 
@@ -459,8 +535,16 @@ def render_coach_overlay(
     kpts: Any,
     scores: Any,
     projected_floor: list[tuple[float, float]] | None = None,
+    pushup_floor_anchor: PushupFloorAnchor | None = None,
 ) -> np.ndarray:
-    """Draw live coach graphics over a camera frame."""
+    """Draw live coach graphics over a camera frame.
+
+    ``pushup_floor_anchor`` is an optional stateful gate (one instance per
+    session) that lets the push-up floor guide include the ankles only after
+    they have been continuously valid for several consecutive frames. When
+    omitted, the push-up floor stays anchored on the wrists -- the reliable
+    hand-floor contact.
+    """
     canvas = frame.copy()
     # Drop push-up leg joints that are untrustworthy so the skeleton, angle
     # labels and floor line all skip them rather than rendering garbage.
@@ -477,7 +561,10 @@ def render_coach_overlay(
         _draw_waiting(canvas, "WAITING FOR PUSH-UP POSITION")
         return canvas
 
-    _draw_floor_guides(canvas, exercise, pts, scr, projected_floor)
+    allow_ankles = False
+    if exercise == "push_up" and pushup_floor_anchor is not None:
+        allow_ankles = pushup_floor_anchor.update(pts, scr)
+    _draw_floor_guides(canvas, exercise, pts, scr, projected_floor, allow_ankles)
     _draw_skeleton(canvas, pts, scr, phase_color)
     for label in collect_angle_labels(exercise, metrics, pts, scr):
         _draw_label(canvas, label)
@@ -512,15 +599,13 @@ def _draw_floor_guides(
     pts: np.ndarray,
     scores: np.ndarray,
     projected_floor: list[tuple[float, float]] | None,
+    allow_ankles: bool = False,
 ) -> None:
     if projected_floor and len(projected_floor) >= 2:
         poly = np.asarray(projected_floor, dtype=np.int32).reshape(-1, 1, 2)
         cv2.polylines(canvas, [poly], isClosed=True, color=(70, 90, 96), thickness=2, lineType=cv2.LINE_AA)
 
-    if exercise == "push_up":
-        ground_ids = [idx for idx in (9, 10, 15, 16) if _valid_joint(pts, scores, idx)]
-    else:
-        ground_ids = [idx for idx in (15, 16) if _valid_joint(pts, scores, idx)]
+    ground_ids = compute_floor_anchor_ids(exercise, pts, scores, allow_ankles=allow_ankles)
     if not ground_ids:
         return
     y = int(np.median([pts[idx][1] for idx in ground_ids]))
