@@ -93,6 +93,7 @@ def frame_kinematics(frame: dict[str, Any]) -> dict[str, Any]:
         "centers": {
             "pelvis": pelvis_center.tolist() if pelvis_center is not None else None,
         },
+        "posture": posture_metrics(joints),
         "quality": {
             "valid_joint_count": valid_joint_count,
             "valid_joint_ratio": valid_joint_count / float(len(JOINT_NAMES)),
@@ -101,6 +102,26 @@ def frame_kinematics(frame: dict[str, Any]) -> dict[str, Any]:
             "has_camera_counts": any(int(v) > 0 for v in joint_cams[: len(JOINT_NAMES)]),
         },
     }
+
+
+def posture_metrics(joints: list[Any]) -> dict[str, Any]:
+    """Body-orientation measures used to gate live exercise acquisition.
+
+    ``torso_incline_deg`` is the inclination of the shoulder->hip line from
+    the horizontal plane, in [0, 90]: ~0 = horizontal (push-up / plank),
+    ~90 = vertical (standing / squat). None when the shoulders or hips are
+    not both visible.
+    """
+    shoulder_mid = midpoint(_joint(joints, "left_shoulder"), _joint(joints, "right_shoulder"))
+    hip_mid = midpoint(_joint(joints, "left_hip"), _joint(joints, "right_hip"))
+    torso_incline_deg = None
+    if shoulder_mid is not None and hip_mid is not None:
+        delta = hip_mid - shoulder_mid
+        horizontal = float(math.hypot(float(delta[0]), float(delta[1])))
+        vertical = abs(float(delta[2]))
+        if horizontal + vertical > 1e-6:
+            torso_incline_deg = float(math.degrees(math.atan2(vertical, horizontal)))
+    return {"torso_incline_deg": torso_incline_deg}
 
 
 def knee_line_deviation_ratio(joints: list[Any], side: str) -> float | None:

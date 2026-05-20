@@ -48,7 +48,6 @@ exercises:
       min_pelvis_travel_mm: 150
       enter_angle_deg: 90
       exit_angle_deg: 120
-      descent_angle_deg: 150
       min_rep_duration_s: 0.3
       max_rep_duration_s: 8.0
       max_missing_frame_ratio: 0.30
@@ -66,12 +65,25 @@ exercises:
       max_knee_line_deviation_ratio: 0.20
       max_knee_valgus_signed_ratio: 0.020
       bottom_knee_angle_max_deg: 115
+    live_trainer:
+      # Live rep counter (project_cam.assessment.live_trainer). Knee angle:
+      # standing ~165-175 deg, parallel squat ~95-105 deg. Thresholds act on
+      # the EMA-smoothed signal, whose range is a little compressed vs raw, so
+      # top_angle_deg sits below true standing. top MUST stay above descent.
+      descent_angle_deg: 138      # knee bends past this -> a descent is underway
+      bottom_angle_deg: 122       # knee at/below this -> counted as full depth
+      top_angle_deg: 150          # knee straightens past this -> rep cycle closes
+      min_rom_deg: 40             # min knee travel for a valid (deep enough) rep
+      noise_rom_deg: 18           # cycles smaller than this are ignored as jitter
+      smoothing_alpha: 0.6        # EMA on the knee-angle signal (lower = smoother)
+      min_pelvis_travel_mm: 150   # OR-path: this much pelvis drop also = full depth
+      min_cycle_frames: 5         # closed cycles shorter than this are noise, not reps
+      max_signal_asymmetry_deg: 45  # L/R knee gap above this -> frame held (keypoint swap)
 
   push_up:
     <<: *defaults
     description: "Bilateral push-up rep count and trunk-alignment screen."
     segmentation:
-      descent_angle_deg: 150
       enter_angle_deg: 100
       exit_angle_deg: 150
       min_rom_deg: 50
@@ -90,6 +102,26 @@ exercises:
       max_knee_valgus_signed_ratio: 0.020
       bottom_elbow_angle_max_deg: 100
       max_trunk_alignment_error_deg: 20
+    live_trainer:
+      # Live rep counter. Elbow angle: locked-out ~165-180 deg, deep
+      # push-up bottom ~85-100 deg. Thresholds act on the EMA-smoothed
+      # signal; top MUST stay above descent or the state machine ping-pongs.
+      descent_angle_deg: 138      # elbow bends past this -> lowering
+      bottom_angle_deg: 122       # elbow at/below this -> counted as full depth
+      top_angle_deg: 150          # elbow locks out past this -> rep cycle closes
+      min_rom_deg: 45             # min elbow travel for a valid rep
+      noise_rom_deg: 18           # cycles smaller than this are ignored as jitter
+      smoothing_alpha: 0.6        # EMA on the elbow-angle signal (lower = smoother)
+      min_cycle_frames: 5         # closed cycles shorter than this are noise, not reps
+      max_signal_asymmetry_deg: 45  # L/R elbow gap above this -> frame held (keypoint swap)
+      # Push-up acquisition gate: nothing is counted until the athlete is
+      # verified in a plank. The gate is debounced so a transient bend cannot
+      # start a set and a brief tracking dropout cannot drop one. It uses the
+      # shoulder->hip incline + both elbows only -- never the ankles, which are
+      # unreliable in an oblique side view.
+      max_posture_incline_deg: 35    # torso must be at least this horizontal (0=flat, 90=standing)
+      acquire_min_frames: 4          # consecutive clean-plank frames needed to acquire a set
+      release_min_frames: 8          # consecutive lost frames needed to release a set
 
 deferred_exercises:
   single_leg_squat:

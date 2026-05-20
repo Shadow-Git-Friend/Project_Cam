@@ -33,6 +33,7 @@ _PHASE_COLOR = {
     "DESCENDING": _AMBER, "LOWERING": _AMBER,
     "BOTTOM": _RED,
     "ASCENDING": _BLUE, "PUSHING UP": _BLUE,
+    "GET IN POSITION": _AMBER,
 }
 
 _PHASE_DESC = {
@@ -43,6 +44,7 @@ _PHASE_DESC = {
     "TOP": "Arms fully extended",
     "LOWERING": "Chest toward the floor",
     "PUSHING UP": "Driving the body up",
+    "GET IN POSITION": "Lower into a plank to begin",
 }
 
 # Ordered phase sequence per exercise, for the timeline strip.
@@ -51,11 +53,17 @@ _PHASE_ORDER = {
     "push_up": ["TOP", "LOWERING", "BOTTOM", "PUSHING UP"],
 }
 
-# COCO-17 skeleton edges (limbs + torso + head links).
+# COCO-17 body edges (limbs + torso box); the head is drawn as one circle.
 _SKELETON_EDGES = [
-    (5, 7), (7, 9), (6, 8), (8, 10), (5, 6), (5, 11), (6, 12),
-    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (0, 5), (0, 6),
+    (5, 7), (7, 9), (6, 8), (8, 10),          # arms
+    (11, 13), (13, 15), (12, 14), (14, 16),   # legs
+    (5, 6), (11, 12), (5, 11), (6, 12),       # torso
 ]
+_HEAD_JOINTS = (0, 1, 2, 3, 4)
+_BODY_JOINTS = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+# Fixed world span (mm) mapped across the skeleton panel -> constant scale,
+# so the figure never auto-zooms as the athlete's bounding box changes.
+_VIEW_SPAN_MM = 2400.0
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -64,21 +72,33 @@ def render_dashboard(
     exercise: str,
     state: RepState,
     joints: list[Any],
+    view: "SkeletonView | None" = None,
     width: int = 1180,
     height: int = 680,
 ) -> np.ndarray:
-    """Render the trainer dashboard as a BGR uint8 image."""
+    """Render the trainer dashboard as a BGR uint8 image.
+
+    ``view`` is a persistent SkeletonView that stabilises the skeleton's
+    scale and orientation; pass the same instance on every frame. When
+    omitted a throwaway one is used (fine for a single still render).
+    """
     canvas = np.full((height, width, 3), _BG, dtype=np.uint8)
+    if view is None:
+        view = SkeletonView()
     phases = _PHASE_ORDER.get(exercise, ["UP", "DESCENDING", "BOTTOM", "ASCENDING"])
     phase_color = _PHASE_COLOR.get(state.phase, _MUTE)
 
     # ===== left: skeleton stage with vertical depth gauge =====
     stage_x, stage_y, stage_w, stage_h = 20, 20, 620, height - 40
     _round_rect(canvas, stage_x, stage_y, stage_w, stage_h, 14, _STAGE)
-    _chip(canvas, stage_x + 16, stage_y + 16, "SKELETON VIEW", _MUTE)
+    # squats read best face-on (depth + knee tracking); push-ups side-on.
+    plane = "front" if exercise == "squat" else "side"
+    _chip(canvas, stage_x + 16, stage_y + 16,
+          f"SKELETON VIEW - {plane.upper()}", _MUTE)
     gauge_w = 26
     _draw_skeleton(canvas, stage_x + 16, stage_y + 52,
-                   stage_w - 48 - gauge_w, stage_h - 96, joints, phase_color)
+                   stage_w - 48 - gauge_w, stage_h - 96, joints, view, plane,
+                   phase_color)
     _depth_gauge(canvas, stage_x + stage_w - gauge_w - 16, stage_y + 52,
                  gauge_w, stage_h - 96, state.depth_pct, phase_color)
 
@@ -237,41 +257,154 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _draw_skeleton(canvas: np.ndarray, x0: int, y0: int, w: int, h: int,
-                   joints: list[Any], color) -> None:
-    # Project 3D joints to a 2D side view: horizontal = x_mm, vertical = z_mm.
-    pts: list[tuple[float, float] | None] = []
-    for j in joints:
-        if j is None or len(j) < 3:
-            pts.append(None)
-        else:
-            pts.append((float(j[0]), float(j[2])))
-    valid = [p for p in pts if p is not None]
-    if len(valid) < 2:
+                   joints: list[Any], view: "SkeletonView", plane: str,
+                   color) -> None:
+    proj = view.project(joints, plane)
+    if proj is None:
         msg = "WAITING FOR POSE"
         (tw, _), _ = cv2.getTextSize(msg, _FONT, 0.7, 2)
         cv2.putText(canvas, msg, (x0 + (w - tw) // 2, y0 + h // 2),
                     _FONT, 0.7, _MUTE, 2, cv2.LINE_AA)
         return
 
-    xs = [p[0] for p in valid]
-    zs = [p[1] for p in valid]
-    span_x = max(1.0, max(xs) - min(xs))
-    span_z = max(1.0, max(zs) - min(zs))
-    pad = 40
-    scale = min((w - 2 * pad) / span_x, (h - 2 * pad) / span_z)
-    off_x = x0 + (w - span_x * scale) / 2.0
-    off_y = y0 + (h - span_z * scale) / 2.0
+    pts = proj["points"]
+    center_u, center_v = proj["center"]
+    scale = min(w, h) / _VIEW_SPAN_MM   # fixed: figure never auto-zooms
+    cx = x0 + w // 2
+    cy = y0 + h // 2
 
-    def to_px(p):
-        px = int(off_x + (p[0] - min(xs)) * scale)
-        py = int(off_y + (max(zs) - p[1]) * scale)  # flip: z up -> y down
-        return px, py
+    def to_px(uv):
+        u, v = uv
+        return (int(cx + (u - center_u) * scale), int(cy - (v - center_v) * scale))
 
     screen = [to_px(p) if p is not None else None for p in pts]
+
+    # ground reference line at the lowest visible foot
+    feet = [pts[i] for i in (15, 16) if pts[i] is not None]
+    if feet:
+        floor_y = int(cy - (min(p[1] for p in feet) - center_v) * scale)
+        if y0 <= floor_y <= y0 + h:
+            cv2.line(canvas, (x0 + 14, floor_y), (x0 + w - 14, floor_y),
+                     _PANEL_HI, 2, cv2.LINE_AA)
+
+    # limbs + torso
     for a, b in _SKELETON_EDGES:
         if screen[a] is not None and screen[b] is not None:
-            cv2.line(canvas, screen[a], screen[b], color, 3, cv2.LINE_AA)
-    for s in screen:
+            cv2.line(canvas, screen[a], screen[b], color, 5, cv2.LINE_AA)
+
+    # body joint markers
+    for i in _BODY_JOINTS:
+        s = screen[i]
         if s is not None:
             cv2.circle(canvas, s, 6, _BG, -1, cv2.LINE_AA)
             cv2.circle(canvas, s, 6, _TEXT, 2, cv2.LINE_AA)
+
+    # head: one circle + neck line, instead of scattered eye/ear dots
+    head = [pts[i] for i in _HEAD_JOINTS if pts[i] is not None]
+    shoulders = [pts[i] for i in (5, 6) if pts[i] is not None]
+    if head:
+        head_uv = (sum(p[0] for p in head) / len(head),
+                   sum(p[1] for p in head) / len(head))
+        head_px = to_px(head_uv)
+        head_r = max(9, int(115.0 * scale))
+        if shoulders:
+            neck_uv = (sum(p[0] for p in shoulders) / len(shoulders),
+                       sum(p[1] for p in shoulders) / len(shoulders))
+            cv2.line(canvas, to_px(neck_uv), head_px, color, 5, cv2.LINE_AA)
+        cv2.circle(canvas, head_px, head_r, color, -1, cv2.LINE_AA)
+        cv2.circle(canvas, head_px, head_r, _TEXT, 2, cv2.LINE_AA)
+
+
+class SkeletonView:
+    """Stateful 3D->2D projector for the skeleton panel.
+
+    Projects COCO-17 world joints onto a body-relative vertical plane and
+    smooths the orientation and centering across frames, so the figure keeps
+    a constant size and does not flip or swing with the arena axes as the
+    athlete moves. ``plane="front"`` views the athlete face-on (limbs spread,
+    knee tracking visible); ``plane="side"`` views them in profile. Create
+    one per session and reuse it.
+    """
+
+    _CENTER_ALPHA = 0.18
+    _FORWARD_ALPHA = 0.10
+
+    def __init__(self) -> None:
+        self._center: np.ndarray | None = None
+        self._forward: np.ndarray | None = None
+
+    def project(self, joints: list[Any], plane: str = "side") -> dict[str, Any] | None:
+        """Return {'points': [(u, v) | None], 'center': (u, v)} or None.
+
+        ``u`` is the horizontal screen axis (the athlete's lateral axis for
+        ``plane="front"``, their forward axis for ``plane="side"``); ``v`` is
+        world height.
+        """
+        pts: list[np.ndarray | None] = []
+        for j in joints:
+            if j is None:
+                pts.append(None)
+                continue
+            try:
+                p = np.asarray(j, dtype=float).reshape(-1)[:3]
+            except (TypeError, ValueError):
+                pts.append(None)
+                continue
+            if p.shape[0] < 3 or not np.isfinite(p).all():
+                pts.append(None)
+            else:
+                pts.append(p)
+
+        valid = [p for p in pts if p is not None]
+        if len(valid) < 2:
+            return None
+
+        centroid = np.mean(valid, axis=0)
+        if self._center is None:
+            self._center = centroid
+        else:
+            self._center = ((1.0 - self._CENTER_ALPHA) * self._center
+                            + self._CENTER_ALPHA * centroid)
+
+        forward = self._update_forward(pts)
+        if plane == "front":
+            axis = np.array([forward[1], -forward[0]])  # lateral = forward rot -90
+        else:
+            axis = forward
+        center_u = float(self._center[:2] @ axis)
+        center_v = float(self._center[2])
+
+        flat: list[tuple[float, float] | None] = []
+        for p in pts:
+            if p is None:
+                flat.append(None)
+            else:
+                flat.append((float(p[:2] @ axis), float(p[2])))
+        return {"points": flat, "center": (center_u, center_v)}
+
+    def _update_forward(self, pts: list[np.ndarray | None]) -> np.ndarray:
+        lateral = None
+        for left, right in ((11, 12), (5, 6)):   # hips first, shoulders fallback
+            a, b = pts[left], pts[right]
+            if a is not None and b is not None:
+                d = b[:2] - a[:2]
+                norm = float(np.hypot(d[0], d[1]))
+                if norm > 1e-6:
+                    lateral = d / norm
+                    break
+        if lateral is None:
+            return self._forward if self._forward is not None else np.array([1.0, 0.0])
+
+        # forward = lateral rotated 90 deg in the ground plane -> sagittal view
+        fwd = np.array([-lateral[1], lateral[0]])
+        if self._forward is not None and float(fwd @ self._forward) < 0.0:
+            fwd = -fwd   # keep the facing direction continuous between frames
+        if self._forward is None:
+            self._forward = fwd
+        else:
+            blended = ((1.0 - self._FORWARD_ALPHA) * self._forward
+                       + self._FORWARD_ALPHA * fwd)
+            norm = float(np.hypot(blended[0], blended[1]))
+            if norm > 1e-6:
+                self._forward = blended / norm
+        return self._forward

@@ -68,6 +68,17 @@ BALL_FLIGHT_AIRBORNE = "AIRBORNE"
 BALL_FLIGHT_FLOOR = "FLOOR"
 BALLISTIC_VZ_EMA_ALPHA = 0.35
 BALLISTIC_MAX_VZ_MM_S = 12000.0
+# Frames the push-up coach keeps its camera locked after acquisition is lost.
+# A short grace window (~2 s at 15 FPS) rides out a posture-gate flicker so a
+# brief loss cannot trigger a disorienting mid-set camera switch.
+COACH_CAMERA_LOCK_HOLD_FRAMES = 30
+
+
+def ensure_project_src_on_path():
+    src_dir = Path(__file__).resolve().parent.parent.parent / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    return src_dir
 
 # --------------- BLM Demo: ballistic math + correction ---------------
 
@@ -166,7 +177,7 @@ class StageTimer:
     def report(self, frame_idx, every):
         if every <= 0 or frame_idx == 0 or frame_idx % every != 0:
             return None
-        order = ["capture", "ball", "pose", "triang", "udp", "viz3d", "mosaic", "total"]
+        order = ["capture", "ball", "pose", "triang", "coach", "udp", "viz3d", "mosaic", "total"]
         parts = []
         payload = {"frame": int(frame_idx)}
         for stage in order:
@@ -343,6 +354,88 @@ def project_world_to_pixel(point_w, R, tvec, K, D):
     pt = np.asarray(point_w, dtype=np.float64).reshape(1, 1, 3)
     uv, _ = cv2.projectPoints(pt, rvec, tvec, K, D)
     return uv.reshape(2)
+
+
+def parse_coach_zone_mm(value):
+    if not value:
+        return None
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    if len(parts) != 4:
+        raise RuntimeError("--coach-zone-mm must be x_min,y_min,x_max,y_max")
+    try:
+        x1, y1, x2, y2 = [float(p) for p in parts]
+    except ValueError as exc:
+        raise RuntimeError("--coach-zone-mm values must be numbers") from exc
+    return np.array(
+        [[x1, y1, 0.0], [x2, y1, 0.0], [x2, y2, 0.0], [x1, y2, 0.0]],
+        dtype=np.float64,
+    )
+
+
+def joints_array_to_frame(joints, conf, cams, frame_idx, fps):
+    out = []
+    arr = np.asarray(joints, dtype=np.float64)
+    for idx in range(17):
+        pt = arr[idx] if idx < len(arr) else np.full((3,), np.nan)
+        if np.isfinite(pt).all():
+            out.append([float(pt[0]), float(pt[1]), float(pt[2])])
+        else:
+            out.append(None)
+    return {
+        "frame_index": int(frame_idx),
+        "time_s": float(frame_idx) / max(1.0, float(fps)),
+        "joints": out,
+        "joint_conf": [float(v) for v in np.asarray(conf).reshape(-1)[:17]],
+        "joint_cams": [int(v) for v in np.asarray(cams).reshape(-1)[:17]],
+    }
+
+
+def project_zone_to_overlay(zone_mm, cam, extr, intr, roi, output_size):
+    if zone_mm is None or cam not in extr or cam not in intr:
+        return None
+    out_w, out_h = output_size
+    sx = float(out_w) / max(1, roi.width)
+    sy = float(out_h) / max(1, roi.height)
+    projected = []
+    for pt in zone_mm:
+        try:
+            uv = project_world_to_pixel(pt, extr[cam]["R"], extr[cam]["tvec"], intr[cam]["K"], intr[cam]["D"])
+        except Exception:
+            return None
+        if not np.isfinite(uv).all():
+            return None
+        projected.append(((float(uv[0]) - roi.x1) * sx, (float(uv[1]) - roi.y1) * sy))
+    return projected
+
+
+def project_joints_to_overlay(joints, conf, cams, cam, extr, intr, roi, output_size, min_conf=0.35, min_cams=2):
+    kpts = np.full((17, 2), np.nan, dtype=np.float32)
+    scores = np.zeros((17,), dtype=np.float32)
+    if cam not in extr or cam not in intr:
+        return kpts, scores
+    out_w, out_h = output_size
+    sx = float(out_w) / max(1, roi.width)
+    sy = float(out_h) / max(1, roi.height)
+    joints_arr = np.asarray(joints, dtype=np.float64)
+    conf_arr = np.asarray(conf, dtype=np.float64).reshape(-1)
+    cams_arr = np.asarray(cams, dtype=np.int32).reshape(-1)
+    for idx in range(min(17, len(joints_arr))):
+        if idx >= len(conf_arr) or idx >= len(cams_arr):
+            continue
+        if conf_arr[idx] < min_conf or cams_arr[idx] < min_cams:
+            continue
+        pt = joints_arr[idx]
+        if not np.isfinite(pt).all():
+            continue
+        try:
+            uv = project_world_to_pixel(pt, extr[cam]["R"], extr[cam]["tvec"], intr[cam]["K"], intr[cam]["D"])
+        except Exception:
+            continue
+        if not np.isfinite(uv).all():
+            continue
+        kpts[idx] = [(float(uv[0]) - roi.x1) * sx, (float(uv[1]) - roi.y1) * sy]
+        scores[idx] = float(np.clip(conf_arr[idx], 0.0, 1.0))
+    return kpts, scores
 
 
 def ballistic_predict_z(z0, vz, dt_s, g, floor):
@@ -1327,6 +1420,12 @@ def main():
     ap.add_argument("--record-video", default="", help="If set, write 3D arena view to this .mp4 path.")
     ap.add_argument("--record-fps", type=float, default=15.0, help="FPS for the recorded video (usually matches capture rate / viz_every).")
     ap.add_argument("--record-mosaic", default="", help="If set, also write the 4-cam 2D mosaic to this .mp4 path.")
+    ap.add_argument("--coach-overlay", action=argparse.BooleanOptionalAction, default=False,
+                    help="Show the low-lag in-process live coach overlay on the freshest camera ROI.")
+    ap.add_argument("--coach-exercise", choices=["squat", "push_up"], default="squat",
+                    help="Exercise logic and overlay labels for --coach-overlay.")
+    ap.add_argument("--coach-zone-mm", default="",
+                    help="Optional floor coach zone as x_min,y_min,x_max,y_max in arena millimetres.")
     ap.add_argument(
         "--ema-snap-thresh-mm",
         type=float,
@@ -1419,6 +1518,10 @@ def main():
     }
     profile_defaults = fast_defaults if args.high_performance else normal_defaults
 
+    if args.coach_overlay and args.show_3d is None:
+        args.show_3d = False
+    if args.coach_overlay and args.show_2d is None:
+        args.show_2d = False
     if args.show_3d is None:
         args.show_3d = profile_defaults["show_3d"]
     if args.show_2d is None:
@@ -1501,9 +1604,7 @@ def main():
     event_logger = None
     session_id = args.session_id.strip() if args.session_id else ""
     if args.event_log_output:
-        _src_dir = Path(__file__).resolve().parent.parent.parent / "src"
-        if str(_src_dir) not in sys.path:
-            sys.path.insert(0, str(_src_dir))
+        ensure_project_src_on_path()
         from project_cam.closed_loop import EventLogger  # noqa: E402
 
         if not session_id:
@@ -1527,6 +1628,39 @@ def main():
         )
         print(f"[OK] EventLogger enabled: {args.event_log_output} (session={session_id})")
 
+    coach_counter = None
+    coach_frame_kinematics = None
+    coach_select_best_camera = None
+    coach_crop_frame_to_roi = None
+    coach_repair_overlay_keypoints = None
+    coach_render_overlay = None
+    coach_roi_cls = None
+    coach_keypoint_stabilizer = None
+    if args.coach_overlay:
+        ensure_project_src_on_path()
+        from project_cam.assessment.kinematics import frame_kinematics as _coach_frame_kinematics  # noqa: E402
+        from project_cam.assessment.live_trainer.coach_overlay import (  # noqa: E402
+            OverlayKeypointStabilizer as _CoachKeypointStabilizer,
+            StableRoi as _CoachStableRoi,
+            crop_frame_to_roi as _coach_crop_frame_to_roi,
+            repair_overlay_keypoints as _coach_repair_overlay_keypoints,
+            render_coach_overlay as _coach_render_overlay,
+            select_best_camera as _coach_select_best_camera,
+        )
+        from project_cam.assessment.live_trainer.rep_state import make_counter as _coach_make_counter  # noqa: E402
+        from project_cam.assessment.rules import DEFAULT_CONFIG_PATH, exercise_rules, load_rules  # noqa: E402
+
+        coach_rules = exercise_rules(load_rules(DEFAULT_CONFIG_PATH), args.coach_exercise)
+        coach_counter = _coach_make_counter(args.coach_exercise, coach_rules)
+        coach_frame_kinematics = _coach_frame_kinematics
+        coach_select_best_camera = _coach_select_best_camera
+        coach_crop_frame_to_roi = _coach_crop_frame_to_roi
+        coach_repair_overlay_keypoints = _coach_repair_overlay_keypoints
+        coach_render_overlay = _coach_render_overlay
+        coach_roi_cls = _CoachStableRoi
+        coach_keypoint_stabilizer = _CoachKeypointStabilizer()
+        print(f"[INFO] Coach overlay enabled for {args.coach_exercise}")
+
     # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
     # every time blm_aim transitions from non-AIM_OK to AIM_OK (or the joint name
     # changes while still AIM_OK), not on every frame.
@@ -1540,10 +1674,10 @@ def main():
             udp_joint_indices_needed.add(JOINT_NAME_TO_IDX["right_hip"])
         elif idx is not None:
             udp_joint_indices_needed.add(idx)
-    triangulated_joint_indices = list(range(17)) if args.show_3d else sorted(udp_joint_indices_needed)
+    triangulated_joint_indices = list(range(17)) if (args.show_3d or args.coach_overlay) else sorted(udp_joint_indices_needed)
 
     ball_needed = args.track_ball and (args.show_3d or args.show_2d)
-    pose_needed = args.show_2d or bool(triangulated_joint_indices)
+    pose_needed = args.show_2d or args.coach_overlay or bool(triangulated_joint_indices)
     if args.high_performance:
         print(
             "[INFO] High-performance profile: "
@@ -1608,6 +1742,7 @@ def main():
     extr = load_extrinsics(args.extrinsics)
     dims, tags = parse_dimensions(args.dimensions)
     proj = {cam: extr[cam]["P"] for cam, _ in active_cams if cam in extr}
+    coach_zone_mm = parse_coach_zone_mm(args.coach_zone_mm) if args.coach_overlay else None
 
     ball_model = None
     if ball_needed:
@@ -1732,6 +1867,13 @@ def main():
         )
         for _ in range(17)
     ]
+    coach_prev_camera = None
+    coach_lock_hold = 0  # frames the push-up camera stays locked after acquisition loss
+    coach_rois = {}
+    coach_state = coach_counter.state if coach_counter is not None else None
+    coach_metrics = {}
+    coach_window = f"Project_Cam Live Coach - {args.coach_exercise}"
+    coach_output_size = (int(args.viz_width), int(args.viz_height))
 
     frame_idx = 0
     t_start = time.time()
@@ -1752,6 +1894,8 @@ def main():
         print(f"[INFO] Ball JSONL enabled: {ball_log_path}")
 
     stop_hints = []
+    if args.coach_overlay:
+        stop_hints.append("press q in coach window")
     if args.show_2d:
         stop_hints.append("press q in 2D window")
     if args.show_3d:
@@ -2258,6 +2402,15 @@ def main():
                     joints_display[j] = dst + d_alpha * (src - dst)
             timer.stop("triang")
 
+            timer.start("coach")
+            if args.coach_overlay and coach_counter is not None and coach_frame_kinematics is not None:
+                coach_frame = joints_array_to_frame(
+                    joints_state, joints_conf_state, joints_cam_state, frame_idx, args.fps
+                )
+                coach_metrics = coach_frame_kinematics(coach_frame)
+                coach_state = coach_counter.update(coach_metrics)
+            timer.stop("coach")
+
             timer.start("udp")
             if udp_sock is not None and udp_target_addr is not None and udp_target_joint_pairs:
                 joints_payload = {}
@@ -2461,6 +2614,102 @@ def main():
                         break
             timer.stop("viz3d")
 
+            if args.coach_overlay and coach_state is not None:
+                camera_positions = {cam: extr[cam]["pos"] for cam, _ in active_cams if cam in extr}
+                # Lock the camera while a push-up set is active: switching
+                # mid-rep makes the overlay skeleton visually jump. The lock is
+                # sticky -- it holds for a short grace window after acquisition
+                # is lost, so a brief posture-gate flicker cannot trigger a
+                # switch. Re-select freely once the grace window expires
+                # (genuinely between sets, standing, walking).
+                if args.coach_exercise == "push_up" and getattr(coach_state, "acquired", False):
+                    coach_lock_hold = COACH_CAMERA_LOCK_HOLD_FRAMES
+                elif coach_lock_hold > 0:
+                    coach_lock_hold -= 1
+                lock_camera = (
+                    args.coach_exercise == "push_up"
+                    and coach_lock_hold > 0
+                    and coach_prev_camera is not None
+                    and coach_prev_camera in cam_frames
+                )
+                if lock_camera:
+                    selected_cam = coach_prev_camera
+                else:
+                    selected_cam = coach_select_best_camera(
+                        args.coach_exercise,
+                        joints_state,
+                        per_cam_pose,
+                        camera_positions,
+                        previous_camera=coach_prev_camera,
+                    )
+                if selected_cam is None and active_cams:
+                    selected_cam = active_cams[0][0]
+                if selected_cam is not None and selected_cam in cam_frames:
+                    coach_prev_camera = selected_cam
+                    src_frame = cam_frames[selected_cam]
+                    pose = per_cam_pose.get(selected_cam)
+                    if pose is None:
+                        pose_kpts = np.full((17, 2), np.nan, dtype=np.float32)
+                        pose_scores = np.zeros((17,), dtype=np.float32)
+                    else:
+                        pose_kpts, pose_scores = pose
+                    if selected_cam not in coach_rois:
+                        coach_rois[selected_cam] = coach_roi_cls(
+                            width=min(int(args.width), 960),
+                            height=min(int(args.height), 640),
+                            alpha=0.20,
+                        )
+                    roi = coach_rois[selected_cam].update(src_frame.shape, pose_kpts, pose_scores)
+                    crop, crop_kpts, _scale = coach_crop_frame_to_roi(
+                        src_frame, pose_kpts, roi, output_size=coach_output_size
+                    )
+                    projected_kpts, projected_scores = project_joints_to_overlay(
+                        joints_state,
+                        joints_conf_state,
+                        joints_cam_state,
+                        selected_cam,
+                        extr,
+                        intr,
+                        roi,
+                        coach_output_size,
+                    )
+                    overlay_kpts, overlay_scores = coach_repair_overlay_keypoints(
+                        args.coach_exercise,
+                        crop_kpts,
+                        pose_scores,
+                        projected_kpts,
+                        projected_scores,
+                    )
+                    # Temporal smoothing + coast-through-dropout: stops the
+                    # repaired legs from jittering between sources or vanishing
+                    # when push-up camera coverage flickers.
+                    overlay_kpts, overlay_scores = coach_keypoint_stabilizer.update(
+                        overlay_kpts, overlay_scores
+                    )
+                    zone_poly = project_zone_to_overlay(
+                        coach_zone_mm, selected_cam, extr, intr, roi, coach_output_size
+                    )
+                    coach_canvas = coach_render_overlay(
+                        crop,
+                        args.coach_exercise,
+                        coach_state,
+                        coach_metrics,
+                        overlay_kpts,
+                        overlay_scores,
+                        projected_floor=zone_poly,
+                    )
+                    cv2.putText(
+                        coach_canvas,
+                        selected_cam,
+                        (22, coach_canvas.shape[0] - 18),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.56,
+                        (210, 210, 210),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                    cv2.imshow(coach_window, coach_canvas)
+
             timer.start("mosaic")
             if args.show_2d and (frame_idx % args.mosaic_every == 0):
                 mosaic = make_mosaic(cam_frames, ball_boxes, per_cam_pose, copy_frames=False)
@@ -2484,10 +2733,16 @@ def main():
             timer.stop("mosaic")
 
             # Unified cv2 event pump (handles both 3D and 2D windows)
-            if args.show_2d or (args.show_3d and use_cv2_viz):
+            if args.coach_overlay or args.show_2d or (args.show_3d and use_cv2_viz):
                 _key = cv2.waitKey(1) & 0xFF
                 if _key == ord("q"):
                     break
+                if args.coach_overlay:
+                    try:
+                        if cv2.getWindowProperty(coach_window, cv2.WND_PROP_VISIBLE) < 1:
+                            break
+                    except cv2.error:
+                        pass
                 # Operator scoring for closed-loop demo (only meaningful when event log is on).
                 if event_logger is not None and _key != 255:
                     if _key == ord("r"):
