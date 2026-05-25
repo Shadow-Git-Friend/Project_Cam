@@ -1,8 +1,37 @@
 # Lateral Camera Remount — Operator Playbook
 
 **Date drafted:** 2026-05-20
+**Revised:** 2026-05-25 (incorporated operator feedback: durable backup
+paths, off-machine push, live framing check before calibration, explicit
+two-gate safety model)
 **Rollback tag (local):** `pre-remount-2026-05-20` on commit `8307446f`
 **Plan source:** `/home/hanush/.claude/plans/crystalline-stirring-spindle.md`
+
+## Two independent safety gates (do NOT conflate)
+
+| Gate | Validates | Tools | Blocks |
+|------|-----------|-------|--------|
+| **Pose gate** | Coach overlay tracks legs / ankles correctly during plank | `run_live_coach.sh push_up` + `joints_cam` in perf log | Going to the BLM gate |
+| **BLM gate** | Launcher geometry, RPM, angle clamp, correction model still produce safe shots | `live_aim_test.py` S2 -> S4 + small GT eval | Using `--shoot-enabled` on a human |
+
+A green pose gate **does not** prove the BLM gate is green. Extrinsics
+shifted -> the GT correction model may need a refit before the launcher
+is safe to fire. Run both gates independently and in order.
+
+## Off-machine backup (do BEFORE touching cameras)
+
+Remote `origin` is configured at
+`https://github.com/Shadow-Git-Friend/Project_Cam.git`. Push everything
+that would matter for rollback:
+
+```bash
+cd /home/hanush/Desktop/Project_Cam
+git push origin main                            # all 5 software commits
+git push origin pre-remount-2026-05-20          # the rollback tag
+```
+
+If `git push` fails on auth, fix that BEFORE you start remounting — once
+extrinsics are overwritten the local repo is your only rollback path.
 
 ## Why we are doing this
 
@@ -22,41 +51,55 @@ height. Front and back cameras (camNorth, camSouth) stay where they are.
 
 ## Pre-remount checklist (do tonight, before powering down)
 
-1. **Baseline capture** with the new software, on the current mount:
+1. **Create a durable backup dir** in your home (NOT `/tmp` -- some
+   systems clear `/tmp` on reboot):
+
+   ```bash
+   mkdir -p ~/Project_Cam_cal_backups/pre_remount_2026-05-25
+   ```
+
+2. **Baseline capture** with the new software, on the current mount:
 
    ```bash
    ./apps/athlete_assessment/run_live_coach.sh push_up \
        --pushup-ankle-single-cam-fallback \
-       --perf-jsonl /tmp/baseline_pre_remount.jsonl
+       --perf-jsonl ~/Project_Cam_cal_backups/pre_remount_2026-05-25/baseline_pre_remount.jsonl
    ```
 
    Do one push-up set (~5 reps), including the raised-leg test. Save the
-   `arena3d_*.mp4` / `mosaic2d_*.mp4` recordings if recording is on. This
-   gives you an apples-to-apples comparison tomorrow.
+   `arena3d_*.mp4` / `mosaic2d_*.mp4` recordings if recording is on (copy
+   them into the backup dir). This gives you an apples-to-apples
+   comparison tomorrow.
 
-2. **Backup the active calibration files**:
+3. **Backup the active calibration files into the durable dir**:
 
    ```bash
    cp arena_fixed/cal/extrinsics/extrinsics_fixed.json \
-      /tmp/extrinsics_fixed.PRE_REMOUNT.json
+      ~/Project_Cam_cal_backups/pre_remount_2026-05-25/
    cp arena_fixed/cal/extrinsics/Dimensions_fixed.txt \
-      /tmp/Dimensions_fixed.PRE_REMOUNT.txt
+      ~/Project_Cam_cal_backups/pre_remount_2026-05-25/
+   cp arena_fixed/config/calibration_manifest.yaml \
+      ~/Project_Cam_cal_backups/pre_remount_2026-05-25/
    ```
 
-3. **Verify rollback tag is present locally**:
+   Also copy any GT-correction artifacts the BLM may need to roll back to:
 
    ```bash
-   git tag --list 'pre-remount*'
-   # expect: pre-remount-2026-05-20
+   cp -r garage_lab_combined/gt_eval/reeval_arena_fixed_20260406 \
+      ~/Project_Cam_cal_backups/pre_remount_2026-05-25/
    ```
 
-   If you have a remote, push the tag for off-machine safety:
+4. **Verify the rollback tag is present locally AND pushed to origin**:
 
    ```bash
-   git push origin pre-remount-2026-05-20
+   git tag --list 'pre-remount*'                      # expect: pre-remount-2026-05-20
+   git ls-remote --tags origin pre-remount-2026-05-20 # expect: hash + tag name
    ```
 
-4. **Hardware to have ready:** two low brackets for camEast and camWest
+   If the tag is local-only, push it now (see "Off-machine backup" at
+   the top of this doc).
+
+5. **Hardware to have ready:** two low brackets for camEast and camWest
    at ~450 mm Z, bubble level (or phone level), and confirmation that
    the existing USB cables reach the new positions (lateral cams now sit
    ~1.7 m closer to the floor).
@@ -87,12 +130,36 @@ wall at Y = 3050. X positions stay at the existing mid-length sweet spot.
    # confirm all 4 cameras show up; q to quit
    ```
 
-4. **Intrinsics sanity (only if focus ring was touched).** Intrinsics
+4. **Live framing check (CRITICAL -- before any calibration).** A camera
+   that hits a perfect AprilTag RMS but crops out the athlete's hip is
+   useless. Have the athlete go into a steady plank in the centre of the
+   mat, then open the 2D mosaic and **eyeball each lateral view**:
+
+   ```bash
+   ./apps/athlete_assessment/run_live_parallel_yolopose.sh \
+       --show-2d --mosaic-every 1
+   ```
+
+   Acceptance, separately for camEast AND camWest:
+   - **Hip, knee, ankle, and foot** all visible in the frame.
+   - At least ~80 px of headroom above the shoulder line (so the athlete
+     coming up from bottom of push-up is not clipped).
+   - At least ~80 px below the foot (so a raised-leg test is not clipped).
+   - The body axis is roughly horizontal across the frame, not diagonal
+     -- adjust yaw to centre the athlete.
+   - The cone of view does NOT include the BLM machine, the operator,
+     or other moving humans (false-positive pose detections).
+
+   If framing fails on either lateral cam, **re-pitch and re-yaw before
+   running the extrinsics solver**. AprilTag RMS does not catch framing
+   problems; only a human eye does.
+
+5. **Intrinsics sanity (only if focus ring was touched).** Intrinsics
    are invariant under a mount-only change, so usually skip. If you ran
    the script, compare new `K, D` against existing JSON and skip
    re-saving if `||deltaK_focal|| < 2 px`.
 
-5. **Extrinsics (mandatory).** Re-run the AprilTag extrinsics solver:
+6. **Extrinsics (mandatory).** Re-run the AprilTag extrinsics solver:
 
    ```bash
    ./venv/bin/python garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py
@@ -101,54 +168,65 @@ wall at Y = 3050. X positions stay at the existing mid-length sweet spot.
    Acceptance: `reprojection_error_rmse < 2.0` per camera. If higher,
    re-shoot calibration images for that camera and re-run.
 
-6. **Update `Dimensions_fixed.txt`** (lines 12-15) with the new positions
+7. **Update `Dimensions_fixed.txt`** (lines 12-15) with the new positions
    in cm (e.g. `CamEast = (162, 5, 45)` for `(1620, 50, 450)` mm).
 
-7. **Bump calibration date** in `arena_fixed/config/calibration_manifest.yaml`.
+8. **Bump calibration date** in `arena_fixed/config/calibration_manifest.yaml`.
 
-8. **Validate live tracking (before touching the BLM):**
+9. **Pose-gate validation (do NOT enable BLM yet):**
 
    ```bash
    ./apps/athlete_assessment/run_live_coach.sh push_up \
        --pushup-ankle-single-cam-fallback \
-       --perf-jsonl /tmp/baseline_post_remount.jsonl
+       --perf-jsonl ~/Project_Cam_cal_backups/pre_remount_2026-05-25/baseline_post_remount.jsonl
    ```
 
    Repeat the same push-up set including the raised-leg test. Compare
-   against `/tmp/baseline_pre_remount.jsonl`:
+   against the pre-remount baseline saved in the durable dir:
 
    ```bash
-   # Quick heuristic comparison of ankle multi-cam counts:
-   grep '"joints_cam"' /tmp/baseline_pre_remount.jsonl  | head
-   grep '"joints_cam"' /tmp/baseline_post_remount.jsonl | head
+   BACKUP=~/Project_Cam_cal_backups/pre_remount_2026-05-25
+   grep '"joints_cam"' $BACKUP/baseline_pre_remount.jsonl  | head
+   grep '"joints_cam"' $BACKUP/baseline_post_remount.jsonl | head
    ```
 
    Acceptance: `joints_cam[15]` and `[16]` should rise materially across
-   a rep (target: average >= 2.5 post-remount vs ~1.5 pre-remount).
+   a rep (target: average >= 2.5 post-remount vs ~1.5 pre-remount). Also
+   eyeball the overlay: leg skeleton lines should sit on the athlete's
+   legs in BOTH the camEast and camWest views, including during the
+   raised-leg test.
 
-9. **Re-run unit tests** to confirm no regressions in pure-Python code:
+   **Pose gate green does NOT mean BLM is safe -- step 11 is mandatory
+   before any `--shoot-enabled`.**
 
-   ```bash
-   PYTHONPATH=src ./venv/bin/python -m unittest discover -s tests
-   # expect: 132 tests OK
-   ```
+10. **Re-run unit tests** to confirm no regressions in pure-Python code:
 
-10. **BLM re-validation (do NOT skip before `--shoot-enabled`):**
+    ```bash
+    PYTHONPATH=src ./venv/bin/python -m unittest discover -s tests
+    # expect: 132 tests OK
+    ```
+
+11. **BLM-gate validation (independent of the pose gate; do NOT skip
+    before `--shoot-enabled`):**
     - **S2** aim-only with `live_aim_test.py --no-shoot-enabled` against
       a static joint. The launcher must track correctly.
     - **GT joint-touch eval** (small, 5 trials, one athlete) to confirm
       accuracy stayed within ~30% of the current 178 mm mean. If worse,
       refit the correction model via the existing `gt_eval` flow before
-      shooting.
+      shooting. The pre-remount correction model is preserved under
+      `~/Project_Cam_cal_backups/pre_remount_2026-05-25/reeval_arena_fixed_20260406/`
+      if you need to compare or roll back.
     - **S4** with a soft target (no human) at low pitch / low RPM before
       shooting at any human subject.
 
 ## Rollback (if something goes wrong)
 
 ```bash
-# Restore the pre-remount calibration files
-cp /tmp/extrinsics_fixed.PRE_REMOUNT.json arena_fixed/cal/extrinsics/extrinsics_fixed.json
-cp /tmp/Dimensions_fixed.PRE_REMOUNT.txt arena_fixed/cal/extrinsics/Dimensions_fixed.txt
+# Restore the pre-remount calibration files from the durable backup
+BACKUP=~/Project_Cam_cal_backups/pre_remount_2026-05-25
+cp $BACKUP/extrinsics_fixed.json    arena_fixed/cal/extrinsics/
+cp $BACKUP/Dimensions_fixed.txt     arena_fixed/cal/extrinsics/
+cp $BACKUP/calibration_manifest.yaml arena_fixed/config/
 
 # OR roll the entire repo back to the tagged state
 git checkout pre-remount-2026-05-20  # detached HEAD; inspect first
