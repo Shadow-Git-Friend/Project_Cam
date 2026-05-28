@@ -1,0 +1,97 @@
+* **Repo structure / modules**
+
+  * `camera_node/` (per-camera app)
+  * `central_node/` (fusion + decision engine)
+  * `shared/` (schemas, config, utils)
+  * `calibration/` (intrinsics/extrinsics loaders, transforms)
+
+* **Calibration & geometry**
+
+  * Intrinsics loader (`K`, `D`) + undistort / rectify
+  * Extrinsics loader (`R`, `t`) per camera
+  * Consistent world/frame conventions + optional world-frame alignment transform
+  * Pixel→ray backprojection (undistorted) per camera
+  * Multi-ray least-squares intersection (2/3/4 rays)
+  * 3D trajectory buffer + smoothing (optional)
+  * Plane intersection (predict impact on target wall plane)
+  * Coordinate conversion utilities (cm↔m)
+
+* **Per-camera vision (Camera PC)**
+
+  * Frame capture (USB, fixed FPS, exposure/white-balance control)
+  * YOLO ball detector (with `detect_every`)
+  * Ball tracker (your PersistentTrackerV3/V4)
+  * Optional: YOLO-Pose for player
+  * Per-frame metadata assembly (ball + pose)
+  * Local visualization/debug overlay toggle
+  * Local logging + video dump toggle
+
+* **Networking**
+
+  * JSON schema definition + versioning
+  * UDP/TCP transport (choose one) + reconnect/backoff
+  * Packet framing (if TCP) / sequence numbers (if UDP)
+  * Camera→Central publisher
+  * Central receiver + per-camera ring buffer
+  * Time-alignment buffer (match closest timestamps across cameras)
+
+* **Time synchronization (critical)**
+
+  * Clock sync across camera PCs (NTP/PTP or hardware trigger)
+  * Timestamping policy (capture-time vs send-time)
+  * Latency measurement (per packet) + drift monitoring
+  * Optional: central time correction (offset estimation)
+
+* **Central node fusion**
+
+  * Scenario manager (active launcher, target wall, active camera set)
+  * 2D→3D fusion loop (using selected cameras)
+  * Outlier rejection in 3D (ray residual thresholds)
+  * 3D kinematics (velocity/acceleration, TOF, apex, etc.)
+  * Impact prediction + box-hit error metric
+  * Player readiness + contact classification (pose + ball proximity)
+
+* **Decision engine**
+
+  * Difficulty model (speed/angle/frequency/body-part distribution)
+  * Adaptive rules + safety bounds
+  * Session stats (rolling windows, per-scenario metrics)
+  * Scenario scheduler (next target selection)
+
+* **Launcher control**
+
+  * Command JSON schema (yaw/pitch/speed/fire)
+  * Transport Central→Launcher (UDP/TCP)
+  * ACK/status schema + retries
+  * Safety interlocks (arm/disarm, watchdog, limits)
+  * Calibration maps (desired m/s → wheel RPM; angle → gimbal steps)
+
+* **GUI / operator tools**
+
+  * Scenario selection UI
+  * Live telemetry dashboards (2D/3D tracks, FPS, latency, sync health)
+  * Calibration viewer (tag reprojection, camera frustums)
+  * Recording controls (start/stop, run labeling)
+
+* **Data / logging**
+
+  * Unified run folder structure
+  * Synchronized logs (camera packets, fusion output, launcher cmds)
+  * Dataset recorder (raw frames optional + metadata always)
+  * Evaluation scripts (accuracy, latency, drift, hit distribution)
+
+* **Performance & deployment**
+
+  * GPU assignment per camera PC
+  * Threading: capture/infer/send pipelines
+  * Batching/half precision, TensorRT export (optional)
+  * Monitoring (FPS, dropped frames, queue sizes)
+  * Config system (`yaml`) + per-machine overrides
+
+* **Testing**
+
+  * Unit tests: geometry (project/unproject), ray intersection
+  * Integration tests: replay recorded packets → reproduce 3D track
+  * Calibration regression test (reprojection + triangulation checks)
+  * Network stress tests (packet loss, jitter)
+  * End-to-end dry-run mode (no launcher fire)

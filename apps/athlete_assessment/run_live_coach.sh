@@ -14,6 +14,9 @@ POSE_MODEL="${PROJECT_CAM_POSE_MODEL:-yolo11m-pose.engine}"
 if [ ! -f "$POSE_MODEL" ]; then
   POSE_MODEL="yolo11m-pose.pt"
 fi
+WIDTH="${PROJECT_CAM_ASSESSMENT_WIDTH:-1920}"
+HEIGHT="${PROJECT_CAM_ASSESSMENT_HEIGHT:-1080}"
+FPS="${PROJECT_CAM_ASSESSMENT_FPS:-30}"
 
 PYTHONPATH=src ./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_parallel.py \
   --config garage_lab_combined/config/cameras.yaml \
@@ -26,7 +29,7 @@ PYTHONPATH=src ./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_p
   --pose-device cuda:0 \
   --pose-backend yolopose \
   --yolopose-model "$POSE_MODEL" \
-  --width 1280 --height 720 --fps 15 \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
   --pose-every 1 \
   --viz-every 1 \
   --mosaic-every 2 \

@@ -21,6 +21,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p Parallel_working/output
+WIDTH="${PROJECT_CAM_WIDTH:-1920}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-1080}"
+FPS="${PROJECT_CAM_FPS:-30}"
 
 # Use TRT engines if available, fall back to .pt
 BALL_MODEL="models/ball/yolo26m-672.engine"
@@ -49,7 +52,7 @@ fi
   --pose-device cuda:0 \
   --pose-backend yolopose \
   --yolopose-model "$POSE_MODEL" \
-  --width 1280 --height 720 --fps 15 \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
   --pose-every 1 \
   --ball-every 1 \
   --viz-every 1 \

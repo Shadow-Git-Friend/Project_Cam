@@ -7,8 +7,8 @@
 
 ## Arena & Units
 - 4 fixed USB cameras: camNorth, camEast, camSouth, camWest
-- All coordinates in **mm**. Runtime resolution: **1280x720**
-- Capture target: 15 FPS. Inference target: 5 FPS
+- All coordinates in **mm**. Runtime resolution: **1920x1080** after the east/west remount recalibration
+- Capture target: 30 FPS MJPG. Inference target: 5 FPS
 
 ## Key Entry Points
 - Live viewer: `garage_lab_combined/scripts/live_4cam_arena_view.py`
@@ -48,7 +48,7 @@
 - **Never** modify geometry-critical functions without explicit approval:
   `triangulate_multi`, `transform_world_point_y`, `ema_update`, UDP axis semantics
 - **Never** enable `--shoot-enabled` without passing BLM safety tests (S4)
-- **Never** change resolution without verifying intrinsics scaling
+- **Never** change resolution without recalibrating intrinsics or verifying intrinsics scaling
 - `Parallel_working/` is isolated — do not merge into production without approval
 - `arena_fixed/` owns the Y-axis fix — do not override its extrinsics/dimensions
 

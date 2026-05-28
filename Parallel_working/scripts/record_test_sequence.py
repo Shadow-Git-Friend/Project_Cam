@@ -7,7 +7,7 @@ Usage:
     python Parallel_working/scripts/record_test_sequence.py \
         --config garage_lab_combined/config/cameras.yaml \
         --output Parallel_working/output/test_sequences/walk_01 \
-        --duration 30 --fps 15
+        --duration 30 --fps 30
 
 Output structure:
     walk_01/
@@ -69,9 +69,9 @@ def main():
     ap.add_argument("--config", default="garage_lab_combined/config/cameras.yaml")
     ap.add_argument("--output", required=True, help="Output directory for recorded sequence")
     ap.add_argument("--duration", type=float, default=30.0, help="Recording duration in seconds")
-    ap.add_argument("--fps", type=int, default=15)
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=720)
+    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--width", type=int, default=1920)
+    ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--fourcc", default="MJPG")
     ap.add_argument("--quality", type=int, default=95, help="JPEG quality (1-100)")
     ap.add_argument("--preview", action="store_true", help="Show live preview during recording")

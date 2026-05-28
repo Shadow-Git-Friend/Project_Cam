@@ -1,0 +1,204 @@
+## Goal
+
+Get extrinsics (camera poses) that are consistent across all cameras with **low reprojection error** (target: **≤ 2–5 px**, depending on image quality) and **few-cm** agreement with physical measurements (after accounting for your 3 cm camera-center offset and wall/door offsets).
+
+---
+
+## Step 0 — Lock the “truth” coordinate system
+
+You need one authoritative world frame. Options:
+
+* **Option A (recommended): Tag-world frame**
+  Your AprilTag 3D map defines the world. Tape measurements are only for sanity checks. Best for inference.
+* **Option B: Tape-measured room frame**
+  Requires modeling wall offsets/doors precisely and mapping tags into that frame. Higher effort, usually worse.
+
+Proceed assuming **Option A**.
+
+---
+
+## Step 1 — Intrinsics: eliminate resolution/mode mismatch
+
+### Minimum requirement
+
+Intrinsics must match the exact camera mode used for extrinsics (resolution, FOV/crop, ISP mode).
+
+**Best accuracy option**
+
+* Recalibrate intrinsics at **1920×1080** for each camera:
+
+  * 20–40 good ChArUco images per camera
+  * ensure wide coverage (corners/edges), different tilts
+  * validate by undistorting and checking straight lines
+
+**Fast option**
+
+* If 1080p is guaranteed to be a pure 1.5× upscale from 720p:
+
+  * scale (f_x,f_y,c_x,c_y) by 1.5
+  * keep distortion same
+    Then validate by reprojection on 1080p. If error is still large → discard.
+
+**Decision rule**
+
+* If after fixing tag selection (Step 2) you still see **RMS > 10–15 px**, intrinsics are not acceptable.
+
+---
+
+## Step 2 — Tag map integrity: eliminate structural errors
+
+Your high tag-specific errors (e.g., tag 14/17/20/21/22) indicate map or detection issues.
+
+### Best accuracy option
+
+* Build a **verified tag 3D map**:
+
+  * Define each tag plane (wall/door segment) with a measured plane equation
+  * For each tag: measure center position and orientation (normal + up direction)
+  * Generate 4 corners from center + orientation + tag size
+  * Store corner order consistent with detector
+
+### Medium effort option (often enough)
+
+* Keep your current map, but:
+
+  * enforce **unit consistency** (all meters)
+  * enforce **plane constraints** per wall segment (including doors as separate planes)
+  * verify **corner ordering** on a few tags by projecting corners back to image and visually checking
+
+### Quick option
+
+* Exclude outlier tags and proceed (Step 3). This can work if enough tags remain and are well distributed.
+
+---
+
+## Step 3 — Robust per-camera extrinsics (do not solve all at once initially)
+
+Compute each camera pose independently using robust estimation:
+
+### Best accuracy option
+
+* For each camera:
+
+  1. Gather all detected tag corners across many frames (or one very good frame)
+  2. Filter detections:
+
+     * keep only known tag IDs
+     * reject tags with small image area / bad pose (too oblique)
+  3. Run `solvePnPRansac` on all corners
+  4. Refine on inliers with `solvePnP` (ITERATIVE)
+  5. Compute per-tag reprojection error; iteratively remove tags above threshold
+
+**Target**: RMS per camera in **single digits** quickly; after refinement **~1–5 px**.
+
+### Practical exclusion strategy (based on your list)
+
+Start with aggressive global excludes:
+
+* **Exclude:** `{14, 17, 18, 20, 21, 22}`
+  Then add camera-specific:
+* camEast: `{13, 6}`
+* camWest: `{9}`
+* camSouth: `{19}`
+
+Then reintroduce tags one-by-one only if their errors are low.
+
+---
+
+## Step 4 — Multi-camera consistency check + global refinement
+
+Once each camera has a stable pose:
+
+### Option A (best accuracy): bundle adjustment
+
+Run a global optimization minimizing reprojection error across all cameras jointly:
+
+* Variables: camera poses (R,t), optionally small correction to tag poses
+* Fix: intrinsics
+* Robust loss (Huber/Cauchy) to ignore remaining outliers
+
+This yields the best accuracy and consistency.
+
+### Option B (simpler): rigid alignment + sanity bounds
+
+* Compare solved camera centers with tape-measured centers:
+
+  * apply your **3 cm camera-center offset**
+  * fit a rigid transform between the two sets
+  * residuals should be **few cm to ~10 cm** depending on wall offsets
+
+If residuals remain >10–15 cm but reprojection is low, it’s mostly coordinate-frame mismatch (doors/walls), not vision.
+
+---
+
+## Step 5 — Model the non-planar walls/doors (only if needed)
+
+If you need tape-measure agreement and your arena has offsets:
+
+### Best accuracy option
+
+* Treat each offset region as a separate plane:
+
+  * wall plane A, door inset plane B, etc.
+  * tags on each region use that region’s plane
+* This removes systematic “world model” bias.
+
+### Minimal option
+
+* Keep Tag-world frame for inference and stop here.
+
+---
+
+## Acceptance thresholds (use these to decide when to stop)
+
+### Intrinsics quality
+
+* ChArUco intrinsics RMS: ideally **< 0.5 px**, acceptable **< 1.0 px**
+
+### Extrinsics quality
+
+* Per-camera reprojection RMS:
+
+  * **< 5 px**: good
+  * **1–3 px**: very good
+  * **> 10 px**: something still wrong (intrinsics/map/outliers)
+
+### Physical plausibility
+
+* Camera center vs tape measure:
+
+  * after applying 3 cm offset and rigid alignment: aim **< 10 cm**
+  * if walls/doors are irregular, **10–15 cm** can be normal even with good reprojection
+
+---
+
+## Two recommended paths
+
+### Path 1: Highest accuracy (recommended)
+
+1. Recalibrate intrinsics at 1920×1080 for each camera
+2. Clean tag map + corner ordering verification
+3. Robust per-camera PnP + outlier pruning
+4. Global bundle adjustment
+5. Optionally model doors as separate planes
+
+### Path 2: Fastest usable
+
+1. Scale intrinsics 720→1080 (test)
+2. Exclude `{14,17,18,20,21,22}` (+ camera-specific)
+3. Robust per-camera PnPRansac + prune tags > 10 px
+4. Stop when RMS < 5–8 px
+
+---
+
+## Next concrete action (highest leverage)
+
+1. Pick one camera (camEast).
+2. Recompute extrinsics with:
+
+   * 1080p intrinsics (or scaled test)
+   * tag excludes `{14,17,20,21,22,13,6}`
+   * `solvePnPRansac` + refinement
+3. Check RMS.
+
+If that drops dramatically, proceed camera-by-camera; if not, intrinsics/map mismatch is still primary.

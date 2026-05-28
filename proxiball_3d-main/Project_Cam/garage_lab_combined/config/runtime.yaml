@@ -1,0 +1,9 @@
+# Garage lab combined runtime config
+units: mm
+resolution:
+  width: 1280
+  height: 720
+fps_target: 15
+inference_fps_target: 5
+camera_fourcc: MJPG
+buffer_size: 1

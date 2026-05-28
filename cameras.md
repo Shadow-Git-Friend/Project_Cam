@@ -1,3 +1,17 @@
+## 2026-05-25 remount update
+
+After remounting camEast and camWest, all four attached DS-E12 cameras were
+queried directly with `v4l2-ctl`. The maximum practical calibrated mode is:
+
+- `1920x1080`
+- `MJPG`
+- `30 FPS`
+
+Do not use uncompressed `YUYV` or `NV12` for FullHD capture: those modes only
+advertise `5 FPS` at `1920x1080` on this hardware. The active runtime and
+calibration defaults now target `1920x1080 MJPG @ 30 FPS`, and intrinsics must
+be regenerated for that resolution before geometry validation.
+
 ● Good research. Your analysis of the latency chain is correct. Here's my honest assessment:
 
   Do You Need New Cameras?
@@ -190,5 +204,4 @@ The engineering point to the committee is this: the current system has been **ch
 
   If you continue the project post-thesis: Buy 4× Logitech C922 ($40 each) as an immediate upgrade, recalibrate intrinsics, and measure the improvement. If you want to go further, 4× FLIR Blackfly S with
   an Arduino trigger board is the proper engineering solution.
-
 

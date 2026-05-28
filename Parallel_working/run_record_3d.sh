@@ -14,6 +14,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 TS="$(date +%Y%m%d_%H%M%S)"
 REC_DIR="Parallel_working/output/recordings"
 mkdir -p "$REC_DIR"
+WIDTH="${PROJECT_CAM_WIDTH:-1920}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-1080}"
+FPS="${PROJECT_CAM_FPS:-30}"
 
 VID_3D="$REC_DIR/arena3d_${TS}.mp4"
 VID_2D="$REC_DIR/mosaic2d_${TS}.mp4"
@@ -49,7 +52,7 @@ echo "[REC] Press 'q' in any window to stop recording."
   --pose-device cuda:0 \
   --pose-backend yolopose \
   --yolopose-model "$POSE_MODEL" \
-  --width 1280 --height 720 --fps 15 \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
   --pose-every 1 \
   --ball-every 1 \
   --viz-every 1 \
@@ -69,5 +72,5 @@ echo "[REC] Press 'q' in any window to stop recording."
   --perf-log-every 60 \
   --record-video "$VID_3D" \
   --record-mosaic "$VID_2D" \
-  --record-fps 15 \
+  --record-fps "$FPS" \
   "$@"

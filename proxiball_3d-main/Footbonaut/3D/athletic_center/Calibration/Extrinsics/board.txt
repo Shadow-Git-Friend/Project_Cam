@@ -1,0 +1,7 @@
+    canvas_width_mm = 1500  # 150 cm 
+    canvas_height_mm = 850  # 85 cm 
+    square_length_mm = 210.0  # 21 cm squares
+    marker_length_mm = square_length_mm * 0.7
+    squares_x = 6
+    squares_y = 4
+    dpi = 300  

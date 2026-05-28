@@ -1,0 +1,37 @@
+conf: 0.7
+imgsz: 960
+classes: [0]
+
+paths:
+  model: "model/y26s_2.engine"
+  video_input: "test/original2.mp4"
+  video_output: "outputs/original2_inference.mp4"
+
+jitter_thresh: 3
+reid_gate_px: 960         # Increased from 500 to catch fast balls
+max_missed_frames: 1000
+min_hits: 3               # Require 10 hits to confirm (and enable ROI)  # Reduced from 50 to 10 to kill ghosts faster
+
+detect_every: 2           # Increased freq from 3 to 2
+discovery_every_frames: 15
+
+roi_recovery:
+  enabled: false
+  trigger_missed: 5        # Trigger if missed >= 1 frames
+  trigger_speed: 15        # Trigger if speed > 10 px/frame
+  padding: 50              # Base padding
+  scale: 3.0               # Scale factor
+  min_size: 384            # Min ROI side length
+  conf: 0.5                # ROI specific confidence (can be lower)
+  merge_iou: 0.5           # IOU thresh to merge ROI det with Full det
+
+adaptive_skipping:
+  enabled: true
+  fast_speed_thresh: 10.0
+  skip_fast: 1
+  skip_slow: 2
+  skip_missing: 3
+
+alpha_vel: 0.7
+history_len: 30
+area_thresh: 4000

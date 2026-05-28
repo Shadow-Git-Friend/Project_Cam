@@ -1,0 +1,37 @@
+======================================================================
+  GARAGE 4-CAMERA 3D BALL TRACKING — RESULTS REPORT
+  Generated: 2026-02-19 21:52:05
+======================================================================
+
+Scen   Frames   AvgFPS   YOLO ms    Det%   AvgSpd   MaxSpd   Wall(s)
+----------------------------------------------------------------------
+   1     3525     40.9      26.0    56.5    14.16   304.87     145.2
+   2     5273     45.8      19.5    42.7     9.97   149.34     186.3
+   3      440     27.4      25.6    48.4    11.75   112.59      25.8
+   4     1160     31.5      26.1    54.2    22.89   230.59      55.3
+   5     1737     29.2      28.9    63.5    13.62   114.64      86.5
+   6    ERROR  exit_code=1
+   7     1591     23.4      31.6    61.3     9.01    50.87      94.2
+   8     6690     28.4      33.6    73.7    20.63   286.29     327.3
+----------------------------------------------------------------------
+
+Columns:
+  Scen        — Scenario number
+  Frames      — Total frames processed
+  AvgFPS      — Average processing FPS
+  YOLO ms     — Average YOLO inference latency (ms)
+  Det%        — Ball detection rate (% frames with ≥1 camera)
+  AvgSpd      — Average 3D ball speed while tracked (m/s)
+  MaxSpd      — Peak 3D ball speed (m/s)
+  Wall(s)     — Wall-clock time to process scenario (s)
+
+Output videos:
+  Scenario 1: /home/altay/Desktop/Footbonaut/garage_scenario1_20260219_213644.mp4
+  Scenario 2: /home/altay/Desktop/Footbonaut/garage_scenario2_20260219_213909.mp4
+  Scenario 3: /home/altay/Desktop/Footbonaut/garage_scenario3_20260219_214215.mp4
+  Scenario 4: /home/altay/Desktop/Footbonaut/garage_scenario4_20260219_214241.mp4
+  Scenario 5: /home/altay/Desktop/Footbonaut/garage_scenario5_20260219_214336.mp4
+  Scenario 7: /home/altay/Desktop/Footbonaut/garage_scenario7_20260219_214506.mp4
+  Scenario 8: /home/altay/Desktop/Footbonaut/garage_scenario8_20260219_214640.mp4
+
+======================================================================

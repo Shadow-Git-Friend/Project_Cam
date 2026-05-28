@@ -9,6 +9,12 @@ import cv2
 import yaml
 
 
+DEFAULT_WIDTH = 1920
+DEFAULT_HEIGHT = 1080
+DEFAULT_FPS = 30
+DEFAULT_FOURCC = "MJPG"
+
+
 def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -62,14 +68,15 @@ def filter_trials(trials, start_trial, end_trial):
     return trials
 
 
-def open_capture(device, width, height, fourcc, buffer_size):
+def open_capture(device, width, height, fps, fourcc, buffer_size):
     cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         return None
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     if fourcc:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
     if buffer_size is not None:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
     return cap
@@ -210,7 +217,7 @@ def clip_exists(out_dir, trial_id):
     return len(files) >= 2
 
 
-def main():
+def build_arg_parser():
     ap = argparse.ArgumentParser(
         description="Auto-record all joint GT trials from CSV with countdown."
     )
@@ -221,11 +228,11 @@ def main():
     ap.add_argument("--end-trial", default="")
     ap.add_argument("--duration-sec", type=float, default=4.0)
     ap.add_argument("--settle-sec", type=float, default=8.0, help="Countdown before each recording")
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=720)
-    ap.add_argument("--fps", type=int, default=15)
-    ap.add_argument("--in-fourcc", default="MJPG")
-    ap.add_argument("--out-codec", default="MJPG")
+    ap.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    ap.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
+    ap.add_argument("--fps", type=int, default=DEFAULT_FPS)
+    ap.add_argument("--in-fourcc", default=DEFAULT_FOURCC)
+    ap.add_argument("--out-codec", default=DEFAULT_FOURCC)
     ap.add_argument("--ext", default="avi")
     ap.add_argument("--buffer-size", type=int, default=1)
     ap.add_argument("--skip-existing", action=argparse.BooleanOptionalAction, default=True)
@@ -235,6 +242,11 @@ def main():
         default=True,
         help="Show preview windows (default: on). Use --no-show for headless.",
     )
+    return ap
+
+
+def main():
+    ap = build_arg_parser()
     args = ap.parse_args()
 
     if args.duration_sec <= 0:
@@ -274,6 +286,7 @@ def main():
                 device=device,
                 width=args.width,
                 height=args.height,
+                fps=args.fps,
                 fourcc=args.in_fourcc,
                 buffer_size=args.buffer_size,
             )

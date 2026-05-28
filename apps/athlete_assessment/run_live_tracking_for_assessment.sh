@@ -7,6 +7,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 PORT="${PROJECT_CAM_ASSESSMENT_PORT:-5015}"
 HOST="${PROJECT_CAM_ASSESSMENT_HOST:-127.0.0.1}"
+WIDTH="${PROJECT_CAM_ASSESSMENT_WIDTH:-1920}"
+HEIGHT="${PROJECT_CAM_ASSESSMENT_HEIGHT:-1080}"
+FPS="${PROJECT_CAM_ASSESSMENT_FPS:-30}"
 TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p Parallel_working/output
 
@@ -28,7 +31,7 @@ fi
   --pose-device cuda:0 \
   --pose-backend yolopose \
   --yolopose-model "$POSE_MODEL" \
-  --width 1280 --height 720 --fps 15 \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
   --pose-every 1 \
   --viz-every 1 \
   --mosaic-every 2 \
