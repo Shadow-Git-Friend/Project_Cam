@@ -96,6 +96,12 @@
 - Never stop recording with `timeout`/`kill -9` — resulting MP4 is unrecoverable (no moov atom, ffmpeg cannot remux)
 - Stop with `q` in the cv2 window or a single Ctrl+C
 
+## Camera hardware upgrade path (2026-05-29)
+- **PC (HP Z4 G4, measured):** i9-7900X 10C/20T (44 PCIe3 lanes), 32 GB RAM, RTX 2080 Ti 11 GB (inference) + Quadro P400 2 GB (display), Ubuntu 22.04/k6.8, single 238 GB SATA SSD (60 GB free). The PC is NOT the bottleneck for a 4× global-shutter @ 60 fps upgrade — CPU/RAM/GPU/PCIe all have large headroom (GigE even *drops* CPU vs MJPG decode). Only TWO additions needed: a **NIC** and (for raw recording) an **NVMe SSD**.
+- **Plan:** replace all 4 webcams with **4× global-shutter GigE cameras** (HikRobot MV-CS016-10GC IMX296 ~65 fps, or FLIR BFS-PGE-16S2C-CS IMX273 78 fps) + hardware trigger from ESP32. Count stays 4 (1:1; never mix shutter types). Connection = **Intel I350-T4 quad-port GigE NIC** (one dedicated lane/cam), power + trigger via each cam's Hirose I/O cable (12 V + ESP32 opto fan-out), skip PoE. Raw 60 fps record = 373 MB/s → add **2 TB NVMe** (board M.2). Lenses ~3.5–4 mm (NOT 6 mm — too narrow vs current ~81–86° HFOV).
+- **Do NOT "just add 4 more DS-E12 webcams" to get 8.** Helps pose coverage only IF split across USB controllers (all 4 current ones share one Bus-001 USB-2 controller → ~15 fps ceiling; 8 on one controller = bandwidth failure). It does NOT fix the goal/fast-ball blocker: rolling shutter stays and **no-sync gets worse** (more unsynced views of a moving ball). Also halves inference fps (8-cam batches) and doubles calibration burden. USB-2 webcams don't scale; GigE does.
+- The global-shutter + hardware-sync upgrade is orthogonal to the (free) goal-game software fix — buy fixes fast-ball tracking, software fix makes scoring work. See `.claude/rules/geometry.md` triangulation-pairing + camSouth notes.
+
 ## Known Issues
 - maxfps at 960x540 causes skeleton placement errors
 - matplotlib 3D rendering is the main bottleneck — render-worker-process helps

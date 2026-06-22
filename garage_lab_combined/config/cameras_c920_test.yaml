@@ -1,0 +1,9 @@
+# Temporary capture-only config for the two Logitech C920 webcams currently attached.
+# It intentionally does not replace cameras.yaml, because camera roles/extrinsics
+# must be remapped after physical mounting.
+
+cameras:
+  camNorth:
+    device: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_7B879F0F-video-index0
+  camEast:
+    device: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_9718C21F-video-index0

@@ -51,9 +51,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "Parallel_working" / "scripts"))
 from live_4cam_arena_view_parallel import (  # noqa: E402
     JointKalmanFilter,
     ThreadedCapture,
+    apply_uvc_low_latency_controls,
     load_cameras,
     load_extrinsics,
     load_intrinsics,
+    open_camera_capture,
     project_world_to_pixel,
     robust_triangulate_ball,
     scale_intrinsics_matrix,
@@ -170,8 +172,9 @@ class GameState:
 
 
 # ── Capture setup ────────────────────────────────────────────────────────────
-def open_capture(device: str, width: int, height: int, fps: int, fourcc: str):
-    cap = cv2.VideoCapture(device)
+def open_capture(device: str, width: int, height: int, fps: int, fourcc: str, args, cam: str):
+    apply_uvc_low_latency_controls(device, cam, args, log=False)
+    cap = open_camera_capture(device)
     if not cap.isOpened():
         return None
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
@@ -179,6 +182,7 @@ def open_capture(device: str, width: int, height: int, fps: int, fourcc: str):
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
     cap.set(cv2.CAP_PROP_FPS, int(fps))
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    apply_uvc_low_latency_controls(device, cam, args, log=True)
     return cap
 
 
@@ -1019,6 +1023,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--fps",    type=int, default=30)
     ap.add_argument("--fourcc", default="MJPG")
+    ap.add_argument("--no-uvc-controls", action="store_true",
+                    help="Do not apply low-latency V4L2 controls to USB webcams.")
+    ap.add_argument("--uvc-exposure", type=int, default=200,
+                    help="Manual UVC exposure_time_absolute. 200 = about 20 ms; keeps C920 at 30 FPS.")
+    ap.add_argument("--uvc-gain", type=int, default=160,
+                    help="Manual UVC gain. Use -1 to leave gain unchanged.")
+    ap.add_argument("--uvc-focus", type=int, default=0,
+                    help="Manual UVC focus_absolute. Use -1 to leave focus unchanged.")
+    ap.add_argument("--uvc-power-line-frequency", type=int, default=1,
+                    help="UVC power_line_frequency: 1=50 Hz, 2=60 Hz.")
 
     ap.add_argument("--proj-w", type=int, default=1920)
     ap.add_argument("--proj-h", type=int, default=1080)
@@ -1077,7 +1091,7 @@ def main() -> int:
 
         mappers[cam] = SouthWallMapper(K, D, e["R"], e["tvec"], wall_x_mm=args.wall_x_mm)
 
-        cap = open_capture(device, args.width, args.height, args.fps, args.fourcc)
+        cap = open_capture(device, args.width, args.height, args.fps, args.fourcc, args, cam)
         if cap is None:
             print(f"[ERROR] cannot open {cam} at {device}")
             return 2

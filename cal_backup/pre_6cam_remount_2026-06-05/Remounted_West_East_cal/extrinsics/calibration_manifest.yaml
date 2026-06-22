@@ -1,0 +1,97 @@
+# Calibration manifest — bundle-local candidate for the post-remount geometry.
+# Status: candidate (NOT yet promoted to arena_fixed/config/).
+# Promotion only after pose gate + BLM gate both pass.
+#
+# Triggered by: lateral camera remount (camEast + camWest from ~2.18 m → ~0.45 m
+# height) on 2026-05-25. Camera mode also bumped from 1280x720 → 1920x1080 MJPG
+# @ 30 FPS in lockstep.
+#
+# Compare against the active manifest at arena_fixed/config/calibration_manifest.yaml
+# (bundle_name: arena_fixed_20260406). The five artifacts referenced here are
+# the candidates that should ultimately replace the corresponding canonical paths.
+
+bundle_name: arena_fullhd_remount_20260525
+status: candidate
+
+intrinsics:
+  dir: Remounted_West_East/cal/intrinsics
+  files:
+    camNorth: Remounted_West_East/cal/intrinsics/camNorth_intrinsics.json
+    camEast:  Remounted_West_East/cal/intrinsics/camEast_intrinsics.json
+    camSouth: Remounted_West_East/cal/intrinsics/camSouth_intrinsics.json
+    camWest:  Remounted_West_East/cal/intrinsics/camWest_intrinsics.json
+  format: json
+  resolution: [1920, 1080]
+  source: fresh FullHD ChArUco capture (2026-05-25)
+  rms_px:
+    camNorth: 1.29
+    camEast:  1.30
+    camSouth: 1.02
+    camWest:  1.26
+
+extrinsics:
+  file: Remounted_West_East/cal/extrinsics/extrinsics_fixed.json
+  format: json
+  frame: world_mm
+  y_axis_convention: no_mirror
+  source: AprilTag robust solver, init=arena_fixed/cal/extrinsics/extrinsics_fixed.json
+  rmse_px:
+    camNorth: 3.10
+    camEast:  3.41
+    camSouth: 2.96
+    camWest:  2.84
+  caveats:
+    - "RMSE 2.8–3.4 px > playbook target <2.0 px. Acceptable to gate downstream; refit if pose gate fails."
+    - "Lateral X/Y drift ~20–40 cm vs planned mount (camEast Y=22 cm vs target ≤7.5; camWest Y=269 cm vs target ≥297.5). Physical bracket placement vs solver noise — needs tape-measure verification if BLM bias surfaces."
+
+arena_dimensions:
+  source_txt: Remounted_West_East/cal/extrinsics/Dimensions_fixed.txt
+  yaml_mirror: null
+  units_source: cm
+  units_runtime: mm
+  updated:
+    camEast:  {old_z_cm: 212, new_z_cm: 45}
+    camWest:  {old_z_cm: 217, new_z_cm: 45}
+  unchanged:
+    - camNorth
+    - camSouth
+    - all AprilTag wall positions
+
+correction_model:
+  default_mode: linear
+  status: not_refit
+  candidates:
+    - path: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_ball/correction_model.json
+      target: ball
+      note: "Pre-remount fit. Still active. Refit decision pending GT joint-touch eval (step 10)."
+    - path: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_joint/correction_model.json
+      target: joint
+      note: "Pre-remount fit. Still active. Refit decision pending GT joint-touch eval (step 10)."
+
+eval_report:
+  dir: null
+  purpose: "Post-remount baseline will be written under Remounted_West_East/gt_eval/ after step 10."
+  pre_remount_reference:
+    dir: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406
+    ball_static_mean_mm: 156.90
+    joint_touch_mean_mm: 178.98
+
+remount_workflow:
+  playbook: docs/remount_playbook_2026-05-20.md
+  log: Remounted_West_East/REMOUNT_LOG.md
+  rollback_tag: pre-remount-2026-05-20
+  rollback_backup: cal_backup/pre_remount_2026-05-25
+
+provenance:
+  generators:
+    intrinsics: garage_lab_combined/scripts/calibrate_intrinsics_from_images.py
+    extrinsics: garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py
+    apriltag_capture: Remounted_West_East/scripts/apriltag_capture.py
+    framing_check: Remounted_West_East/scripts/framing_check.py
+  geometry_rules: .claude/rules/geometry.md
+  protected_functions:
+    - triangulate_multi
+    - transform_world_point_y
+    - ema_update
+    - world_to_launcher_xy_delta
+    - solve_angles_ballistic

@@ -74,6 +74,17 @@ All five serial scripts use **baud 921600** as of 2026-04-09. Do not introduce n
 - Old archives unless needed for a specific task
 - `*.pt`, `*.engine` model binaries
 
+## Projector goal-game fix sequence (2026-05-29)
+Root cause of the goal game barely scoring is software, not broken calibration (see `.claude/rules/geometry.md`). Fix order, geometry-protected functions untouched:
+1. **Phase 0 (prove first):** static-ball validator — triangulate a ball seen by ≥2 cams with correct pairing (normalized obs + `[R|t]`), gate **< 25 px**. Confirms calibration is healthy before changing anything.
+2. **Phase 1:** one-line fix in `proxiball_3d-main/projector/goal_target_game_multicam.py` — `proj_mats[cam] = K @ e["P"]` → `proj_mats[cam] = e["P"]`. Gate: debug-log `tri_reproj_err_px` drops ~1400 → <25 px.
+3. **Phase 2:** rewire hit detection from per-cam wall-projection consensus to **3D triangulation → KF → X=6230 plane-crossing → zone**; keep consensus as fallback; **exclude camSouth from wall voting** (keep it in 3D). camSouth does NOT move.
+4. **Phase 3:** re-shoot `homography.json` with projector locked at **1920×1080** (current file says proj_h=1200 = the monitor's height → display-only grid misalignment).
+5. **Phase 4:** acceptance — reproj <25 px, `no-consensus` drops, real shots register; replay the `--debug-log-jsonl`.
+
+## Camera swap → mandatory recalibration (2026-05-29)
+- Any camera replacement (e.g. global-shutter upgrade) = new sensor + new lens → **regenerate intrinsics at runtime resolution, then extrinsics, then projector homography**, and pass the static-ball <25 px gate before trusting geometry. Mount new cameras as close to the current calibrated XYZ positions as possible (keep geometry; camSouth stays).
+
 ## When the User Hits an Issue
 - Diagnose root cause before bypassing (e.g., port held by zombie → find PID, don't blindly retry)
 - Filter problems (MMMM noise, boot output, RPM spam) → add filter, don't disable serial reads

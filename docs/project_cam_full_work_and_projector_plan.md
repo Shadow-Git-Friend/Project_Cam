@@ -2105,7 +2105,8 @@ Use this if you want another implementation LLM to review and work on the repo:
 
 ```text
 You are working on Project_Cam. This is a real local repository for a
-four-camera domestic-garage 3D pose, ball-tracking, BLM launcher, athlete
+four-camera domestic-
+garage 3D pose, ball-tracking, BLM launcher, athlete
 assessment, and live-coach system.
 
 First read these files carefully:
