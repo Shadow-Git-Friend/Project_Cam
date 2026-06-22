@@ -61,6 +61,11 @@ All scripts that read serial MUST filter:
 - **S4 PASS**: Controlled fire at 15°/20° pitch, 500/600/800 RPM
 - **Integrated PASS**: pose→aim→fire on left_shoulder, right_knee, nose
 
+## Camera hardware-sync trigger (planned, 2026-05-29)
+- The planned global-shutter upgrade syncs cameras via a hardware trigger pulse from the ESP32. **This must NOT disturb BLM timing.** Generate the pulse on a dedicated pin via a hardware timer / LEDC / RMT peripheral — never with blocking `delay()` in the main loop, and never on a pin shared with stepper/serial/limit-switch logic.
+- Camera trigger lines are opto-isolated; drive 3.3 V ESP32 GPIO → opto/level-shift → 4 camera Line0 inputs (rising edge, 30–60 Hz). Isolation keeps the industrial I/O domain off the ESP32 logic domain.
+- Treat camera sync as a sideband peripheral clock. If adding it to `control_12_full.ino`, re-run S0–S2 to confirm serial/aim timing is unaffected before any S3/S4.
+
 ## Known Hazards
 - `set` beyond ±30 → ESP32 reboot (mitigated by Python-side clamp)
 - Horizontal stepper backlash on small `set→0→set` sequences (no movement until threshold exceeded)

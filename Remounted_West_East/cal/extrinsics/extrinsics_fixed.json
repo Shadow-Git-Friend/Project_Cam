@@ -1,0 +1,146 @@
+{
+    "camNorth": {
+        "rvec": [
+            -0.9221238404477399,
+            0.7815614843836809,
+            1.2831374602908219
+        ],
+        "tvec": [
+            1.107691303652883,
+            -2.138289860213736,
+            -0.7203732339393293
+        ],
+        "camera_position": [
+            0.1475978732292617,
+            1.0967275210745957,
+            2.2569015838075615
+        ],
+        "reprojection_error": 3.103825569152832,
+        "reprojection_error_rmse": 3.103825569152832,
+        "reprojection_error_mean": 2.70685076713562,
+        "reprojection_error_median": 2.8434011936187744,
+        "reprojection_error_p95": 5.049137592315674,
+        "num_points_total": 1088,
+        "num_points_inlier": 1052,
+        "num_images": 30,
+        "num_tags_total": 11,
+        "num_tags_inlier": 10,
+        "removed_tag_ids": [
+            20
+        ],
+        "expected_camera_position": [
+            0.05,
+            1.1,
+            2.26
+        ],
+        "camera_position_error_m": 0.09770186364698383
+    },
+    "camEast": {
+        "rvec": [
+            -1.4819039732926627,
+            0.6220554034669471,
+            0.5014828494019397
+        ],
+        "tvec": [
+            -1.240828794575667,
+            -0.3567291171488804,
+            1.354158961237374
+        ],
+        "camera_position": [
+            1.7985502924462233,
+            0.216371452156604,
+            0.46803685004778645
+        ],
+        "reprojection_error": 3.4079983234405518,
+        "reprojection_error_rmse": 3.4079983234405518,
+        "reprojection_error_mean": 3.1182773113250732,
+        "reprojection_error_median": 3.148305892944336,
+        "reprojection_error_p95": 5.996914386749268,
+        "num_points_total": 840,
+        "num_points_inlier": 720,
+        "num_images": 30,
+        "num_tags_total": 7,
+        "num_tags_inlier": 6,
+        "removed_tag_ids": [
+            0
+        ],
+        "expected_camera_position": [
+            1.62,
+            0.05,
+            2.12
+        ],
+        "camera_position_error_m": 1.6698927857276853
+    },
+    "camSouth": {
+        "rvec": [
+            -0.7378516368834981,
+            -0.7050904454960922,
+            -1.496395701309938
+        ],
+        "tvec": [
+            -1.4791088041040406,
+            2.0649857727172285,
+            -6.345644798014987
+        ],
+        "camera_position": [
+            6.24638644408058,
+            1.5978553044556343,
+            2.269064083649182
+        ],
+        "reprojection_error": 2.9557387828826904,
+        "reprojection_error_rmse": 2.9557387828826904,
+        "reprojection_error_mean": 2.4940590858459473,
+        "reprojection_error_median": 2.183149814605713,
+        "reprojection_error_p95": 6.175980567932129,
+        "num_points_total": 572,
+        "num_points_inlier": 480,
+        "num_images": 30,
+        "num_tags_total": 5,
+        "num_tags_inlier": 4,
+        "removed_tag_ids": [
+            17
+        ],
+        "expected_camera_position": [
+            6.18,
+            1.53,
+            2.27
+        ],
+        "camera_position_error_m": 0.09493354644089996
+    },
+    "camWest": {
+        "rvec": [
+            1.1791379860434001,
+            -2.3807780311419937,
+            -2.6038537302222844
+        ],
+        "tvec": [
+            3.3583063407748095,
+            -0.23379899793406012,
+            -0.2738600783230133
+        ],
+        "camera_position": [
+            1.9869306824735822,
+            2.6949491274550357,
+            0.444115363274858
+        ],
+        "reprojection_error": 2.8358192443847656,
+        "reprojection_error_rmse": 2.8358192443847656,
+        "reprojection_error_mean": 2.565751075744629,
+        "reprojection_error_median": 2.3130178451538086,
+        "reprojection_error_p95": 5.797938823699951,
+        "num_points_total": 840,
+        "num_points_inlier": 720,
+        "num_images": 30,
+        "num_tags_total": 7,
+        "num_tags_inlier": 6,
+        "removed_tag_ids": [
+            17
+        ],
+        "expected_camera_position": [
+            1.6,
+            2.97,
+            2.17
+        ],
+        "camera_position_error_m": 1.7899849482079713
+    }
+}

@@ -7,6 +7,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p Parallel_working/output
+WIDTH="${PROJECT_CAM_WIDTH:-1920}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-1080}"
+FPS="${PROJECT_CAM_FPS:-30}"
 
 ./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_parallel.py \
   --config garage_lab_combined/config/cameras.yaml \
@@ -19,7 +22,7 @@ mkdir -p Parallel_working/output
   --global-axis-len-mm 900 \
   --ball-device cuda:0 \
   --pose-device cuda:0 \
-  --width 960 --height 540 --fps 30 \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
   --pose-every 3 \
   --ball-every 3 \
   --viz-every 3 \

@@ -1,0 +1,74 @@
+# Calibration manifest — binds the 5 artifacts that together define the arena's
+# geometric + evaluative ground truth. Machine-readable companion to the per-
+# stack overview in CANONICAL.md.
+#
+# Created 2026-04-20 (second-pass review / Tier 0 addendum).
+# Consumers: Tier 1.2 (ArenaConfig) will load this via pydantic. Pre-Tier 1,
+# the individual paths below are still read directly by the 16+ scripts that
+# parse Dimensions*.txt / extrinsics JSON / intrinsics JSON.
+#
+# Do NOT silently swap any of these five — every change requires re-validation
+# against reeval_arena_fixed_20260406/ bounds (see .claude/rules/geometry.md).
+
+bundle_name: arena_fixed_20260406
+status: active
+
+intrinsics:
+  dir: garage_lab_combined/cal/intrinsics
+  files:
+    camNorth: garage_lab_combined/cal/intrinsics/camNorth_intrinsics.json
+    camEast:  garage_lab_combined/cal/intrinsics/camEast_intrinsics.json
+    camSouth: garage_lab_combined/cal/intrinsics/camSouth_intrinsics.json
+    camWest:  garage_lab_combined/cal/intrinsics/camWest_intrinsics.json
+  format: json
+  resolution: [1280, 720]
+
+extrinsics:
+  file: arena_fixed/cal/extrinsics/extrinsics_fixed.json
+  format: json
+  frame: world_mm
+  y_axis_convention: no_mirror   # production default — see geometry.md
+
+arena_dimensions:
+  source_txt: arena_fixed/cal/extrinsics/Dimensions_fixed.txt
+  yaml_mirror: arena_fixed/config/arena_dimensions.yaml
+  units_source: cm
+  units_runtime: mm              # runtime converts cm→mm after parse
+
+correction_model:
+  # One chosen at runtime via --correction-model / --correction-mode.
+  # Both bias and linear forms are served from the same JSON.
+  default_mode: linear
+  candidates:
+    - path: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_ball/correction_model.json
+      target: ball
+    - path: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_joint/correction_model.json
+      target: joint
+  schema:
+    bias_field: global_bias_add_mm          # {x, y, z}
+    linear_field: axis_linear_gt_from_est   # {x: {a, b}, y: {a, b}, z: {a, b}}
+
+eval_report:
+  dir: garage_lab_combined/gt_eval/reeval_arena_fixed_20260406
+  purpose: current-accuracy reference for thesis + drift detection
+  key_metrics:
+    ball_static:
+      mean_mm: 156.90
+      p95_mm: 288.34
+      precision_mm: 3.09
+      bias_mm: {x: 60, z: -104}
+    joint_touch:
+      mean_mm: 178.98
+      p95_mm: 243.77
+      precision_mm: 4.39
+      bias_mm: {x: 83, z: -125}
+
+provenance:
+  generator: garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py
+  geometry_rules: .claude/rules/geometry.md
+  protected_functions:
+    - triangulate_multi
+    - transform_world_point_y
+    - ema_update
+    - world_to_launcher_xy_delta
+    - solve_angles_ballistic

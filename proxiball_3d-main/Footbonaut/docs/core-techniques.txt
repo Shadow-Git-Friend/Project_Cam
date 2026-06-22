@@ -1,0 +1,18 @@
+1. Prediction
+2. Kalman Filter
+3. ROI
+4. Tracking Line Smooth
+5. Adaptive Frame Skipping
+6. Threading
+7. Semaphore
+8. Quantisation (INT8 or FP16)
+9. TensorRT Engine
+10. Adaptive Multi-Camera Tracking: 
+    Decide which pair or trio of cameras to use based on ball pos; detection accuracy; 
+    Adaptive switch between 2, 3, or 4 cameras parallel detection;
+11. JSON output metrics of Ball
+12. FastAPI server for metadata exchange
+13. Possible NVIDIA Jetson; Tang nano 20k implementation
+14. Git
+15. Clean Dataset; Dataset Engineering
+16. Hyperparameter Tuning: Resolution; Batch Size; Learning Rate

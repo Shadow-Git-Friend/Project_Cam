@@ -1,0 +1,214 @@
+\section{6.1 Experimental Design Philosophy}
+This chapter defines how measurement integrity was maintained. The key principle is separation of concerns:
+\begin{itemize}
+  \item static tests for geometric accuracy and bias,
+  \item dynamic tests for temporal behavior,
+  \item no-ball tests for false-positive robustness,
+  \item joint-touch tests for human keypoint localization.
+\end{itemize}
+
+\section{6.2 World-Frame Fixation and Units}
+All experiments use millimeters in a fixed world frame. Before each session:
+\begin{enumerate}
+  \item confirm camera mapping,
+  \item confirm active extrinsics file,
+  \item confirm arena dimensions and tag coordinates,
+  \item confirm no unit conversions are required in trial CSV.
+\end{enumerate}
+
+This avoids hidden scaling and axis convention errors.
+
+\section{6.3 Ball Static GT Protocol (36 Points)}
+\subsection{6.3.1 Point Layout}
+The static matrix uses:
+\begin{itemize}
+  \item X = 3000, 4000, 5000 mm
+  \item Y = 2300, 1600, 1000 mm
+  \item Z = 200, 750, 1300, 1800 mm
+\end{itemize}
+
+Total: 36 points.
+
+\subsection{6.3.2 Capture Procedure}
+For each trial ID:
+\begin{enumerate}
+  \item place ball center at known coordinate using physical holder,
+  \item press \texttt{r} in recorder preview,
+  \item hold position for 2-4 s,
+  \item save clip under matching trial folder.
+\end{enumerate}
+
+\subsection{6.3.3 Processing and Reporting}
+Each trial clip is processed into 3D JSON and rendered for visual QA. Statistical reports aggregate per-trial results and produce summary metrics plus correction model.
+
+\section{6.4 Dynamic Ball Protocol}
+\subsection{6.4.1 \texttt{ball\_slow}}
+20 s gentle movement. Target is smooth trajectory with high detection coverage.
+
+\subsection{6.4.2 \texttt{ball\_fast}}
+20 s realistic throws. Target is stress testing under blur/occlusion and speed.
+
+\subsection{6.4.3 \texttt{no\_ball}}
+15 s background-only clip. Target is false-positive suppression verification.
+
+This three-clip design is simple yet highly informative for practical system readiness.
+
+\section{6.5 Joint-Touch Protocol (81 Planned)}
+\subsection{6.5.1 Motivation}
+Joint GT is harder than ball GT because the body part itself is not a rigid marker and human posture introduces uncertainty.
+
+\subsection{6.5.2 Design}
+81 planned trials across multiple XY points and elevation platforms. Joints tested: \texttt{left\_shoulder}, \texttt{right\_hip}, \texttt{right\_knee}. The objective is to measure localization behavior in central operational volume.
+
+\subsection{6.5.3 Execution Reality}
+62 trials were valid, 19 missing/failed (time and protocol constraints). This is acceptable for exploratory evaluation but should be completed in future campaigns.
+
+\section{6.6 Rigid Target Protocol Importance}
+A rigid-point protocol is included to decouple system geometry from human placement variability. This protocol is critical before launcher actuation, since controller calibration requires trustworthy measurement of geometric error floor.
+
+\section{6.7 Trial Metadata and Naming}
+Session data uses deterministic naming:
+\begin{itemize}
+  \item session root with timestamp,
+  \item per-trial clip folder (\texttt{B001}, \texttt{J021}, etc.),
+  \item result JSON per trial,
+  \item report outputs (\texttt{summary\_metrics.json}, \texttt{error\_report.md}, correction model).
+\end{itemize}
+
+This structure reduces audit friction and supports reproducibility.
+
+\section{6.8 Statistical Metrics}
+Primary metrics:
+\begin{itemize}
+  \item mean/median/RMSE/P90/P95/max norm error,
+  \item axis bias (\texttt{ex}, \texttt{ey}, \texttt{ez} means),
+  \item static precision (\texttt{std\_norm}),
+  \item detection ratio and camera participation,
+  \item mean reprojection error.
+\end{itemize}
+
+These were selected because they map directly to control relevance: absolute targeting error, direction-specific bias, temporal consistency, and confidence quality.
+
+\section{6.9 Validity Threats and Mitigation}
+Threats:
+\begin{itemize}
+  \item imperfect manual placement,
+  \item incomplete camera overlap,
+  \item camera movement between sessions,
+  \item residual synchronization offset,
+  \item environmental lighting variation.
+\end{itemize}
+
+Mitigations:
+\begin{itemize}
+  \item structured session checklist,
+  \item by-path camera assignment,
+  \item overlay validation after recalibration,
+  \item no-ball clips for detector sanity,
+  \item separate static and dynamic reporting.
+\end{itemize}
+
+\section{6.10 Protocol Readiness Assessment}
+The protocol suite is sufficient to make evidence-based decisions:
+\begin{itemize}
+  \item whether to recalibrate,
+  \item whether correction model helps,
+  \item whether dynamic behavior is acceptable,
+  \item whether launcher integration can proceed to next risk level.
+\end{itemize}
+
+
+\section{6.11 Protocol Execution Checklist Used in Practice}
+Before each capture session, the following checklist was used:
+\begin{enumerate}
+  \item verify camera role mapping in config,
+  \item verify active intrinsics/extrinsics files,
+  \item verify arena \texttt{Dimensions.txt} consistency,
+  \item run quick preview to check exposure/focus,
+  \item clear scene of extra people for pose trials,
+  \item prepare trial CSV and session folders,
+  \item run one pilot clip and process quickly for sanity.
+\end{enumerate}
+
+This checklist reduced failed sessions and is recommended as standard operating procedure.
+
+\section{6.12 Why 2-3 Second Holds Were Preferred}
+For static GT trials, hold windows around 2-3 s provided enough frames to estimate stable center while limiting operator fatigue and posture drift. Longer holds did not improve precision significantly and increased trial execution time.
+
+\section{6.13 Handling Partial Trial Completion}
+In real sessions, full protocol completion may be difficult. The thesis explicitly handles partial completion by:
+\begin{itemize}
+  \item marking missing trials in reports,
+  \item keeping valid subset statistics,
+  \item avoiding imputation of missing coordinates,
+  \item separating "planned" vs "executed" trial counts.
+\end{itemize}
+
+This preserves transparency and statistical integrity.
+
+\section{6.14 Protocol Transferability}
+The protocol design is transferable to other indoor arenas with minimal modifications:
+\begin{itemize}
+  \item redefine world frame and dimensions,
+  \item remap camera roles,
+  \item regenerate tag corner coordinates,
+  \item reuse same capture/process/evaluation scripts.
+\end{itemize}
+
+Therefore, the contribution is not only a one-room setup but a reusable methodology.
+
+
+
+\section{6.15 Extended Static Protocol Design Rationale}
+The chosen 3x3x4 static ball grid balances coverage and execution effort. It samples central and off-center zones and multiple heights relevant for realistic passes/chests/head-level interactions. A denser grid was considered but would substantially increase session time and fatigue risk.
+
+The grid is designed to identify:
+\begin{itemize}
+  \item global bias trends by axis,
+  \item corner/cross-volume degradation,
+  \item height-dependent distortions.
+\end{itemize}
+
+\section{6.16 Joint Protocol Human-Factors Constraints}
+Joint-touch protocols are constrained by human repeatability. Maintaining exact shoulder or knee contact to invisible 3D points is physically difficult, especially across many trials. The project partially addressed this by introducing platform heights and more central target points.
+
+A stronger future protocol should include physical target markers and helper fixtures to reduce placement uncertainty.
+
+\section{6.17 Why Dynamic and No-Ball Tests Are Non-Negotiable}
+Static performance can be misleadingly optimistic. Dynamic tests reveal temporal instability and outlier behavior under realistic motion blur. No-ball tests ensure detector robustness against background patterns that can mimic ball texture.
+
+Without these tests, a system may appear accurate in controlled points but fail operationally.
+
+\section{6.18 Reporting Standards Used}
+Each report includes both machine-readable and narrative forms:
+\begin{itemize}
+  \item \texttt{summary\_metrics.json} for scripts and dashboards,
+  \item \texttt{error\_report.md} for human interpretation,
+  \item per-trial CSV for traceability.
+\end{itemize}
+
+This dual-format reporting supports both engineering iteration and thesis writing.
+
+\section{6.19 Session Health Metrics}
+Beyond final accuracy, session health was assessed via:
+\begin{itemize}
+  \item percentage of valid trials,
+  \item camera participation rates,
+  \item proportion of clips requiring manual intervention,
+  \item frequency of calibration refresh events.
+\end{itemize}
+
+These meta-metrics indicate operational maturity and should be tracked in future deployments.
+
+
+
+\section{6.20 Mapping Protocols to Thesis Grading Criteria}
+The protocol design directly supports manuscript assessment criteria:
+\begin{itemize}
+  \item Problem/objectives: protocols test core claim of metric 3D readiness.
+  \item Methodology: controlled static/dynamic/joint procedures with traceable scripts.
+  \item Testing and analysis: quantitative metrics and correction modeling.
+  \item Conclusions/future work: explicit readiness boundaries and next-stage gates.
+\end{itemize}
+
+This mapping ensures that experimental design is not only technically useful but also academically aligned with program expectations.

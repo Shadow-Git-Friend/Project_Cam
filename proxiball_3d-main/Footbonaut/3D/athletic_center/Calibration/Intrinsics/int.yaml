@@ -1,0 +1,30 @@
+%YAML:1.0
+---
+image_width: 1920
+image_height: 1080
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 369.36840553802244, 0., 959.56249112865339, 0.,
+       284.17916908179751, 539.57010826359181, 0., 0., 1. ]
+dist_coeffs: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [ -0.043541549227604427, 0.00054609926052943622,
+       0.0023218689602659466, -0.0064531878765077492,
+       -2.0849549530270364e-06 ]
+meta:
+   opencv_version: "4.13.0"
+   dictionary: DICT_4X4_1000
+   method: calibrateCameraAruco_from_charuco_print
+   squares_x: 7
+   squares_y: 10
+   square_len_m: 0.040000000000000001
+   marker_len_m: 0.029999999999999999
+   best_parity: 1
+   best_flip_x: False
+   best_flip_y: False
+   rms: 100.43887874075975
+   ref_image: "WIN_20251229_14_06_54_Pro.jpg"

@@ -58,9 +58,11 @@ def calibrate_charuco_camera(camera_id, board_params):
         print(f"[ERROR] Не могу открыть камеру {camera_id}. Проверьте ID.")
         return
 
-    # Устанавливаем высокое разрешение
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    # Устанавливаем целевой режим после перемонтажа камер.
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
     print("\n" + "="*50)
     print("Начните показывать ChArUco доску камере.")

@@ -1,11 +1,12 @@
 # Garage Lab Combined
 
-This workspace will hold the unified garage pipeline (mm units) at 1280x720.
+This workspace holds the unified garage pipeline (mm units) at 1920x1080 after
+the east/west remount recalibration.
 
 ## Current assumptions
 - Units: mm
-- Runtime resolution: 1280x720
-- Target FPS: 15 (capture), 5 (inference)
+- Runtime resolution: 1920x1080
+- Target FPS: 30 (capture, MJPG), 5 (inference)
 - Cameras: Hikvision DS‑E12 (fixed positions)
 
 ## Configs
@@ -13,7 +14,7 @@ This workspace will hold the unified garage pipeline (mm units) at 1280x720.
 - `config/cameras.yaml`: device mapping for camNorth/East/South/West
 
 ## Next steps
-1. Generate new intrinsics at 1280x720 with a ChArUco board.
+1. Generate new intrinsics at 1920x1080 MJPG with a ChArUco board.
 2. Validate intrinsics (corner coverage + reprojection error).
 3. Define 1x1m goal plane and integrate into 3D visualization.
 4. Run garage test capture and build unified visualization.
@@ -31,6 +32,9 @@ python garage_lab_combined/scripts/auto_capture_charuco_multi.py \
   --hold-sec 0 \
   --target-count 30
 ```
+
+The default capture mode is `1920x1080 MJPG @ 30 FPS`, matching the remount
+calibration target.
 
 Preview windows are enabled by default. Use `--no-show` to disable.
 
@@ -139,14 +143,14 @@ python garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py \
   --sigma-scale 2.0
 ```
 
-For your 1280x720 intrinsics set:
+For the current per-camera intrinsics directory:
 ```bash
 python garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py \
   --images-root garage-20260217T113109Z-3-001/garage/Scenario2 \
   --dimensions garage_lab_combined/cal/extrinsics/Dimensions.txt \
   --unified-intrinsics '' \
   --intrinsics-dir garage_lab_combined/cal/intrinsics \
-  --out garage_lab_combined/cal/extrinsics/extrinsics_robust_s2_1280_strict.json \
+  --out garage_lab_combined/cal/extrinsics/extrinsics_robust_s2_fullhd_strict.json \
   --tag-median-thresh-px 40 \
   --min-point-error-px 6 \
   --sigma-scale 1.2

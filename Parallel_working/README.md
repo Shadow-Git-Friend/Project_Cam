@@ -29,7 +29,7 @@ This script is a parallel copy with performance-focused additions:
 - Scoped hot-path cleanup
   - batched undistortion helper for joint keypoints
   - reduced avoidable copies in mosaic rendering
-- Intrinsics scaling fix for non-1280x720 runtime
+- Intrinsics scaling fix for non-calibration-size runtime
   - camera intrinsics are automatically scaled when `--width/--height` differs from calibration size
   - this prevents 3D placement drift in lower-resolution modes
 
@@ -40,11 +40,13 @@ This script is a parallel copy with performance-focused additions:
   - `Parallel_working/run_live_parallel_balanced.sh`
 - Smooth profile (best current compromise for skeleton + ball):
   - `Parallel_working/run_live_parallel_smooth.sh`
-  - keeps geometry-safe runtime resolution (`1280x720`) to avoid 3D placement drift
+  - defaults to the post-remount target mode (`1920x1080 MJPG @ 30 FPS`)
 - Max-FPS profile (aggressive):
   - `Parallel_working/run_live_parallel_maxfps.sh`
 
-All wrappers accept extra flags via `"$@"`.
+All wrappers default to `PROJECT_CAM_WIDTH=1920`, `PROJECT_CAM_HEIGHT=1080`,
+and `PROJECT_CAM_FPS=30`; override those environment variables for a lower
+test mode. Extra CLI flags are still forwarded via `"$@"`.
 
 ## Example
 ```bash

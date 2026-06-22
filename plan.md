@@ -58,6 +58,30 @@ Safe-tuning matrix (ema-alpha, pose-every, ball-every, viz-every и т.д.) пе
 
 ---
 
+## Phase 0b — Projector goal game fix + camera upgrade (2026-05-29)
+
+**Контекст:** диагностировали, почему projector goal game почти не засчитывает. Это **софт-баг + метод**, НЕ сломанная калибровка. Доказано численно на реальных `Remounted_West_East/` файлах. Подробности — `.claude/rules/{geometry,workflow}.md` и Session Log в CLAUDE.md.
+
+### Софт-фиксы (бесплатно, geometry-protected функции не трогаем)
+- [ ] **Phase 0 — доказать калибровку:** static-ball validator, триангуляция мяча видимого ≥2 камерами с правильной парой (normalized obs + `[R|t]`), gate **< 25 px**. Калибровка здорова (intrinsics @1920×1080 RMS 1.0–1.3 px, extrinsics RMSE 2.8–3.4 px).
+- [ ] **Phase 1 — one-liner:** `goal_target_game_multicam.py` `proj_mats[cam] = K @ e["P"]` → `e["P"]` (как в canonical viewer). Gate: `tri_reproj_err_px` ~1400 → <25 px.
+- [ ] **Phase 2 — переписать scoring** с per-cam wall consensus на **3D триангуляция → KF → пересечение X=6230 → зона**; consensus оставить fallback; **camSouth исключить из wall-voting** (camSouth НЕ двигаем, он ценен для 3D). 
+- [ ] **Phase 3 — переснять `homography.json`** при проекторе залоченном на **1920×1080** (сейчас proj_h=1200 = высота монитора → grid смещён только визуально).
+- [ ] **Phase 4 — приёмка:** reproj <25 px, `no-consensus` падает, реальные удары засчитываются.
+
+### Камеры — placement decision
+- **Оставляем текущую 4-камерную геометрию. camSouth НЕ двигаем** (отклонили рекомендацию deep-research «перенести на NW» — убивает south-end покрытие, основана на ложной посылке «калибровка сломана»). Реальный FOV из K = HFOV 81–86°.
+
+### Камеры — закупка (для профессора, GigE global-shutter)
+- [ ] Купить **4** (1:1 замена; не смешивать типы затвора). Primary **4× HikRobot MV-CS016-10GC** (1.6 MP GS, GigE-PoE, HW trigger — GigE вариант это IMX296 ~65 fps, НЕ IMX273) или **4× FLIR BFS-PGE-16S2C-CS** (IMX273 78 fps, ~$371). Линзы ~3.5–4 мм (НЕ 6 мм).
+- [ ] Подключение: **Intel I350-T4** quad GigE NIC (по линии на камеру) + 12 В и ESP32 opto-trigger через Hirose I/O (PoE не нужен). User хочет **raw запись @ 60 fps** → добавить **2 TB NVMe** (M.2). Итого ≈ $1,500–1,900.
+- **PC (HP Z4 G4: i9-7900X, 32 GB, RTX 2080 Ti + Quadro P400) тянет всё** — единственные добавки: NIC + NVMe. «Докупить 4 веб-камеры (→8)» отклонено: не чинит sync/rolling-shutter, ломает USB-2 бюджет, режет inference fps вдвое.
+- Закупка ортогональна софт-фиксу: камеры чинят быстрый мяч (hardware ceiling), софт-фикс чинит scoring.
+
+**Exit criteria:** goal game засчитывает удары (bounce/slow) после софт-фиксов; BoM отправлен профессору, процедура закупки запущена.
+
+---
+
 ## Phase 1 — Pre-defense housekeeping
 
 **Срок:** 1 неделя (примерно последняя неделя до защиты)

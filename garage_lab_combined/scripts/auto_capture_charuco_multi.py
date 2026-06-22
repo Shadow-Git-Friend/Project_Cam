@@ -7,6 +7,12 @@ import argparse
 import os
 
 
+DEFAULT_WIDTH = 1920
+DEFAULT_HEIGHT = 1080
+DEFAULT_FPS = 30
+DEFAULT_FOURCC = "MJPG"
+
+
 def load_cameras(config_path):
     with open(config_path, 'r') as f:
         data = yaml.safe_load(f)
@@ -57,20 +63,21 @@ def detect_charuco(gray, detector, dictionary, params, board):
     return charuco_corners, charuco_ids
 
 
-def open_capture(device, width, height, fourcc, buffer_size):
+def open_capture(device, width, height, fps, fourcc, buffer_size):
     cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         return None
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     if fourcc:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
     if buffer_size is not None:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
     return cap
 
 
-def main():
+def build_arg_parser():
     ap = argparse.ArgumentParser(description="Auto-capture ChArUco images when enough corners are detected.")
     ap.add_argument("--config", default="garage_lab_combined/config/cameras.yaml", help="Path to cameras.yaml")
     ap.add_argument("--out-dir", default="garage_lab_combined/cal/captures", help="Output directory")
@@ -78,12 +85,18 @@ def main():
     ap.add_argument("--hold-sec", type=float, default=0.0, help="Seconds corners must stay above threshold (0 = immediate)")
     ap.add_argument("--target-count", type=int, default=30, help="Images per camera (0 for unlimited)")
     ap.add_argument("--cooldown-sec", type=float, default=0.5, help="Cooldown between saves per camera")
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=720)
-    ap.add_argument("--fourcc", default="MJPG")
+    ap.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    ap.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
+    ap.add_argument("--fps", type=int, default=DEFAULT_FPS)
+    ap.add_argument("--fourcc", default=DEFAULT_FOURCC)
     ap.add_argument("--buffer-size", type=int, default=1)
     ap.add_argument("--show", action=argparse.BooleanOptionalAction, default=True,
                     help="Show preview window (default: on). Use --no-show to disable.")
+    return ap
+
+
+def main():
+    ap = build_arg_parser()
     args = ap.parse_args()
 
     cams = load_cameras(args.config)
@@ -101,7 +114,7 @@ def main():
         if device is None:
             print(f"[WARN] {cam_name}: missing device entry")
             continue
-        cap = open_capture(device, args.width, args.height, args.fourcc, args.buffer_size)
+        cap = open_capture(device, args.width, args.height, args.fps, args.fourcc, args.buffer_size)
         if cap is None or not cap.isOpened():
             print(f"[ERROR] {cam_name}: cannot open {device}")
             continue
@@ -123,6 +136,7 @@ def main():
         return
 
     print("\n[INFO] Auto-capture running.")
+    print(f"Mode: {args.width}x{args.height} {args.fourcc} @ {args.fps} FPS")
     print(f"Min corners: {args.min_corners}, Hold: {args.hold_sec}s, Target: {args.target_count} images per camera")
     print("Press Ctrl+C to stop.\n")
 

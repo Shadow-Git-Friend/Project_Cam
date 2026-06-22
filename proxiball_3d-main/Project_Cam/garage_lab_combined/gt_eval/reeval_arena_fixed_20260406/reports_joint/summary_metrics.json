@@ -1,0 +1,96 @@
+{
+  "num_trials_total": 81,
+  "num_trials_ok": 62,
+  "num_trials_missing_or_failed": 19,
+  "error_norm_mm": {
+    "mean": 178.98468862115527,
+    "median": 181.1682888823703,
+    "rmse": 183.69150230026037,
+    "p90": 227.35055948895808,
+    "p95": 243.7746026387416,
+    "max": 271.1270431688888
+  },
+  "axis_bias_mm": {
+    "ex_mean": 82.72369821665403,
+    "ey_mean": 72.30779878976446,
+    "ez_mean": -125.3994494220053
+  },
+  "static_precision_mm": {
+    "std_norm_mean": 4.394633598745241,
+    "std_norm_p95": 9.168562288025761
+  },
+  "detection": {
+    "detect_ratio_mean": 1.0
+  },
+  "per_joint": {
+    "left_shoulder": {
+      "num_trials_ok": 18,
+      "error_norm_mm": {
+        "mean": 203.09047672321265,
+        "median": 207.49940186096217,
+        "rmse": 205.34893431729571,
+        "p90": 239.95802133772503,
+        "p95": 246.4192914136413,
+        "max": 259.74222313506573
+      },
+      "axis_bias_mm": {
+        "ex_mean": 82.47317427612549,
+        "ey_mean": 124.62025404552855,
+        "ez_mean": -133.34749820943847
+      },
+      "detection": {
+        "detect_ratio_mean": 1.0
+      },
+      "static_precision_mm": {
+        "std_norm_mean": 3.116659841460884,
+        "std_norm_p95": 5.016208712199359
+      }
+    },
+    "right_hip": {
+      "num_trials_ok": 27,
+      "error_norm_mm": {
+        "mean": 182.147964117723,
+        "median": 183.00747616442416,
+        "rmse": 184.5662288499474,
+        "p90": 208.7669890133552,
+        "p95": 218.11796789758418,
+        "max": 264.3264280667511
+      },
+      "axis_bias_mm": {
+        "ex_mean": 65.12682350052313,
+        "ey_mean": 52.854747026888525,
+        "ez_mean": -155.31754706993485
+      },
+      "detection": {
+        "detect_ratio_mean": 1.0
+      },
+      "static_precision_mm": {
+        "std_norm_mean": 3.4310897394222537,
+        "std_norm_p95": 4.843821112469724
+      }
+    },
+    "right_knee": {
+      "num_trials_ok": 17,
+      "error_norm_mm": {
+        "mean": 148.43688719501625,
+        "median": 154.1548318520328,
+        "rmse": 155.9157358693739,
+        "p90": 189.82584859146382,
+        "p95": 213.40382205010886,
+        "max": 271.1270431688888
+      },
+      "axis_bias_mm": {
+        "ex_mean": 110.93693634989214,
+        "ey_mean": 47.81416367175836,
+        "ez_mean": -69.46688973565861
+      },
+      "detection": {
+        "detect_ratio_mean": 1.0
+      },
+      "static_precision_mm": {
+        "std_norm_mean": 7.278116647735776,
+        "std_norm_p95": 15.679717120601255
+      }
+    }
+  }
+}

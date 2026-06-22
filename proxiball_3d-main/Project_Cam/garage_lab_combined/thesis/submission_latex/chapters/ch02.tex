@@ -1,0 +1,243 @@
+\section{2.1 Introduction}
+The literature review is organized around the technical chain required for intelligent targeting: camera geometry, multi-view reconstruction, 2D detection, 3D pose recovery, target event detection, and control-oriented integration. The intention is not to enumerate unrelated methods, but to position design decisions in this thesis against known trade-offs.
+
+\section{2.2 Camera Models and Multi-View Geometry}
+Classical pinhole projection and distortion modeling remain the foundation of metric 3D reconstruction. Hartley and Zisserman formalized epipolar geometry and projective reconstruction constraints; practical systems now use calibrated projection matrices with robust numerical solvers. In real deployments, calibration quality often dictates final performance more strongly than detector model capacity.
+
+A recurring issue in sports environments is the mismatch between calibration scene and operational scene. Intrinsics estimated at one resolution or focus setting may not transfer perfectly to another runtime condition. Extrinsics degrade when cameras are slightly moved, even if the movement is visually minor. Therefore, calibration must be treated as a lifecycle process, not a one-time setup.
+
+\section{2.3 Fiducial-Based Calibration in Practice}
+ChArUco and AprilTag approaches are commonly used because they combine robust detection and practical field usage. ChArUco supports subpixel corners and robust calibration with fewer images than plain chessboards under difficult angles. AprilTag provides reliable marker identification for extrinsic estimation in environments where full calibration boards are impractical.
+
+However, real-world conditions introduce errors rarely highlighted in idealized experiments:
+\begin{itemize}
+  \item tags taped on uneven surfaces,
+  \item dirt/print quality degradation,
+  \item door panels with local non-planarity,
+  \item partial occlusions by people/equipment,
+  \item strong perspective and low contrast at frame periphery.
+\end{itemize}
+
+This thesis confirms these challenges and shows that robust tag filtering and camera-specific tag maps are necessary for stable extrinsics.
+
+\section{2.4 2D Ball Detection and 3D Ball Tracking}
+Single-frame 2D ball detection has improved significantly with modern YOLO variants. Yet for 3D tracking in multi-camera systems, detector confidence alone is insufficient. A high-confidence false detection in one camera can corrupt triangulation if not geometrically checked.
+
+Recent practice favors hybrid logic:
+\begin{enumerate}
+  \item confidence thresholding,
+  \item geometric triangulation,
+  \item reprojection consistency checks,
+  \item temporal constraints (speed gates, smoothness priors).
+\end{enumerate}
+
+This thesis adopts that philosophy through iterative reprojection rejection and optional speed/EMA filtering. Dynamic tests show that fast throws remain challenging due to motion blur and reduced simultaneous visibility.
+
+\section{2.5 Human Pose Estimation in Multi-Camera Setups}
+2D keypoint models such as RTMPose are strong for single-person scenes, but practical multi-camera usage adds identity consistency challenges. If multiple persons appear briefly, per-camera detector outputs may switch identities, creating large 3D artifacts after triangulation.
+
+Key mitigations include:
+\begin{itemize}
+  \item per-camera person tracking using previous frame geometry,
+  \item dominance heuristics (area/confidence),
+  \item minimum camera count per joint,
+  \item confidence gating per keypoint.
+\end{itemize}
+
+This thesis incorporates these mechanisms and documents failure modes when entering/exiting persons interfere with target identity.
+
+\section{2.6 Sensorized vs Vision-Centric Target Verification}
+Traditional systems often use dedicated physical sensors in target frames (switches, pressure sensors, contact detectors). These are robust but constrained by wiring, placement, and reconfiguration costs. Vision-centric verification defines target planes/volumes in software and checks ball trajectory intersection in 3D.
+
+The key advantage of camera-based target verification is reconfigurability. A 1x1 m target and a 1x1.5 m target can be changed without rewiring hardware. The key disadvantage is dependence on calibration quality and line-of-sight robustness.
+
+This thesis contributes to that transition by building a calibrated world frame where virtual target zones can be evaluated consistently.
+
+\section{2.7 Closed-Loop Actuation and Ballistics in Training Robotics}
+In launcher control research, perception-to-actuation pipelines usually include:
+\begin{itemize}
+  \item target state estimation,
+  \item coordinate transform to launcher frame,
+  \item ballistic parameter solving,
+  \item actuator command generation,
+  \item and post-shot verification.
+\end{itemize}
+
+The major risk is compounded uncertainty: if perception and actuation errors are both high, closed-loop behavior becomes unstable or unsafe. Therefore, a staged approach is standard: perception validation first, then HIL calibration, then autonomous operation with strict confidence gates.
+
+This thesis intentionally follows this staged strategy.
+
+\section{2.8 Literature Gap and Thesis Position}
+A practical gap exists between algorithm papers and deployable arena systems. Many works report model metrics but do not provide full-system calibration discipline, GT protocols, or operational failure analysis. This thesis is positioned as an integration-and-validation contribution:
+\begin{itemize}
+  \item multi-camera arena deployment,
+  \item full-pipeline reproducibility,
+  \item quantitative GT evidence,
+  \item and explicit roadmap to safe control.
+\end{itemize}
+
+It does not claim novel neural architecture design. The novelty is in system unification, deployment realism, and measurable progress toward intelligent actuation.
+
+
+\section{2.9 Critical Review of Footbot/Footbonaut-Style Systems}
+Industrial and commercial football training platforms generally prioritize reliable ball feeding, repeatability, and user-programmed drill scenarios. Their sensing layers are often selective and event-driven (trigger zones, gate crossings, button-like targets), which is sufficient for many drills but limited for body-part-aware adaptation.
+
+A recurring limitation is that sensing is frequently external to a full 3D scene graph. For example, a machine can know whether a ball passed through a gate sensor, but not necessarily where the player's shoulder, hip, and knee were in the same calibrated frame at the event time. This gap prevents advanced drills where machine behavior should react to dynamic posture.
+
+The literature and market observations suggest that many systems are optimized around launcher mechanics and throughput, while vision is either optional, single-camera, or loosely coupled analytics. The contribution of this thesis is to invert that priority: launcher commands become a downstream consumer of high-integrity 3D perception.
+
+\section{2.10 Why Camera-Only Sensing Is Both Attractive and Difficult}
+Camera-only sensing can reduce sensor wiring, simplify arena reconfiguration, and support richer analytics from the same hardware. However, this architecture transfers complexity into calibration, synchronization, and robust triangulation.
+
+Advantages:
+\begin{itemize}
+  \item software-defined targets can be changed quickly,
+  \item one perception stack can serve ball tracking, pose tracking, and event verification,
+  \item archived video enables retrospective debugging and model improvement.
+\end{itemize}
+
+Difficulties:
+\begin{itemize}
+  \item every small camera movement can invalidate geometry,
+  \item occlusions and lighting shifts can cause intermittent tracking failures,
+  \item dynamic tasks can produce outliers that are hard to reject in real-time,
+  \item multi-person scenes require identity management.
+\end{itemize}
+
+The experiments in this thesis confirm both sides of this trade-off. The camera-only approach is viable and flexible, but only with strict operational discipline.
+
+\section{2.11 Review of Error Modeling Approaches Relevant to This Work}
+Error modeling in multi-camera systems commonly uses one or more of:
+\begin{itemize}
+  \item reprojection-error analysis,
+  \item spatial bias fitting,
+  \item temporal smoothness diagnostics,
+  \item camera contribution and observability statistics.
+\end{itemize}
+
+This thesis follows that stack with explicit reports:
+\begin{itemize}
+  \item per-camera reprojection behavior,
+  \item axis-wise bias (ex, ey, ez),
+  \item static precision inside hold windows,
+  \item mean camera participation per estimate,
+  \item dynamic jump/speed diagnostics.
+\end{itemize}
+
+This structure is practical for engineering decisions. For example, if high error coincides with low camera participation, effort should target overlap and mounting geometry rather than model retraining.
+
+\section{2.12 Synthesis for Method Selection}
+The literature review and practical constraints jointly justify the following method choices in this project:
+\begin{enumerate}
+  \item ChArUco intrinsics to improve corner robustness and calibration repeatability.
+  \item AprilTag extrinsics with robust filtering and optional tag maps per camera.
+  \item Triangulation with iterative worst-view rejection by reprojection error.
+  \item Minimum camera support thresholds for ball and joints.
+  \item Protocolized static and dynamic GT campaigns before actuation claims.
+\end{enumerate}
+
+This synthesis directly connects Chapter 2 to the methodological details in Chapters 4-6 and to the results analysis in Chapter 7.
+
+
+
+\section{2.13 Review of Triangulation Robustness Strategies}
+Robust triangulation strategies in practical multi-camera systems usually combine geometry and temporal logic. The simplest DLT solution is sensitive to outliers and should be supplemented with one or more of the following:
+\begin{itemize}
+  \item RANSAC over view subsets,
+  \item reprojection-error trimming,
+  \item confidence-weighted linear systems,
+  \item temporal continuity priors,
+  \item multi-hypothesis tracking.
+\end{itemize}
+
+This thesis selected reprojection-based iterative rejection due to transparency and ease of debugging. While RANSAC could be added, iterative rejection with deterministic thresholds already provided predictable behavior and understandable failure patterns.
+
+\section{2.14 Confidence Calibration in Detection Models}
+Confidence scores from detectors are not calibrated probabilities in a strict statistical sense. Thresholds therefore should be tuned empirically in target environment. A threshold that is optimal in one dataset may produce missed detections or false positives in another environment with different lighting and textures.
+
+The project used task-oriented threshold tuning informed by dynamic tests rather than generic benchmark expectations.
+
+\section{2.15 Multi-Person Ambiguity in Sports Scenes}
+Sports scenes can include coaches, assistants, or bystanders. Even brief additional person presence can cause identity switching when detector outputs are independently processed per camera. In 3D reconstruction, asynchronous identity switches across cameras can create impossible skeletons.
+
+Literature suggests combining appearance embeddings and motion consistency. This thesis implemented lightweight geometry-based tracking due to runtime constraints, and enforced one-active-subject protocol for evaluation sessions.
+
+\section{2.16 Event Verification in 3D vs 2D}
+2D event verification (e.g., line crossing in one view) is vulnerable to perspective effects and occlusion. 3D verification using world-frame intersections provides physically interpretable criteria. For this reason, target verification in future launcher mode should be defined in 3D space, even if 2D overlays are used for visualization.
+
+\section{2.17 Domain Shift and Deployment Drift}
+A major challenge observed in this project is domain shift not only between datasets, but between physical sessions in same room. Small lighting changes, camera tilt adjustments, and tag condition deterioration introduce distribution shifts. Continuous validation and periodic recalibration are therefore integral to deployment.
+
+\section{2.18 Research Methods for Engineering Prototypes}
+In engineering prototypes, literature recommends staged validation:
+\begin{itemize}
+  \item component-level tests,
+  \item integrated system tests,
+  \item controlled-field tests,
+  \item operational stress tests.
+\end{itemize}
+
+This thesis follows that sequence, culminating in GT campaigns and dynamic stress scenarios.
+
+\section{2.19 Positioning Against Purely Data-Driven Alternatives}
+Purely data-driven end-to-end approaches could directly map images to control commands. However, for high-stakes actuation this may reduce interpretability and complicate safety assurance. The geometric pipeline in this thesis preserves interpretability and provides explicit quality gates at each stage.
+
+\section{2.20 Chapter Summary}
+The literature supports the architectural direction of this work: geometry-centered, protocol-validated, and safety-aware integration. The next chapters demonstrate how these principles were implemented and measured in practice.
+
+
+
+\section{2.21 Extended Comparative Matrix: Why This Thesis Uses a Hybrid Classical-Deep Pipeline}
+A useful way to position this work is by comparing three families of systems.
+
+Family A: Fully classical geometry systems  
+These systems rely on fiducials, segmentation, and deterministic tracking. They are interpretable and often fast, but can be brittle in clutter and lighting changes. Human pose extraction without learned models is limited.
+
+Family B: Fully deep end-to-end systems  
+These systems can be highly adaptive and achieve strong benchmark performance, but often require large curated datasets and may be hard to certify for safety-critical behavior. Debugging specific geometric failures is difficult.
+
+Family C: Hybrid systems (this thesis)  
+Deep models handle object/keypoint detection, while geometric consistency and calibration provide physical interpretability and safety gates. This approach offers a practical compromise between robustness and transparency.
+
+The thesis adopts Family C because it is more suitable for staged transition to actuation where uncertainty must be explicitly reasoned about.
+
+\section{2.22 Academic Novelty vs Engineering Novelty}
+In research discussions, novelty is sometimes interpreted narrowly as a new algorithm. This thesis positions novelty at the systems level:
+\begin{itemize}
+  \item integration novelty (unifying multiple modules into a measurable pipeline),
+  \item deployment novelty (real arena with practical constraints),
+  \item validation novelty (structured GT protocols and correction workflow),
+  \item translational novelty (explicit control-ready architecture with safety gates).
+\end{itemize}
+
+This form of novelty is valid and important in engineering disciplines where practical deployment is nontrivial and scientific rigor requires measurable end-to-end behavior.
+
+\section{2.23 Relevance to Computer Vision in Sports Analytics}
+Sports analytics often emphasizes tactical analysis from broadcast-like views. This thesis is different: it targets actionable 3D localization for immediate machine interaction. The target audience is not only analysts but also robotic training-system designers.
+
+The work therefore contributes to a niche intersection of CV, robotics, and sports engineering.
+
+\section{2.24 Open Research Questions Beyond This Thesis}
+Unresolved questions include:
+\begin{itemize}
+  \item How to robustly track body-part intent under high-speed full-body motion?
+  \item What uncertainty representation best supports safe firing decisions?
+  \item How to fuse short-horizon prediction with conservative safety logic?
+  \item How to calibrate launcher dynamics online without risking unsafe behavior?
+\end{itemize}
+
+These questions define a credible multi-semester research agenda.
+
+
+
+\section{2.25 Review Summary Linked to Assessment Rubric}
+The handbook evaluates literature quality by depth, relevance, and positioning. This review supports those criteria by:
+\begin{itemize}
+  \item covering foundational geometry and practical calibration methods,
+  \item discussing detector and pose models relevant to the implemented stack,
+  \item comparing sensorized and camera-only paradigms,
+  \item identifying explicit gap addressed by this thesis (integration + deployment + measurable validation),
+  \item connecting literature claims to concrete implementation choices.
+\end{itemize}
+
+Rather than presenting a broad but disconnected survey, the review is intentionally selective and method-linked. This improves technical coherence and aligns with research-based thesis expectations.

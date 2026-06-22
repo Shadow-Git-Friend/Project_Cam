@@ -1,0 +1,199 @@
+## What you did (and what your results actually mean)
+
+From your report: you built **2D–3D correspondences** from detected AprilTag corners and measured 3D corner coordinates, then solved **PnP per camera** with RANSAC + refinement, and validated with **reprojection error** and a **triangulation round-trip test**. 
+
+That establishes two different notions of “correct”:
+
+* **Image-consistency correct**: ([R|t]) projects your measured 3D tag points onto the observed pixels with very small error.
+* **Physical-room correct**: camera centers (C) computed from ([R|t]) match tape-measured room coordinates.
+
+You have strong evidence for the first, but a mismatch on the second.
+
+---
+
+## Why “extrinsics can be correct” while “camera positions are wrong”
+
+### 1) Your extrinsics are correct **in the coordinate frame that your solver thinks is “world”**
+
+`solvePnP` returns (R,t) that map your object/world points to the camera frame:
+
+[
+P_c = R,P_w + t
+]
+
+Camera center in that same (P_w) frame is:
+
+[
+C = -R^T t
+]
+
+That math is fine. If (C) looks impossible, the usual reason is:
+**the (P_w) you compare against (your “expected positions”) is not the same frame as the (P_w) implied by your 3D tag file and how it was measured.**
+
+Concretely: if your “expected camera position” was measured in *RoomFrame*, but your tag coordinates are effectively in *TagSurveyFrame* that is rotated, mirrored, or translated relative to RoomFrame, then:
+
+* Projections will be excellent (because PnP only cares about consistency between tag 3D and pixels).
+* Triangulation will be excellent (because all cameras share the same TagSurveyFrame).
+* But computed camera positions will not match your tape-measured RoomFrame.
+
+This is the most common explanation when reprojection is subpixel but camera centers look “outside the room.”
+
+---
+
+### 2) A rigid (or mirrored) transform can preserve all of your “correctness” tests
+
+If your entire 3D tag set is related to the real room by some transform:
+
+* Rigid transform: (P_{room} = R_0 P_{tag} + t_0)
+* Or mirrored: includes a reflection (determinant (-1))
+
+Then PnP will produce camera poses in the **tag frame**, not the **room frame**. Triangulation and reprojection still work because everything is self-consistent.
+
+**Your own evidence points to a reflection / axis convention mismatch**:
+
+* camEast has (X,Y) close to expected but (Z) with opposite sign. 
+  That pattern is classic when your “up” axis or handedness differs between the two frames you’re comparing.
+
+---
+
+### 3) Planar degeneracy and “pose flips” can give physically implausible camera centers with tiny reprojection
+
+You tested subsets:
+
+* **Floor tags only** → consistent (X,Y), flipped (Z)
+* **Wall tags only** → completely wrong pose 
+
+This is a big signal:
+
+* Points on a single plane make PnP more ambiguous (there are known “flip” solutions where the camera ends up on the wrong side of the plane but still reprojects well).
+* If your per-camera tag set is dominated by one plane (one wall), the solver can land in a “valid reprojection” solution that is physically wrong unless you strongly constrain with non-coplanar points and cheirality checks.
+
+You do have multiple planes overall (floor + walls), but if the *inliers* RANSAC keeps are mostly from a plane, the effective constraint can still behave planar.
+
+---
+
+## What might actually be wrong in your setup (high-probability list)
+
+### A) Your “expected camera positions” are in a different origin/axis frame than your tag coordinates
+
+Typical causes:
+
+* Origin corner mismatch (NE vs NW vs some offset)
+* Axis directions swapped (X↔Y) or inverted (east→west vs west→east)
+* You measured camera positions relative to a different reference (wall surface vs corner line vs lens center)
+* Units mismatch (cm in one place, mm/m in another)
+
+**Why this fits your symptoms:** reprojection + triangulation are excellent, but physical positions are not.
+
+---
+
+### B) Hidden reflection / handedness mismatch between your room convention and the “world” you assume
+
+Your world definition is right-handed as stated (X, Y, Z). OpenCV camera frame is also right-handed (x right, y down, z forward). But if your measured world coordinates effectively encode a reflected frame (common when surveying along walls), then camera centers will look “behind” planes and Z signs can flip.
+
+**The camEast “Z sign opposite” observation is consistent with this.** 
+
+---
+
+### C) Some 3D tag coordinates (especially wall tags) are wrong in a systematic way
+
+Your subset test showed wall-only calibration is “entirely incorrect.” 
+That often happens when:
+
+* Wall plane coordinate is wrong (e.g., Y=298 assumed flat, but wall has offsets like door recess; you mentioned this in earlier context)
+* The tag plane normal or corner positions aren’t consistent (tag not perfectly planar to the assumed wall plane; measured corners not matching actual physical placement)
+* The “corner coordinates” were measured with small but systematic errors (rotations, tilt, non-orthogonality)
+
+**Important:** small systematic 3D errors can still yield tiny reprojection error if PnP “absorbs” it into pose—especially when you have many points and RANSAC cherry-picks a subset.
+
+---
+
+### D) You are over-trusting subpixel reprojection given very low inlier ratios
+
+You reported inliers/total like 400/2968 (≈14%) for camNorth. 
+That means the final pose is supported by a relatively small subset of all collected corners.
+
+If those inliers are:
+
+* concentrated on one plane, or
+* concentrated on one region of the image,
+
+you can get:
+
+* extremely low reprojection error on inliers
+* but a pose that is not globally physically correct
+
+This does *not* contradict triangulation passing—triangulation uses those same extrinsics.
+
+---
+
+## How to reconcile: “So are the extrinsics correct or not?”
+
+They are **correct for your operational goal** (multi-camera 3D ball reconstruction) *in the tag-defined coordinate system*.
+
+They are **not yet validated as correct in the physical room coordinate system** you used for “expected positions.”
+
+That’s why both can be true at once.
+
+---
+
+## Concrete improvements / fixes (in order of impact)
+
+### 1) Solve the frame alignment explicitly (recommended)
+
+Treat your PnP world as **TagFrame**, and your tape-measured as **RoomFrame**.
+
+Compute a rigid (or similarity) transform (T) such that:
+
+[
+P_{room} \approx T , P_{tag}
+]
+
+How to get (T):
+
+* Use several known reference points measured in both frames (e.g., 3–6 tag centers whose room coordinates you trust).
+* Fit (R_0,t_0) (and optionally scale) via least squares.
+* Then transform camera centers: (C_{room} = R_0 C_{tag} + t_0)
+
+If the best fit requires a reflection (determinant (-1)), you’ve found the handedness issue.
+
+---
+
+### 2) Add cheirality validation and reject “behind-camera” solutions
+
+After PnP, check that most points satisfy:
+
+[
+Z_c > 0
+]
+
+If large portions are behind camera, you likely have a flipped solution.
+
+---
+
+### 3) Improve 3D geometry conditioning per camera
+
+For each camera, ensure inliers span **multiple planes / depth variations**:
+
+* At least one floor tag + several wall tags visible simultaneously
+* Avoid calibrating a camera from mostly one wall plane
+
+---
+
+### 4) Joint multi-camera bundle adjustment (best long-term)
+
+Instead of independent per-camera PnP, solve for all camera poses jointly minimizing total reprojection across all cameras, optionally with priors (e.g., cameras near walls, Z≈known height). This reduces “weird but reprojection-good” local minima.
+
+---
+
+### 5) Fix the measurement model for walls with recesses (door offsets)
+
+If some tags lie on recessed/offset regions, encode that in 3D coordinates (don’t force all to the same Y plane). Otherwise you inject systematic errors that will distort pose.
+
+---
+
+## Direct answer to your main question
+
+### “How come extrinsics are correct if camera positions are completely wrong?”
+
+Because your validation (reprojection + triangulation) proves that the extrinsics are **self-consistent** with the **3D tag coordinate system you provided**, not that they match the **physical room coordinate system you expected**. A frame mismatch (rotation/translation/reflection), planar pose ambiguity, or systematic 3D survey errors can make camera centers look impossible while preserving near-perfect reprojection and good triangulation in that same internal frame. 

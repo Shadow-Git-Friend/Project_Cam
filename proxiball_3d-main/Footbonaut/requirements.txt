@@ -1,0 +1,33 @@
+# Core: PyTorch + CUDA
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+torchaudio==2.5.1+cu124
+
+# TensorRT
+tensorrt==10.4.0
+tensorrt-cu12==10.4.0
+tensorrt-lean==10.4.0
+tensorrt-dispatch==10.4.0
+
+# Inference Engines
+onnx>=1.15.0,<=1.20.1
+onnxruntime-gpu>=1.17.0,<=1.23.2
+onnxslim==0.1.82
+opencv-python>=4.8.0
+numpy>=1.24.0,<2.0.0
+
+# Tracking & Detection
+ultralytics
+ultralytics-thop==2.0.18
+filterpy==1.4.5
+
+# Analytics & Visualization
+matplotlib
+scipy
+pandas
+tqdm
+PyYAML
+torchmetrics
+pycocotools
+polars

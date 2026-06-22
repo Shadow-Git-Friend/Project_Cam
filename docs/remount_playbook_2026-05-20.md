@@ -126,9 +126,13 @@ wall at Y = 3050. X positions stay at the existing mid-length sweet spot.
 
    ```bash
    lsusb
+   v4l2-ctl --device=/dev/v4l/by-path/pci-0000:00:14.0-usb-0:13.1:1.0-video-index0 --list-formats-ext
+   v4l2-ctl --device=/dev/v4l/by-path/pci-0000:00:14.0-usb-0:5.1.1:1.0-video-index0 --list-formats-ext
    ./apps/athlete_assessment/run_live_coach.sh push_up
    # confirm all 4 cameras show up; q to quit
    ```
+
+   camEast and camWest should advertise `1920x1080 MJPG @ 30 FPS`.
 
 4. **Live framing check (CRITICAL -- before any calibration).** A camera
    that hits a perfect AprilTag RMS but crops out the athlete's hip is
@@ -154,12 +158,27 @@ wall at Y = 3050. X positions stay at the existing mid-length sweet spot.
    running the extrinsics solver**. AprilTag RMS does not catch framing
    problems; only a human eye does.
 
-5. **Intrinsics sanity (only if focus ring was touched).** Intrinsics
-   are invariant under a mount-only change, so usually skip. If you ran
-   the script, compare new `K, D` against existing JSON and skip
-   re-saving if `||deltaK_focal|| < 2 px`.
+5. **Intrinsics (mandatory for the new FullHD mode).** The previous
+   active intrinsics were solved at `1280x720`; they do not directly
+   match the new `1920x1080 MJPG @ 30 FPS` target. Capture a fresh
+   ChArUco set before solving extrinsics:
 
-6. **Extrinsics (mandatory).** Re-run the AprilTag extrinsics solver:
+   ```bash
+   ./venv/bin/python garage_lab_combined/scripts/auto_capture_charuco_multi.py \
+       --config garage_lab_combined/config/cameras.yaml \
+       --out-dir garage_lab_combined/cal/captures/fullhd_remount_20260525 \
+       --min-corners 25 \
+       --hold-sec 0 \
+       --target-count 40
+
+   ./venv/bin/python garage_lab_combined/scripts/calibrate_intrinsics_from_images.py \
+       --config garage_lab_combined/config/cameras.yaml \
+       --captures-dir garage_lab_combined/cal/captures/fullhd_remount_20260525 \
+       --out-dir garage_lab_combined/cal/intrinsics
+   ```
+
+6. **Extrinsics (mandatory).** Re-run the AprilTag extrinsics solver
+   after the FullHD intrinsics are written:
 
    ```bash
    ./venv/bin/python garage_lab_combined/scripts/calibrate_extrinsics_apriltag_robust.py
@@ -171,7 +190,9 @@ wall at Y = 3050. X positions stay at the existing mid-length sweet spot.
 7. **Update `Dimensions_fixed.txt`** (lines 12-15) with the new positions
    in cm (e.g. `CamEast = (162, 5, 45)` for `(1620, 50, 450)` mm).
 
-8. **Bump calibration date** in `arena_fixed/config/calibration_manifest.yaml`.
+8. **Bump calibration date and intrinsics resolution** in
+   `arena_fixed/config/calibration_manifest.yaml` once the new FullHD
+   intrinsics and extrinsics are accepted.
 
 9. **Pose-gate validation (do NOT enable BLM yet):**
 

@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="$ROOT/venv/bin/python"
 SESSION_STORE="$ROOT/garage_lab_combined/stage_person_cycle/.last_session"
+WIDTH="${PROJECT_CAM_WIDTH:-1920}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-1080}"
+FPS="${PROJECT_CAM_FPS:-30}"
 
 usage() {
   cat <<'EOF'
@@ -96,7 +99,7 @@ case "$subcmd" in
       --dimensions "$ROOT/garage_lab_combined/cal/extrinsics/Dimensions.txt" \
       --ball-device cuda:0 \
       --pose-device cuda:0 \
-      --width 640 --height 360 --fps 30 \
+      --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
       --pose-every 4 --ball-every 1 \
       --no-show-2d --no-show-3d \
       --udp-target-host 127.0.0.1 \
@@ -122,7 +125,7 @@ case "$subcmd" in
       --dimensions "$ROOT/garage_lab_combined/cal/extrinsics/Dimensions.txt" \
       --ball-device cuda:0 \
       --pose-device cuda:0 \
-      --width 640 --height 360 --fps 30 \
+      --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
       --pose-every 2 --ball-every 2 \
       --show-2d --no-show-3d \
       --udp-target-host 127.0.0.1 \

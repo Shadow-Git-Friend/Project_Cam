@@ -1,0 +1,86 @@
+================================================================================
+COMPREHENSIVE EXTRINSICS VALIDATION
+================================================================================
+
+================================================================================
+TEST 1: CHEIRALITY CHECK (points should be in front of camera)
+================================================================================
+camNorth: 149/149 tags in front (100.0%)
+camEast: 110/110 tags in front (100.0%)
+camSouth: 131/131 tags in front (100.0%)
+camWest: 100/100 tags in front (100.0%)
+
+================================================================================
+TEST 2: INLIER PLANE ANALYSIS (checking for planar degeneracy)
+================================================================================
+
+camNorth:
+  Inliers: 200/2968 (6.7%)
+  Floor tag points: 0 (0.0%)
+  Wall tag points: 200 (100.0%)
+  Unique tags used: [np.int32(2)]
+  ⚠️  WARNING: >80% inliers from walls - potential planar degeneracy!
+
+camEast:
+  Inliers: 300/2200 (13.6%)
+  Floor tag points: 150 (50.0%)
+  Wall tag points: 150 (50.0%)
+  Unique tags used: [np.int32(2), np.int32(6), np.int32(21), np.int32(22)]
+
+camSouth:
+  Inliers: 250/2612 (9.6%)
+  Floor tag points: 50 (20.0%)
+  Wall tag points: 200 (80.0%)
+  Unique tags used: [np.int32(7), np.int32(8), np.int32(9), np.int32(21)]
+
+camWest:
+  Inliers: 100/2000 (5.0%)
+  Floor tag points: 50 (50.0%)
+  Wall tag points: 50 (50.0%)
+  Unique tags used: [np.int32(0), np.int32(19)]
+
+================================================================================
+TEST 3: MULTI-CAMERA TRIANGULATION VALIDATION
+================================================================================
+
+Triangulating known 3D points from camera pairs:
+
+Tag 21 center: [222.55 171.75   4.  ]
+  camNorth+camEast: error = 5.48 cm
+  camEast+camSouth: error = 2.30 cm
+  camSouth+camWest: error = 1.71 cm
+  camNorth+camSouth: error = 9.49 cm
+  Average error: 4.74 cm, Max: 9.49 cm
+
+Tag 13 center: [421.375 167.75   92.25 ]
+  camNorth+camEast: error = 2.61 cm
+  camEast+camSouth: error = 1.93 cm
+  camSouth+camWest: error = 5.17 cm
+  camNorth+camSouth: error = 1.42 cm
+  Average error: 2.78 cm, Max: 5.17 cm
+
+Tag 15 center: [383.6  168.5  113.75]
+  camNorth+camEast: error = 2.98 cm
+  camEast+camSouth: error = 1.58 cm
+  camSouth+camWest: error = 5.48 cm
+  camNorth+camSouth: error = 2.38 cm
+  Average error: 3.10 cm, Max: 5.48 cm
+
+================================================================================
+FINAL ASSESSMENT
+================================================================================
+
+Based on the validation tests:
+
+1. CHEIRALITY: Checks if tags are in front of cameras (should be >90%)
+2. PLANAR DEGENERACY: Checks if inliers are mostly from one plane
+3. TRIANGULATION: Measures 3D reconstruction accuracy from camera pairs
+
+CRITERIA FOR USABILITY:
+✓ Triangulation error <10 cm → EXCELLENT for ball tracking
+✓ Triangulation error 10-30 cm → ACCEPTABLE for ball tracking  
+✗ Triangulation error >30 cm → NEEDS IMPROVEMENT
+
+If triangulation is good, extrinsics ARE USABLE regardless of camera
+position calculations.
+

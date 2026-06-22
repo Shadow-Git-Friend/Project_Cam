@@ -4,7 +4,9 @@ import json
 import math
 import multiprocessing as mp
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -40,6 +42,30 @@ CONNECTIONS = [
 ]
 
 CAM_ORDER = ["camEast", "camNorth", "camSouth", "camWest"]
+
+
+def camera_order_from_config(cams_cfg):
+    """Keep legacy 4-cam ordering, then append any additional configured cameras."""
+    legacy = [cam for cam in CAM_ORDER if cam in cams_cfg]
+    extras = [cam for cam in cams_cfg if cam not in CAM_ORDER]
+    return legacy + extras
+
+
+def iter_frame_batches(frames, max_batch_size):
+    max_batch_size = max(1, int(max_batch_size))
+    for start in range(0, len(frames), max_batch_size):
+        yield frames[start:start + max_batch_size]
+
+
+def run_yolopose_batched(model, frames, max_batch_size, **kwargs):
+    results = []
+    for batch in iter_frame_batches(frames, max_batch_size):
+        batch_results = model(batch, **kwargs)
+        batch_results = [] if batch_results is None else list(batch_results)
+        if len(batch_results) < len(batch):
+            batch_results.extend([None] * (len(batch) - len(batch_results)))
+        results.extend(batch_results[:len(batch)])
+    return results
 
 JOINT_NAME_TO_IDX = {
     "nose": 0,
@@ -222,7 +248,7 @@ class ThreadedCapture:
 
     def read_latest(self):
         with self.lock:
-            if self.frame is None:
+            if self.frame is None or not self._has_unconsumed:
                 return False, None, 0.0
             fr = self.frame
             ts = self.ts
@@ -244,6 +270,58 @@ def load_cameras(config_path):
         data = yaml.safe_load(f) or {}
     cams = data.get("cameras", {})
     return cams
+
+
+def open_camera_capture(device):
+    if sys.platform.startswith("linux") and str(device).startswith("/dev/"):
+        return cv2.VideoCapture(device, cv2.CAP_V4L2)
+    return cv2.VideoCapture(device)
+
+
+def apply_uvc_low_latency_controls(device, cam, args, log=False):
+    """Stabilize USB webcams so auto exposure cannot silently drop FPS."""
+    if args.no_uvc_controls:
+        return
+    if not sys.platform.startswith("linux") or not str(device).startswith("/dev/"):
+        return
+    v4l2_ctl = shutil.which("v4l2-ctl")
+    if not v4l2_ctl:
+        return
+
+    controls = [
+        ("power_line_frequency", int(args.uvc_power_line_frequency)),
+        ("exposure_dynamic_framerate", 0),
+        ("auto_exposure", 1),  # V4L2 manual exposure mode for UVC cameras.
+        ("exposure_time_absolute", int(args.uvc_exposure)),
+    ]
+    if int(args.uvc_gain) >= 0:
+        controls.append(("gain", int(args.uvc_gain)))
+    if int(args.uvc_focus) >= 0:
+        controls.extend([
+            ("focus_automatic_continuous", 0),
+            ("focus_absolute", int(args.uvc_focus)),
+        ])
+
+    applied = []
+    failed = []
+    for name, value in controls:
+        proc = subprocess.run(
+            [v4l2_ctl, "-d", str(device), f"--set-ctrl={name}={value}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        (applied if proc.returncode == 0 else failed).append(name)
+
+    if log and applied:
+        msg = (
+            f"[INFO] {cam}: UVC low-latency controls applied "
+            f"(exposure={args.uvc_exposure}, gain={args.uvc_gain}, "
+            f"focus={args.uvc_focus}, power_line={args.uvc_power_line_frequency})"
+        )
+        if failed:
+            msg += f"; skipped unsupported: {','.join(failed)}"
+        print(msg)
 
 
 def parse_dimensions(filepath):
@@ -514,6 +592,36 @@ def robust_triangulate_ball(obs_norm, obs_px, proj_mats, extr, intr, min_cams=2,
             return None, [], reproj[worst_cam]
         del active[worst_cam]
     return None, [], None
+
+
+def robust_triangulate_joint(obs_norm, obs_px, proj_mats, extr, intr,
+                             min_cams=2, max_reproj_px=40.0):
+    """Per-joint robust triangulation: iteratively reject the worst-reprojection
+    camera until every remaining ray agrees within max_reproj_px. Mirrors
+    robust_triangulate_ball so a single bad camera pose (e.g. a high-RMSE cam) or
+    a transient 2D keypoint mis-detection cannot fling a joint to a random 3D
+    point. Returns (X | None, used_cams). Does NOT modify triangulate_multi."""
+    if len(obs_norm) < min_cams:
+        return None, []
+    active = dict(obs_norm)
+    while len(active) >= min_cams:
+        X = triangulate_multi(active, proj_mats)
+        if X is None:
+            return None, []
+        if max_reproj_px <= 0:
+            return X, sorted(active.keys())
+        reproj = {}
+        for cam in list(active.keys()):
+            uv = project_world_to_pixel(X, extr[cam]["R"], extr[cam]["tvec"],
+                                        intr[cam]["K"], intr[cam]["D"])
+            reproj[cam] = float(np.linalg.norm(uv - obs_px[cam]))
+        worst_cam = max(reproj, key=reproj.get)
+        if reproj[worst_cam] <= max_reproj_px:
+            return X, sorted(active.keys())
+        if len(active) == min_cams:
+            return None, []
+        del active[worst_cam]
+    return None, []
 
 
 def select_ball_box_for_cam(boxes_xyxyc, kf_pred_uv, kf_gate_px,
@@ -1242,7 +1350,8 @@ class JointKalmanFilter:
         return self._initialized
 
 
-def make_mosaic(cam_frames, ball_boxes, per_cam_pose, copy_frames=False):
+def make_mosaic(cam_frames, ball_boxes, per_cam_pose, cam_order=None, tile_size=None, copy_frames=False):
+    order = list(cam_order) if cam_order is not None else list(CAM_ORDER)
     panels = []
     ref_shape = None
     for fr in cam_frames.values():
@@ -1251,7 +1360,7 @@ def make_mosaic(cam_frames, ball_boxes, per_cam_pose, copy_frames=False):
             break
     if ref_shape is None:
         ref_shape = (720, 1280, 3)
-    for cam in CAM_ORDER:
+    for cam in order:
         frame = cam_frames.get(cam)
         if frame is None:
             frame = np.zeros(ref_shape, dtype=np.uint8)
@@ -1275,12 +1384,19 @@ def make_mosaic(cam_frames, ball_boxes, per_cam_pose, copy_frames=False):
                     p2 = (int(kpts[e, 0]), int(kpts[e, 1]))
                     cv2.line(disp, p1, p2, (10, 10, 10), 2)
 
+        if tile_size is not None:
+            disp = cv2.resize(disp, tile_size)
         cv2.putText(disp, cam, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         panels.append(disp)
 
-    row1 = np.hstack([panels[0], panels[1]])
-    row2 = np.hstack([panels[2], panels[3]])
-    return np.vstack([row1, row2])
+    cols = 2 if len(order) <= 4 else 3
+    rows = int(math.ceil(max(1, len(order)) / cols))
+    while len(panels) < rows * cols:
+        panels.append(np.zeros(ref_shape, dtype=np.uint8))
+    return np.vstack([
+        np.hstack(panels[row * cols:(row + 1) * cols])
+        for row in range(rows)
+    ])
 
 
 def main():
@@ -1301,11 +1417,21 @@ def main():
                          "~+8ms latency per 4-cam batch.")
     ap.add_argument("--ball-device", default="cuda:0", help="Ball detector device, e.g. cpu or cuda:0")
     ap.add_argument("--pose-device", default="cpu", help="Pose detector device, e.g. cpu or cuda:0")
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=720)
-    ap.add_argument("--fps", type=int, default=15)
+    ap.add_argument("--width", type=int, default=1920)
+    ap.add_argument("--height", type=int, default=1080)
+    ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--fourcc", default="MJPG")
     ap.add_argument("--buffer-size", type=int, default=1)
+    ap.add_argument("--no-uvc-controls", action="store_true",
+                    help="Do not apply low-latency V4L2 controls to USB webcams.")
+    ap.add_argument("--uvc-exposure", type=int, default=200,
+                    help="Manual UVC exposure_time_absolute. 200 = about 20 ms; keeps C920 at 30 FPS.")
+    ap.add_argument("--uvc-gain", type=int, default=160,
+                    help="Manual UVC gain. Use -1 to leave gain unchanged.")
+    ap.add_argument("--uvc-focus", type=int, default=0,
+                    help="Manual UVC focus_absolute. Use -1 to leave focus unchanged.")
+    ap.add_argument("--uvc-power-line-frequency", type=int, default=1,
+                    help="UVC power_line_frequency: 1=50 Hz, 2=60 Hz.")
     ap.add_argument("--ball-conf", type=float, default=0.4)
     ap.add_argument("--ball-min-cams", type=int, default=2, help="Minimum cameras for 3D ball triangulation")
     ap.add_argument("--ball-max-reproj-px", type=float, default=25.0, help="Reject ball cams with reproj error above this (px). 0=off")
@@ -1365,7 +1491,14 @@ def main():
                      help="Pose estimation backend. yolopose is ~4-6x faster (single YOLO11-Pose model).")
     ap.add_argument("--yolopose-model", default="yolo11m-pose.pt",
                      help="YOLO-Pose model path (.pt or .engine for TensorRT).")
+    ap.add_argument("--pose-max-batch", type=int, default=4,
+                    help="Max frames per pose inference call. Keep 4 for TensorRT engines exported with max batch 4.")
     ap.add_argument("--pose-conf", type=float, default=0.45)
+    ap.add_argument("--pose-max-reproj-px", type=float, default=40.0,
+                    help="Per-joint robust triangulation: reject camera rays whose "
+                         "reprojection error exceeds this (px). Stops a single bad "
+                         "camera/mis-detection from flinging a joint to a random point. "
+                         "0=off (old plain triangulation).")
     ap.add_argument("--pose-every", type=int, default=None, help="Run pose once every N frames (default: 2)")
     ap.add_argument(
         "--joint-stale-frames",
@@ -1386,6 +1519,8 @@ def main():
     ap.add_argument("--ball-every", type=int, default=None, help="Run ball detector once every N frames (default: 1)")
     ap.add_argument("--viz-every", type=int, default=None, help="Update 3D view once every N frames (default: 1)")
     ap.add_argument("--mosaic-every", type=int, default=None, help="Update 2D mosaic once every N frames (default: 1)")
+    ap.add_argument("--mosaic-tile-width", type=int, default=640, help="2D mosaic tile width before display/record.")
+    ap.add_argument("--mosaic-tile-height", type=int, default=360, help="2D mosaic tile height before display/record.")
     ap.add_argument("--show-3d", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--show-2d", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument(
@@ -1430,7 +1565,7 @@ def main():
     ap.add_argument("--viz-width", type=int, default=960, help="Width of cv2 3D view window.")
     ap.add_argument("--viz-height", type=int, default=720, help="Height of cv2 3D view window.")
     ap.add_argument("--record-video", default="", help="If set, write 3D arena view to this .mp4 path.")
-    ap.add_argument("--record-fps", type=float, default=15.0, help="FPS for the recorded video (usually matches capture rate / viz_every).")
+    ap.add_argument("--record-fps", type=float, default=30.0, help="FPS for the recorded video (usually matches capture rate / viz_every).")
     ap.add_argument("--record-mosaic", default="", help="If set, also write the 4-cam 2D mosaic to this .mp4 path.")
     ap.add_argument("--coach-overlay", action=argparse.BooleanOptionalAction, default=False,
                     help="Show the low-lag in-process live coach overlay on the freshest camera ROI.")
@@ -1549,6 +1684,7 @@ def main():
 
     args.ball_every = max(1, int(args.ball_every))
     args.pose_every = max(1, int(args.pose_every))
+    args.pose_max_batch = max(1, int(args.pose_max_batch))
     args.viz_every = max(1, int(args.viz_every))
     args.mosaic_every = max(1, int(args.mosaic_every))
     if args.joint_stale_frames is None:
@@ -1761,8 +1897,9 @@ def main():
             pass
 
     cams_cfg = load_cameras(args.config)
+    cam_order = camera_order_from_config(cams_cfg)
     active_cams = []
-    for cam in CAM_ORDER:
+    for cam in cam_order:
         dev = cams_cfg.get(cam, {}).get("device")
         if dev is not None:
             active_cams.append((cam, dev))
@@ -1824,16 +1961,23 @@ def main():
 
     caps = {}
     for cam, dev in active_cams:
-        cap = cv2.VideoCapture(dev)
+        apply_uvc_low_latency_controls(dev, cam, args, log=False)
+        cap = open_camera_capture(dev)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*args.fourcc))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*args.fourcc))
         cap.set(cv2.CAP_PROP_FPS, args.fps)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, args.buffer_size)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open {cam}: {dev}")
+        apply_uvc_low_latency_controls(dev, cam, args, log=True)
+        eff_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        eff_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        eff_fps = cap.get(cv2.CAP_PROP_FPS)
+        eff_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        eff_fourcc_str = "".join(chr((eff_fourcc >> (8 * i)) & 0xFF) for i in range(4))
         caps[cam] = ThreadedCapture(cap, name=cam)
-        print(f"[OK] {cam}: {dev}")
+        print(f"[OK] {cam}: {dev} ({eff_w}x{eff_h}@{eff_fps:.1f}, {eff_fourcc_str})")
 
     fig = None
     ax = None
@@ -1998,6 +2142,7 @@ def main():
 
             if len(frame_batch) < 2:
                 timer.stop("total")
+                time.sleep(0.002)
                 continue
 
             frame_idx += 1
@@ -2080,14 +2225,18 @@ def main():
             if run_pose and use_yolopose and yolopose_model is not None:
                 # YOLO-Pose path: single model for detection + keypoints
                 try:
-                    yp_results = yolopose_model(
-                        frame_batch, device=args.pose_device, verbose=False,
+                    yp_results = run_yolopose_batched(
+                        yolopose_model,
+                        frame_batch,
+                        max_batch_size=args.pose_max_batch,
+                        device=args.pose_device,
+                        verbose=False,
                         conf=0.15,
                     )
                 except Exception:
-                    yp_results = []
+                    yp_results = [None] * len(frame_batch)
                 for cam, yp_res in zip(batch_order, yp_results):
-                    if not hasattr(yp_res, "keypoints") or yp_res.keypoints is None:
+                    if yp_res is None or not hasattr(yp_res, "keypoints") or yp_res.keypoints is None:
                         pose_state[cam] = None
                         per_cam_pose_state.pop(cam, None)
                         continue
@@ -2361,20 +2510,27 @@ def main():
             if run_pose:
                 for j in triangulated_joint_indices:
                     obs = {}
+                    obs_px = {}
                     obs_scores = []
                     for cam in batch_order:
                         und_map = pose_und_by_cam.get(cam)
                         if not und_map or j not in und_map:
                             continue
                         obs[cam] = und_map[j]
+                        kpts_cam = per_cam_pose_curr[cam][0]
+                        obs_px[cam] = np.array(
+                            [float(kpts_cam[j, 0]), float(kpts_cam[j, 1])],
+                            dtype=np.float64)
                         obs_scores.append(float(per_cam_pose_curr[cam][1][j]))
                     if len(obs) >= 2:
-                        pt = triangulate_multi(obs, proj)
+                        pt, used = robust_triangulate_joint(
+                            obs, obs_px, proj, extr, intr,
+                            min_cams=2, max_reproj_px=args.pose_max_reproj_px)
                         if pt is not None:
                             joints_3d_now[j] = pt
                             joint_last_seen_frame[j] = frame_idx
                             joints_conf_state[j] = float(np.mean(obs_scores)) if obs_scores else 0.0
-                            joints_cam_state[j] = int(len(obs))
+                            joints_cam_state[j] = int(len(used))
                         else:
                             joints_cam_state[j] = 0
                             joints_conf_state[j] = 0.0
@@ -2859,7 +3015,14 @@ def main():
 
             timer.start("mosaic")
             if args.show_2d and (frame_idx % args.mosaic_every == 0):
-                mosaic = make_mosaic(cam_frames, ball_boxes, per_cam_pose, copy_frames=False)
+                mosaic = make_mosaic(
+                    cam_frames,
+                    ball_boxes,
+                    per_cam_pose,
+                    cam_order=cam_order,
+                    tile_size=(args.mosaic_tile_width, args.mosaic_tile_height),
+                    copy_frames=False,
+                )
                 cv2.putText(
                     mosaic,
                     f"FPS: {fps_est:.2f}",

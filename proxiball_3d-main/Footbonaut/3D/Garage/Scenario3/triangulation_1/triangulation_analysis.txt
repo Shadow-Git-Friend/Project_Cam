@@ -1,0 +1,1552 @@
+========================================================================================================================
+COMPREHENSIVE TRIANGULATION ANALYSIS - ALL TAG CORNERS
+========================================================================================================================
+
+
+========================================================================================================================
+TAG ID: 0
+⚠️  Visible in 1 camera(s): camWest
+❌ CANNOT TRIANGULATE (need at least 2 cameras)
+
+📍 Single-camera estimation from camWest:
+========================================================================================================================
+
+  CORNER 0:
+    Expected:   (176.00, 3.00, 22.00) cm
+    Estimated:  (176.01, 3.04, 22.06) cm
+    Errors:     (±0.01, ±0.04, ±0.06) cm
+    Total:      0.07 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 1:
+    Expected:   (176.00, 3.00, 43.50) cm
+    Estimated:  (176.01, 3.10, 43.68) cm
+    Errors:     (±0.01, ±0.10, ±0.18) cm
+    Total:      0.20 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 2:
+    Expected:   (197.50, 3.00, 43.50) cm
+    Estimated:  (197.59, 3.13, 43.69) cm
+    Errors:     (±0.09, ±0.13, ±0.19) cm
+    Total:      0.25 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 3:
+    Expected:   (197.50, 3.00, 22.00) cm
+    Estimated:  (197.56, 3.07, 22.08) cm
+    Errors:     (±0.06, ±0.07, ±0.08) cm
+    Total:      0.12 cm
+    (Note: Uses expected depth for backprojection)
+
+
+========================================================================================================================
+TAG ID: 1
+⚠️  Visible in 1 camera(s): camNorth
+❌ CANNOT TRIANGULATE (need at least 2 cameras)
+
+📍 Single-camera estimation from camNorth:
+========================================================================================================================
+
+  CORNER 0:
+    Expected:   (623.00, 71.50, 131.50) cm
+    Estimated:  (624.57, 70.87, 134.63) cm
+    Errors:     (±1.57, ±0.63, ±3.13) cm
+    Total:      3.56 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 1:
+    Expected:   (623.00, 71.50, 153.00) cm
+    Estimated:  (624.77, 70.88, 156.86) cm
+    Errors:     (±1.77, ±0.62, ±3.86) cm
+    Total:      4.29 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 2:
+    Expected:   (623.00, 93.00, 153.00) cm
+    Estimated:  (624.63, 92.40, 156.62) cm
+    Errors:     (±1.63, ±0.60, ±3.62) cm
+    Total:      4.02 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 3:
+    Expected:   (623.00, 93.00, 131.50) cm
+    Estimated:  (624.44, 92.40, 134.40) cm
+    Errors:     (±1.44, ±0.60, ±2.90) cm
+    Total:      3.29 cm
+    (Note: Uses expected depth for backprojection)
+
+
+========================================================================================================================
+TAG ID: 2
+Visible in cameras: camNorth, camEast (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (623.00, 225.50, 84.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (623.30, 218.79, 81.87) cm
+      Errors:     (±0.30, ±6.71, ±2.63) cm
+      Total:      7.22 cm
+
+  CORNER 1:
+    Expected: (623.00, 225.50, 106.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (623.66, 219.05, 104.12) cm
+      Errors:     (±0.66, ±6.45, ±1.88) cm
+      Total:      6.75 cm
+
+  CORNER 2:
+    Expected: (623.00, 247.00, 106.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (623.51, 241.06, 104.06) cm
+      Errors:     (±0.51, ±5.94, ±1.94) cm
+      Total:      6.27 cm
+
+  CORNER 3:
+    Expected: (623.00, 247.00, 84.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (623.17, 240.73, 81.82) cm
+      Errors:     (±0.17, ±6.27, ±2.68) cm
+      Total:      6.82 cm
+
+
+========================================================================================================================
+TAG ID: 3
+Visible in cameras: camNorth, camEast (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (623.00, 230.00, 138.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (624.21, 224.09, 137.38) cm
+      Errors:     (±1.21, ±5.91, ±0.62) cm
+      Total:      6.07 cm
+
+  CORNER 1:
+    Expected: (623.00, 230.00, 159.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (624.62, 224.37, 159.84) cm
+      Errors:     (±1.62, ±5.63, ±0.34) cm
+      Total:      5.87 cm
+
+  CORNER 2:
+    Expected: (623.00, 252.00, 159.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (624.47, 247.06, 159.75) cm
+      Errors:     (±1.47, ±4.94, ±0.25) cm
+      Total:      5.16 cm
+
+  CORNER 3:
+    Expected: (623.00, 252.00, 138.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (624.06, 246.71, 137.30) cm
+      Errors:     (±1.06, ±5.29, ±0.70) cm
+      Total:      5.44 cm
+
+
+========================================================================================================================
+TAG ID: 4
+Visible in cameras: camNorth, camEast (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (623.00, 224.50, 29.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (622.58, 217.19, 24.84) cm
+      Errors:     (±0.42, ±7.31, ±4.16) cm
+      Total:      8.42 cm
+
+  CORNER 1:
+    Expected: (623.00, 224.50, 50.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (622.83, 217.39, 46.87) cm
+      Errors:     (±0.17, ±7.11, ±3.63) cm
+      Total:      7.98 cm
+
+  CORNER 2:
+    Expected: (623.00, 246.00, 50.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (622.70, 239.21, 46.82) cm
+      Errors:     (±0.30, ±6.79, ±3.68) cm
+      Total:      7.73 cm
+
+  CORNER 3:
+    Expected: (623.00, 246.00, 29.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (622.45, 238.93, 24.76) cm
+      Errors:     (±0.55, ±7.07, ±4.24) cm
+      Total:      8.26 cm
+
+
+========================================================================================================================
+TAG ID: 5
+Visible in cameras: camSouth, camWest (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (0.00, 178.10, 81.20) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.86, 178.45, 83.90) cm
+      Errors:     (±0.86, ±0.35, ±2.70) cm
+      Total:      2.86 cm
+
+  CORNER 1:
+    Expected: (0.00, 178.10, 102.70) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.83, 178.48, 106.12) cm
+      Errors:     (±0.83, ±0.38, ±3.42) cm
+      Total:      3.54 cm
+
+  CORNER 2:
+    Expected: (0.00, 156.60, 102.70) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.91, 156.75, 105.95) cm
+      Errors:     (±0.91, ±0.15, ±3.25) cm
+      Total:      3.38 cm
+
+  CORNER 3:
+    Expected: (0.00, 156.60, 81.20) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.95, 156.76, 83.74) cm
+      Errors:     (±0.95, ±0.16, ±2.54) cm
+      Total:      2.72 cm
+
+
+========================================================================================================================
+TAG ID: 6
+Visible in cameras: camNorth, camEast (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (623.00, 166.00, 26.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (622.95, 158.52, 22.80) cm
+      Errors:     (±0.05, ±7.48, ±3.70) cm
+      Total:      8.35 cm
+
+  CORNER 1:
+    Expected: (623.00, 166.00, 48.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (623.20, 158.43, 44.74) cm
+      Errors:     (±0.20, ±7.57, ±3.26) cm
+      Total:      8.24 cm
+
+  CORNER 2:
+    Expected: (623.00, 187.50, 48.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (623.04, 179.99, 44.52) cm
+      Errors:     (±0.04, ±7.51, ±3.48) cm
+      Total:      8.28 cm
+
+  CORNER 3:
+    Expected: (623.00, 187.50, 26.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (622.80, 179.96, 22.54) cm
+      Errors:     (±0.20, ±7.54, ±3.96) cm
+      Total:      8.52 cm
+
+
+========================================================================================================================
+TAG ID: 7
+Visible in cameras: camSouth, camWest (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (0.80, 89.30, 46.50) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.58, 89.17, 47.71) cm
+      Errors:     (±1.38, ±0.13, ±1.21) cm
+      Total:      1.84 cm
+
+  CORNER 1:
+    Expected: (0.80, 89.30, 68.00) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.56, 89.05, 69.77) cm
+      Errors:     (±1.36, ±0.25, ±1.77) cm
+      Total:      2.24 cm
+
+  CORNER 2:
+    Expected: (0.80, 67.80, 68.00) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.71, 67.39, 69.71) cm
+      Errors:     (±1.51, ±0.41, ±1.71) cm
+      Total:      2.31 cm
+
+  CORNER 3:
+    Expected: (0.80, 67.80, 46.50) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.74, 67.55, 47.64) cm
+      Errors:     (±1.54, ±0.25, ±1.14) cm
+      Total:      1.94 cm
+
+
+========================================================================================================================
+TAG ID: 8
+Visible in cameras: camSouth, camWest (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (0.80, 62.50, 99.50) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.59, 61.73, 102.20) cm
+      Errors:     (±1.39, ±0.77, ±2.70) cm
+      Total:      3.13 cm
+
+  CORNER 1:
+    Expected: (0.80, 62.50, 121.00) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.44, 61.49, 124.47) cm
+      Errors:     (±1.24, ±1.01, ±3.47) cm
+      Total:      3.81 cm
+
+  CORNER 2:
+    Expected: (0.80, 41.00, 121.00) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.50, 39.67, 124.45) cm
+      Errors:     (±1.30, ±1.33, ±3.45) cm
+      Total:      3.92 cm
+
+  CORNER 3:
+    Expected: (0.80, 41.00, 99.50) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.69, 39.95, 102.19) cm
+      Errors:     (±1.49, ±1.05, ±2.69) cm
+      Total:      3.25 cm
+
+
+========================================================================================================================
+TAG ID: 9
+Visible in cameras: camSouth, camWest (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (0.80, 90.90, 158.30) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.13, 89.96, 163.14) cm
+      Errors:     (±0.93, ±0.94, ±4.84) cm
+      Total:      5.02 cm
+
+  CORNER 1:
+    Expected: (0.80, 90.90, 179.80) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.10, 89.82, 185.25) cm
+      Errors:     (±0.90, ±1.08, ±5.45) cm
+      Total:      5.62 cm
+
+  CORNER 2:
+    Expected: (0.80, 69.40, 179.80) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.13, 67.95, 185.14) cm
+      Errors:     (±0.93, ±1.45, ±5.34) cm
+      Total:      5.62 cm
+
+  CORNER 3:
+    Expected: (0.80, 69.40, 158.30) cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (-0.18, 68.11, 163.06) cm
+      Errors:     (±0.98, ±1.29, ±4.76) cm
+      Total:      5.03 cm
+
+
+========================================================================================================================
+TAG ID: 10
+Visible in cameras: camEast, camSouth (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (463.70, 298.00, 85.00) cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (464.32, 298.12, 85.30) cm
+      Errors:     (±0.62, ±0.12, ±0.30) cm
+      Total:      0.70 cm
+
+  CORNER 1:
+    Expected: (463.70, 298.00, 106.50) cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (464.31, 298.09, 106.87) cm
+      Errors:     (±0.61, ±0.09, ±0.37) cm
+      Total:      0.72 cm
+
+  CORNER 2:
+    Expected: (442.20, 298.00, 106.50) cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (442.56, 298.08, 106.78) cm
+      Errors:     (±0.36, ±0.08, ±0.28) cm
+      Total:      0.46 cm
+
+  CORNER 3:
+    Expected: (442.20, 298.00, 85.00) cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (442.54, 298.10, 85.21) cm
+      Errors:     (±0.34, ±0.10, ±0.21) cm
+      Total:      0.41 cm
+
+
+========================================================================================================================
+TAG ID: 11
+⚠️  Visible in 1 camera(s): camNorth
+❌ CANNOT TRIANGULATE (need at least 2 cameras)
+
+📍 Single-camera estimation from camNorth:
+========================================================================================================================
+
+  CORNER 0:
+    Expected:   (623.00, 67.50, 28.50) cm
+    Estimated:  (623.78, 67.16, 29.31) cm
+    Errors:     (±0.78, ±0.34, ±0.81) cm
+    Total:      1.17 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 1:
+    Expected:   (623.00, 67.50, 50.00) cm
+    Estimated:  (623.92, 67.08, 51.14) cm
+    Errors:     (±0.92, ±0.42, ±1.14) cm
+    Total:      1.52 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 2:
+    Expected:   (623.00, 89.00, 50.00) cm
+    Estimated:  (623.81, 88.62, 50.98) cm
+    Errors:     (±0.81, ±0.38, ±0.98) cm
+    Total:      1.33 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 3:
+    Expected:   (623.00, 89.00, 28.50) cm
+    Estimated:  (623.68, 88.70, 29.18) cm
+    Errors:     (±0.68, ±0.30, ±0.68) cm
+    Total:      1.01 cm
+    (Note: Uses expected depth for backprojection)
+
+
+========================================================================================================================
+TAG ID: 12
+Visible in cameras: camNorth, camEast (2 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (260.70, 298.00, 147.40) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (258.53, 301.87, 152.62) cm
+      Errors:     (±2.17, ±3.87, ±5.22) cm
+      Total:      6.85 cm
+
+  CORNER 1:
+    Expected: (260.70, 298.00, 168.90) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (258.24, 301.18, 174.09) cm
+      Errors:     (±2.46, ±3.18, ±5.19) cm
+      Total:      6.56 cm
+
+  CORNER 2:
+    Expected: (239.20, 298.00, 168.90) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (235.96, 300.66, 173.85) cm
+      Errors:     (±3.24, ±2.66, ±4.95) cm
+      Total:      6.49 cm
+
+  CORNER 3:
+    Expected: (239.20, 298.00, 147.40) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (236.21, 301.39, 152.43) cm
+      Errors:     (±2.99, ±3.39, ±5.03) cm
+      Total:      6.76 cm
+
+
+========================================================================================================================
+TAG ID: 13
+Visible in cameras: camNorth, camEast, camSouth (3 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (260.70, 298.00, 33.40) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (260.03, 304.53, 38.19) cm
+      Errors:     (±0.67, ±6.53, ±4.79) cm
+      Total:      8.13 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (245.77, 293.14, 30.33) cm
+      Errors:     (±14.93, ±4.86, ±3.07) cm
+      Total:      15.99 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (259.80, 297.96, 33.30) cm
+      Errors:     (±0.90, ±0.04, ±0.10) cm
+      Total:      0.90 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (255.20, 298.55, 33.94) cm
+      Errors:     (±5.50, ±0.55, ±0.54) cm
+      Total:      5.55 cm
+
+  CORNER 1:
+    Expected: (260.70, 298.00, 54.90) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (259.78, 304.11, 59.80) cm
+      Errors:     (±0.92, ±6.11, ±4.90) cm
+      Total:      7.89 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (246.61, 293.66, 52.46) cm
+      Errors:     (±14.09, ±4.34, ±2.44) cm
+      Total:      14.94 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (259.70, 297.90, 54.86) cm
+      Errors:     (±1.00, ±0.10, ±0.04) cm
+      Total:      1.01 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (255.36, 298.56, 55.71) cm
+      Errors:     (±5.34, ±0.56, ±0.81) cm
+      Total:      5.43 cm
+
+  CORNER 2:
+    Expected: (239.20, 298.00, 54.90) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (237.34, 303.81, 59.67) cm
+      Errors:     (±1.86, ±5.81, ±4.77) cm
+      Total:      7.74 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (223.46, 293.15, 52.10) cm
+      Errors:     (±15.74, ±4.85, ±2.80) cm
+      Total:      16.71 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (237.61, 297.72, 54.73) cm
+      Errors:     (±1.59, ±0.28, ±0.17) cm
+      Total:      1.62 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (232.80, 298.23, 55.50) cm
+      Errors:     (±6.40, ±0.23, ±0.60) cm
+      Total:      6.43 cm
+
+  CORNER 3:
+    Expected: (239.20, 298.00, 33.40) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (237.55, 304.24, 38.03) cm
+      Errors:     (±1.65, ±6.24, ±4.63) cm
+      Total:      7.94 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (222.07, 292.34, 29.78) cm
+      Errors:     (±17.13, ±5.66, ±3.62) cm
+      Total:      18.40 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (237.73, 297.80, 33.17) cm
+      Errors:     (±1.47, ±0.20, ±0.23) cm
+      Total:      1.51 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (232.45, 298.13, 33.66) cm
+      Errors:     (±6.75, ±0.13, ±0.26) cm
+      Total:      6.75 cm
+
+
+========================================================================================================================
+TAG ID: 14
+Visible in cameras: camNorth, camEast, camSouth (3 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (428.70, 298.00, 21.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (429.22, 299.86, 22.26) cm
+      Errors:     (±0.52, ±1.86, ±1.26) cm
+      Total:      2.30 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (426.67, 297.49, 20.63) cm
+      Errors:     (±2.03, ±0.51, ±0.37) cm
+      Total:      2.13 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (428.96, 298.15, 21.06) cm
+      Errors:     (±0.26, ±0.15, ±0.06) cm
+      Total:      0.31 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (428.28, 298.50, 21.32) cm
+      Errors:     (±0.42, ±0.50, ±0.32) cm
+      Total:      0.73 cm
+
+  CORNER 1:
+    Expected: (428.70, 298.00, 42.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (429.15, 299.86, 43.91) cm
+      Errors:     (±0.45, ±1.86, ±1.41) cm
+      Total:      2.38 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (426.49, 297.40, 42.22) cm
+      Errors:     (±2.21, ±0.60, ±0.28) cm
+      Total:      2.31 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (428.92, 298.12, 42.59) cm
+      Errors:     (±0.22, ±0.12, ±0.09) cm
+      Total:      0.27 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (428.19, 298.46, 42.91) cm
+      Errors:     (±0.51, ±0.46, ±0.41) cm
+      Total:      0.80 cm
+
+  CORNER 2:
+    Expected: (407.20, 298.00, 42.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (408.07, 301.08, 44.77) cm
+      Errors:     (±0.87, ±3.08, ±2.27) cm
+      Total:      3.92 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (404.00, 297.10, 42.06) cm
+      Errors:     (±3.20, ±0.90, ±0.44) cm
+      Total:      3.35 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (407.29, 298.11, 42.56) cm
+      Errors:     (±0.09, ±0.11, ±0.06) cm
+      Total:      0.16 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (406.46, 298.76, 43.13) cm
+      Errors:     (±0.74, ±0.76, ±0.63) cm
+      Total:      1.24 cm
+
+  CORNER 3:
+    Expected: (407.20, 298.00, 21.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (408.35, 301.40, 23.32) cm
+      Errors:     (±1.15, ±3.40, ±2.32) cm
+      Total:      4.27 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (404.21, 297.21, 20.45) cm
+      Errors:     (±2.99, ±0.79, ±0.55) cm
+      Total:      3.14 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (407.30, 298.12, 21.03) cm
+      Errors:     (±0.10, ±0.12, ±0.03) cm
+      Total:      0.16 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (406.62, 298.91, 21.60) cm
+      Errors:     (±0.58, ±0.91, ±0.60) cm
+      Total:      1.23 cm
+
+
+========================================================================================================================
+TAG ID: 15
+Visible in cameras: camNorth, camEast, camSouth (3 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (426.70, 298.00, 144.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (427.23, 300.62, 147.77) cm
+      Errors:     (±0.53, ±2.62, ±3.27) cm
+      Total:      4.23 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (424.17, 297.77, 145.58) cm
+      Errors:     (±2.53, ±0.23, ±1.08) cm
+      Total:      2.76 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (427.00, 298.05, 144.95) cm
+      Errors:     (±0.30, ±0.05, ±0.45) cm
+      Total:      0.54 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (426.13, 298.82, 146.10) cm
+      Errors:     (±0.57, ±0.82, ±1.60) cm
+      Total:      1.88 cm
+
+  CORNER 1:
+    Expected: (426.70, 298.00, 166.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (427.22, 300.69, 169.79) cm
+      Errors:     (±0.52, ±2.69, ±3.79) cm
+      Total:      4.68 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (424.48, 298.16, 167.63) cm
+      Errors:     (±2.22, ±0.16, ±1.63) cm
+      Total:      2.76 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (427.02, 298.02, 166.62) cm
+      Errors:     (±0.32, ±0.02, ±0.62) cm
+      Total:      0.70 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (426.24, 298.96, 168.02) cm
+      Errors:     (±0.46, ±0.96, ±2.02) cm
+      Total:      2.28 cm
+
+  CORNER 2:
+    Expected: (405.20, 298.00, 166.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (405.65, 301.22, 170.24) cm
+      Errors:     (±0.45, ±3.22, ±4.24) cm
+      Total:      5.34 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (402.48, 298.22, 167.74) cm
+      Errors:     (±2.72, ±0.22, ±1.74) cm
+      Total:      3.24 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (405.37, 298.03, 166.61) cm
+      Errors:     (±0.17, ±0.03, ±0.61) cm
+      Total:      0.63 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (404.50, 299.15, 168.19) cm
+      Errors:     (±0.70, ±1.15, ±2.19) cm
+      Total:      2.58 cm
+
+  CORNER 3:
+    Expected: (405.20, 298.00, 144.50) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (405.74, 301.25, 148.29) cm
+      Errors:     (±0.54, ±3.25, ±3.79) cm
+      Total:      5.02 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (402.01, 297.73, 145.64) cm
+      Errors:     (±3.19, ±0.27, ±1.14) cm
+      Total:      3.39 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (405.36, 298.07, 144.94) cm
+      Errors:     (±0.16, ±0.07, ±0.44) cm
+      Total:      0.47 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (404.37, 299.02, 146.29) cm
+      Errors:     (±0.83, ±1.02, ±1.79) cm
+      Total:      2.22 cm
+
+
+========================================================================================================================
+TAG ID: 16
+⚠️  Visible in 1 camera(s): camWest
+❌ CANNOT TRIANGULATE (need at least 2 cameras)
+
+📍 Single-camera estimation from camWest:
+========================================================================================================================
+
+  CORNER 0:
+    Expected:   (81.00, 3.00, 130.00) cm
+    Estimated:  (79.59, 2.91, 133.01) cm
+    Errors:     (±1.41, ±0.09, ±3.01) cm
+    Total:      3.32 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 1:
+    Expected:   (81.50, 3.00, 151.50) cm
+    Estimated:  (79.99, 2.80, 155.28) cm
+    Errors:     (±1.51, ±0.20, ±3.78) cm
+    Total:      4.07 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 2:
+    Expected:   (103.00, 3.00, 151.50) cm
+    Estimated:  (101.86, 3.05, 154.97) cm
+    Errors:     (±1.14, ±0.05, ±3.47) cm
+    Total:      3.65 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 3:
+    Expected:   (102.50, 3.00, 130.00) cm
+    Estimated:  (101.45, 3.12, 132.67) cm
+    Errors:     (±1.05, ±0.12, ±2.67) cm
+    Total:      2.87 cm
+    (Note: Uses expected depth for backprojection)
+
+
+========================================================================================================================
+TAG ID: 17
+Visible in cameras: camNorth, camSouth, camWest (3 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (328.50, 0.00, 100.00) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (326.25, -1.03, 101.73) cm
+      Errors:     (±2.25, ±1.03, ±1.73) cm
+      Total:      3.03 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (329.95, 2.94, 102.99) cm
+      Errors:     (±1.45, ±2.94, ±2.99) cm
+      Total:      4.44 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (331.51, -1.01, 102.08) cm
+      Errors:     (±3.01, ±1.01, ±2.08) cm
+      Total:      3.79 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (329.24, 0.30, 102.27) cm
+      Errors:     (±0.74, ±0.30, ±2.27) cm
+      Total:      2.40 cm
+
+  CORNER 1:
+    Expected: (328.50, 0.00, 78.50) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (326.29, -1.05, 79.80) cm
+      Errors:     (±2.21, ±1.05, ±1.30) cm
+      Total:      2.77 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (329.87, 2.32, 81.02) cm
+      Errors:     (±1.37, ±2.32, ±2.52) cm
+      Total:      3.70 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (331.45, -0.94, 80.25) cm
+      Errors:     (±2.95, ±0.94, ±1.75) cm
+      Total:      3.55 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (329.20, 0.11, 80.36) cm
+      Errors:     (±0.70, ±0.11, ±1.86) cm
+      Total:      1.99 cm
+
+  CORNER 2:
+    Expected: (340.00, 0.00, 78.50) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (338.00, -1.06, 79.75) cm
+      Errors:     (±2.00, ±1.06, ±1.25) cm
+      Total:      2.59 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (341.71, 2.37, 81.01) cm
+      Errors:     (±1.71, ±2.37, ±2.51) cm
+      Total:      3.85 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (343.22, -0.94, 80.30) cm
+      Errors:     (±3.22, ±0.94, ±1.80) cm
+      Total:      3.81 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (340.98, 0.12, 80.36) cm
+      Errors:     (±0.98, ±0.12, ±1.86) cm
+      Total:      2.10 cm
+
+  CORNER 3:
+    Expected: (340.00, 0.00, 100.00) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (337.96, -1.05, 101.68) cm
+      Errors:     (±2.04, ±1.05, ±1.68) cm
+      Total:      2.85 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (341.73, 2.89, 102.97) cm
+      Errors:     (±1.73, ±2.89, ±2.97) cm
+      Total:      4.49 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (343.22, -1.00, 102.10) cm
+      Errors:     (±3.22, ±1.00, ±2.10) cm
+      Total:      3.97 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (340.97, 0.28, 102.25) cm
+      Errors:     (±0.97, ±0.28, ±2.25) cm
+      Total:      2.47 cm
+
+
+========================================================================================================================
+TAG ID: 18
+⚠️  Visible in 1 camera(s): camSouth
+❌ CANNOT TRIANGULATE (need at least 2 cameras)
+
+📍 Single-camera estimation from camSouth:
+========================================================================================================================
+
+  CORNER 0:
+    Expected:   (369.00, 0.00, 193.00) cm
+    Estimated:  (368.49, -1.60, 194.09) cm
+    Errors:     (±0.51, ±1.60, ±1.09) cm
+    Total:      2.00 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 1:
+    Expected:   (369.00, 0.00, 171.50) cm
+    Estimated:  (368.61, -1.46, 172.37) cm
+    Errors:     (±0.39, ±1.46, ±0.87) cm
+    Total:      1.74 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 2:
+    Expected:   (390.50, 0.00, 171.50) cm
+    Estimated:  (390.15, -1.43, 172.30) cm
+    Errors:     (±0.35, ±1.43, ±0.80) cm
+    Total:      1.68 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 3:
+    Expected:   (390.50, 0.00, 193.00) cm
+    Estimated:  (390.04, -1.56, 194.01) cm
+    Errors:     (±0.46, ±1.56, ±1.01) cm
+    Total:      1.92 cm
+    (Note: Uses expected depth for backprojection)
+
+
+========================================================================================================================
+TAG ID: 19
+Visible in cameras: camNorth, camSouth, camWest (3 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (270.50, 0.00, 90.50) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (267.04, -0.91, 92.29) cm
+      Errors:     (±3.46, ±0.91, ±1.79) cm
+      Total:      4.00 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (270.13, 2.22, 93.32) cm
+      Errors:     (±0.37, ±2.22, ±2.82) cm
+      Total:      3.61 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (272.10, -1.03, 92.02) cm
+      Errors:     (±1.60, ±1.03, ±1.52) cm
+      Total:      2.44 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (269.75, 0.09, 92.54) cm
+      Errors:     (±0.75, ±0.09, ±2.04) cm
+      Total:      2.18 cm
+
+  CORNER 1:
+    Expected: (270.00, 0.00, 112.00) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (266.53, -0.86, 114.30) cm
+      Errors:     (±3.47, ±0.86, ±2.30) cm
+      Total:      4.25 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (269.77, 3.10, 115.31) cm
+      Errors:     (±0.23, ±3.10, ±3.31) cm
+      Total:      4.54 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (271.82, -1.14, 113.95) cm
+      Errors:     (±1.82, ±1.14, ±1.95) cm
+      Total:      2.90 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (269.38, 0.36, 114.52) cm
+      Errors:     (±0.62, ±0.36, ±2.52) cm
+      Total:      2.62 cm
+
+  CORNER 2:
+    Expected: (291.50, 0.00, 112.50) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (288.50, -0.93, 114.70) cm
+      Errors:     (±3.00, ±0.93, ±2.20) cm
+      Total:      3.84 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (291.93, 3.25, 115.81) cm
+      Errors:     (±0.43, ±3.25, ±3.31) cm
+      Total:      4.66 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (293.78, -1.11, 114.60) cm
+      Errors:     (±2.28, ±1.11, ±2.10) cm
+      Total:      3.29 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (291.40, 0.40, 115.04) cm
+      Errors:     (±0.10, ±0.40, ±2.54) cm
+      Total:      2.57 cm
+
+  CORNER 3:
+    Expected: (292.00, 0.00, 91.00) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (289.02, -0.96, 92.71) cm
+      Errors:     (±2.98, ±0.96, ±1.71) cm
+      Total:      3.57 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (292.28, 2.37, 93.82) cm
+      Errors:     (±0.28, ±2.37, ±2.82) cm
+      Total:      3.69 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (294.09, -1.01, 92.69) cm
+      Errors:     (±2.09, ±1.01, ±1.69) cm
+      Total:      2.87 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (291.80, 0.13, 93.07) cm
+      Errors:     (±0.20, ±0.13, ±2.07) cm
+      Total:      2.09 cm
+
+
+========================================================================================================================
+TAG ID: 20
+Visible in cameras: camNorth, camSouth, camWest (3 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (216.50, 3.00, 102.50) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (211.77, 2.37, 104.82) cm
+      Errors:     (±4.73, ±0.63, ±2.32) cm
+      Total:      5.31 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (214.88, 6.04, 105.65) cm
+      Errors:     (±1.62, ±3.04, ±3.15) cm
+      Total:      4.67 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (217.45, 1.86, 104.00) cm
+      Errors:     (±0.95, ±1.14, ±1.50) cm
+      Total:      2.11 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (214.70, 3.42, 104.82) cm
+      Errors:     (±1.80, ±0.42, ±2.32) cm
+      Total:      2.97 cm
+
+  CORNER 1:
+    Expected: (195.00, 3.00, 102.50) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (189.75, 2.48, 104.93) cm
+      Errors:     (±5.25, ±0.52, ±2.43) cm
+      Total:      5.81 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (192.92, 6.34, 105.70) cm
+      Errors:     (±2.08, ±3.34, ±3.20) cm
+      Total:      5.07 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (195.79, 1.82, 103.97) cm
+      Errors:     (±0.79, ±1.18, ±1.47) cm
+      Total:      2.05 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (192.82, 3.55, 104.87) cm
+      Errors:     (±2.18, ±0.55, ±2.37) cm
+      Total:      3.26 cm
+
+  CORNER 2:
+    Expected: (195.00, 3.00, 124.00) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (189.91, 2.57, 127.01) cm
+      Errors:     (±5.09, ±0.43, ±3.01) cm
+      Total:      5.93 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (192.97, 7.14, 127.75) cm
+      Errors:     (±2.03, ±4.14, ±3.75) cm
+      Total:      5.94 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (195.98, 1.67, 126.00) cm
+      Errors:     (±0.98, ±1.33, ±2.00) cm
+      Total:      2.59 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (192.95, 3.79, 126.92) cm
+      Errors:     (±2.05, ±0.79, ±2.92) cm
+      Total:      3.65 cm
+
+  CORNER 3:
+    Expected: (216.50, 3.00, 124.00) cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (211.88, 2.45, 126.89) cm
+      Errors:     (±4.62, ±0.55, ±2.89) cm
+      Total:      5.48 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (214.98, 6.93, 127.69) cm
+      Errors:     (±1.52, ±3.93, ±3.69) cm
+      Total:      5.60 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (217.68, 1.72, 126.01) cm
+      Errors:     (±1.18, ±1.28, ±2.01) cm
+      Total:      2.66 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (214.85, 3.70, 126.86) cm
+      Errors:     (±1.65, ±0.70, ±2.86) cm
+      Total:      3.38 cm
+
+
+========================================================================================================================
+TAG ID: 21
+Visible in cameras: camNorth, camEast, camSouth, camWest (4 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (211.80, 182.50, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (208.29, 185.46, 7.90) cm
+      Errors:     (±3.51, ±2.96, ±3.90) cm
+      Total:      6.03 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (201.24, 180.10, 2.65) cm
+      Errors:     (±10.56, ±2.40, ±1.35) cm
+      Total:      10.91 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (210.60, 187.96, 5.73) cm
+      Errors:     (±1.20, ±5.46, ±1.73) cm
+      Total:      5.85 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (209.47, 181.48, 3.73) cm
+      Errors:     (±2.33, ±1.02, ±0.27) cm
+      Total:      2.56 cm
+
+    camEast+camWest (2 cams):
+      Calculated: (211.05, 182.28, 5.79) cm
+      Errors:     (±0.75, ±0.22, ±1.79) cm
+      Total:      1.95 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (213.09, 183.00, 4.91) cm
+      Errors:     (±1.29, ±0.50, ±0.91) cm
+      Total:      1.65 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (206.33, 182.35, 4.76) cm
+      Errors:     (±5.47, ±0.15, ±0.76) cm
+      Total:      5.52 cm
+
+    camNorth+camEast+camWest (3 cams):
+      Calculated: (209.98, 185.24, 6.47) cm
+      Errors:     (±1.82, ±2.74, ±2.47) cm
+      Total:      4.11 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (208.31, 183.69, 4.43) cm
+      Errors:     (±3.49, ±1.19, ±0.43) cm
+      Total:      3.71 cm
+
+    camEast+camSouth+camWest (3 cams):
+      Calculated: (211.20, 182.25, 4.81) cm
+      Errors:     (±0.60, ±0.25, ±0.81) cm
+      Total:      1.04 cm
+
+    camNorth+camEast+camSouth+camWest (4 cams):
+      Calculated: (208.96, 183.38, 5.12) cm
+      Errors:     (±2.84, ±0.88, ±1.12) cm
+      Total:      3.18 cm
+
+  CORNER 1:
+    Expected: (211.80, 161.00, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (208.08, 163.05, 7.67) cm
+      Errors:     (±3.72, ±2.05, ±3.67) cm
+      Total:      5.61 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (202.45, 159.13, 3.06) cm
+      Errors:     (±9.35, ±1.87, ±0.94) cm
+      Total:      9.58 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (210.47, 165.86, 5.62) cm
+      Errors:     (±1.33, ±4.86, ±1.62) cm
+      Total:      5.30 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (209.36, 159.82, 3.78) cm
+      Errors:     (±2.44, ±1.18, ±0.22) cm
+      Total:      2.72 cm
+
+    camEast+camWest (2 cams):
+      Calculated: (210.98, 160.15, 5.75) cm
+      Errors:     (±0.82, ±0.85, ±1.75) cm
+      Total:      2.11 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (212.89, 161.39, 4.75) cm
+      Errors:     (±1.09, ±0.39, ±0.75) cm
+      Total:      1.38 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (206.63, 160.67, 4.84) cm
+      Errors:     (±5.17, ±0.33, ±0.84) cm
+      Total:      5.24 cm
+
+    camNorth+camEast+camWest (3 cams):
+      Calculated: (209.85, 163.02, 6.35) cm
+      Errors:     (±1.95, ±2.02, ±2.35) cm
+      Total:      3.66 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (208.60, 162.13, 4.48) cm
+      Errors:     (±3.20, ±1.13, ±0.48) cm
+      Total:      3.42 cm
+
+    camEast+camSouth+camWest (3 cams):
+      Calculated: (211.08, 160.45, 4.76) cm
+      Errors:     (±0.72, ±0.55, ±0.76) cm
+      Total:      1.18 cm
+
+    camNorth+camEast+camSouth+camWest (4 cams):
+      Calculated: (209.04, 161.57, 5.11) cm
+      Errors:     (±2.76, ±0.57, ±1.11) cm
+      Total:      3.03 cm
+
+  CORNER 2:
+    Expected: (233.30, 161.00, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (230.50, 163.07, 7.46) cm
+      Errors:     (±2.80, ±2.07, ±3.46) cm
+      Total:      4.91 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (225.27, 159.39, 3.26) cm
+      Errors:     (±8.03, ±1.61, ±0.74) cm
+      Total:      8.23 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (232.60, 165.69, 5.67) cm
+      Errors:     (±0.70, ±4.69, ±1.67) cm
+      Total:      5.02 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (231.48, 160.03, 3.91) cm
+      Errors:     (±1.82, ±0.97, ±0.09) cm
+      Total:      2.07 cm
+
+    camEast+camWest (2 cams):
+      Calculated: (233.08, 160.49, 5.95) cm
+      Errors:     (±0.22, ±0.51, ±1.95) cm
+      Total:      2.03 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (234.77, 161.47, 4.88) cm
+      Errors:     (±1.47, ±0.47, ±0.88) cm
+      Total:      1.78 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (229.08, 160.83, 4.88) cm
+      Errors:     (±4.22, ±0.17, ±0.88) cm
+      Total:      4.31 cm
+
+    camNorth+camEast+camWest (3 cams):
+      Calculated: (232.06, 163.08, 6.36) cm
+      Errors:     (±1.24, ±2.08, ±2.36) cm
+      Total:      3.38 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (230.88, 162.18, 4.61) cm
+      Errors:     (±2.42, ±1.18, ±0.61) cm
+      Total:      2.76 cm
+
+    camEast+camSouth+camWest (3 cams):
+      Calculated: (233.11, 160.66, 4.91) cm
+      Errors:     (±0.19, ±0.34, ±0.91) cm
+      Total:      0.99 cm
+
+    camNorth+camEast+camSouth+camWest (4 cams):
+      Calculated: (231.28, 161.69, 5.19) cm
+      Errors:     (±2.02, ±0.69, ±1.19) cm
+      Total:      2.44 cm
+
+  CORNER 3:
+    Expected: (233.30, 182.50, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (230.79, 185.57, 7.78) cm
+      Errors:     (±2.51, ±3.07, ±3.78) cm
+      Total:      5.48 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (224.20, 180.45, 2.91) cm
+      Errors:     (±9.10, ±2.05, ±1.09) cm
+      Total:      9.39 cm
+
+    camNorth+camWest (2 cams):
+      Calculated: (232.75, 187.81, 5.79) cm
+      Errors:     (±0.55, ±5.31, ±1.79) cm
+      Total:      5.63 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (231.63, 181.71, 3.86) cm
+      Errors:     (±1.67, ±0.79, ±0.14) cm
+      Total:      1.85 cm
+
+    camEast+camWest (2 cams):
+      Calculated: (233.20, 182.64, 5.98) cm
+      Errors:     (±0.10, ±0.14, ±1.98) cm
+      Total:      1.98 cm
+
+    camSouth+camWest (2 cams):
+      Calculated: (234.99, 183.09, 5.04) cm
+      Errors:     (±1.69, ±0.59, ±1.04) cm
+      Total:      2.07 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (228.87, 182.58, 4.85) cm
+      Errors:     (±4.43, ±0.08, ±0.85) cm
+      Total:      4.51 cm
+
+    camNorth+camEast+camWest (3 cams):
+      Calculated: (232.25, 185.34, 6.52) cm
+      Errors:     (±1.05, ±2.84, ±2.52) cm
+      Total:      3.94 cm
+
+    camNorth+camSouth+camWest (3 cams):
+      Calculated: (230.65, 183.78, 4.58) cm
+      Errors:     (±2.65, ±1.28, ±0.58) cm
+      Total:      3.00 cm
+
+    camEast+camSouth+camWest (3 cams):
+      Calculated: (233.27, 182.48, 4.96) cm
+      Errors:     (±0.03, ±0.02, ±0.96) cm
+      Total:      0.96 cm
+
+    camNorth+camEast+camSouth+camWest (4 cams):
+      Calculated: (231.26, 183.54, 5.23) cm
+      Errors:     (±2.04, ±1.04, ±1.23) cm
+      Total:      2.60 cm
+
+
+========================================================================================================================
+TAG ID: 22
+Visible in cameras: camNorth, camEast, camSouth (3 cameras)
+========================================================================================================================
+
+  CORNER 0:
+    Expected: (211.80, 235.50, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (208.73, 240.41, 8.23) cm
+      Errors:     (±3.07, ±4.91, ±4.23) cm
+      Total:      7.18 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (197.39, 231.36, 1.31) cm
+      Errors:     (±14.41, ±4.14, ±2.69) cm
+      Total:      15.23 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (209.63, 234.78, 3.60) cm
+      Errors:     (±2.17, ±0.72, ±0.40) cm
+      Total:      2.32 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (205.25, 235.52, 4.38) cm
+      Errors:     (±6.55, ±0.02, ±0.38) cm
+      Total:      6.56 cm
+
+  CORNER 1:
+    Expected: (211.80, 214.00, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (208.57, 218.20, 8.15) cm
+      Errors:     (±3.23, ±4.20, ±4.15) cm
+      Total:      6.72 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (199.11, 210.65, 1.92) cm
+      Errors:     (±12.69, ±3.35, ±2.08) cm
+      Total:      13.29 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (209.59, 213.17, 3.65) cm
+      Errors:     (±2.21, ±0.83, ±0.35) cm
+      Total:      2.39 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (205.76, 214.00, 4.57) cm
+      Errors:     (±6.04, ±0.00, ±0.57) cm
+      Total:      6.07 cm
+
+  CORNER 2:
+    Expected: (233.30, 214.00, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (231.16, 218.40, 8.16) cm
+      Errors:     (±2.14, ±4.40, ±4.16) cm
+      Total:      6.42 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (222.33, 211.14, 2.27) cm
+      Errors:     (±10.97, ±2.86, ±1.73) cm
+      Total:      11.47 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (231.78, 213.40, 3.80) cm
+      Errors:     (±1.52, ±0.60, ±0.20) cm
+      Total:      1.64 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (228.43, 214.31, 4.74) cm
+      Errors:     (±4.87, ±0.31, ±0.74) cm
+      Total:      4.94 cm
+
+  CORNER 3:
+    Expected: (233.30, 235.50, 4.00) cm
+
+    camNorth+camEast (2 cams):
+      Calculated: (231.36, 240.68, 8.33) cm
+      Errors:     (±1.94, ±5.18, ±4.33) cm
+      Total:      7.02 cm
+
+    camNorth+camSouth (2 cams):
+      Calculated: (220.81, 231.97, 1.74) cm
+      Errors:     (±12.49, ±3.53, ±2.26) cm
+      Total:      13.17 cm
+
+    camEast+camSouth (2 cams):
+      Calculated: (231.84, 235.01, 3.75) cm
+      Errors:     (±1.46, ±0.49, ±0.25) cm
+      Total:      1.56 cm
+
+    camNorth+camEast+camSouth (3 cams):
+      Calculated: (228.00, 235.88, 4.61) cm
+      Errors:     (±5.30, ±0.38, ±0.61) cm
+      Total:      5.35 cm
+
+
+========================================================================================================================
+TAG ID: 23
+⚠️  Visible in 1 camera(s): camSouth
+❌ CANNOT TRIANGULATE (need at least 2 cameras)
+
+📍 Single-camera estimation from camSouth:
+========================================================================================================================
+
+  CORNER 0:
+    Expected:   (0.00, 205.50, 204.90) cm
+    Estimated:  (-2.73, 206.27, 208.23) cm
+    Errors:     (±2.73, ±0.77, ±3.33) cm
+    Total:      4.38 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 1:
+    Expected:   (0.00, 205.50, 183.40) cm
+    Estimated:  (-2.24, 206.25, 186.23) cm
+    Errors:     (±2.24, ±0.75, ±2.83) cm
+    Total:      3.69 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 2:
+    Expected:   (0.00, 227.00, 183.40) cm
+    Estimated:  (-2.42, 228.07, 186.29) cm
+    Errors:     (±2.42, ±1.07, ±2.89) cm
+    Total:      3.92 cm
+    (Note: Uses expected depth for backprojection)
+
+  CORNER 3:
+    Expected:   (0.00, 227.00, 204.90) cm
+    Estimated:  (-2.91, 228.10, 208.28) cm
+    Errors:     (±2.91, ±1.10, ±3.38) cm
+    Total:      4.59 cm
+    (Note: Uses expected depth for backprojection)
+
+
+========================================================================================================================
+SUMMARY STATISTICS
+========================================================================================================================
+Total tests performed: 196
+Average triangulation error: 4.34 cm
+
+Best result:
+  Tag 14, Corner 2, camEast+camSouth: 0.16 cm
+
+Worst result:
+  Tag 13, Corner 3, camNorth+camSouth: 18.40 cm
+
+========================================================================================================================
+CAMERA PAIR PERFORMANCE
+========================================================================================================================
+camEast+camSouth    : avg=  1.15 cm, std= 0.81 cm, n=24
+camEast+camWest     : avg=  2.02 cm, std= 0.06 cm, n=4
+camNorth+camEast    : avg=  6.38 cm, std= 1.58 cm, n=40
+camNorth+camSouth   : avg=  7.18 cm, std= 5.05 cm, n=32
+camNorth+camWest    : avg=  4.75 cm, std= 0.76 cm, n=16
+camSouth+camWest    : avg=  3.10 cm, std= 1.10 cm, n=32

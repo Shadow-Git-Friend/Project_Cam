@@ -1,0 +1,35 @@
+3D mapping of Ball in Arena:
+Run through the pipeline of the root. Refer to /home/altay/Desktop/Footbonaut/README.md for the pipeline. 
+Fix and edit if required. 
+Consider all root codes and scripts.
+Generate and run full 3D ball tracking for all scenarios.
+
+1. Camera Calibration:
+Extriniscs: /home/altay/Desktop/Footbonaut/Garage/Scenario3/extrinsics_1.json
+Intrinsics: /home/altay/Desktop/Footbonaut/athletic_center/Calibration/Intrinsics/unified_intrinsics.json
+
+2. Base model for Ball detection:
+/home/altay/Desktop/Footbonaut/model/y26s_garagev2.pt
+
+    - requires conversion to onnx and tensorRT engine
+
+3. synchronized video scenarios: 
+/home/altay/Desktop/Footbonaut/Garage/garage/sync_records
+
+    - each numerated folder represents a scenario and contains synchronized videos of all cameras by their name:
+        - East, West, North, South
+        - Start with scenario 1 
+
+4. For 3D ball tracking include metrics:
+    - ball 3D speed
+    - ball 3D position
+    - YOLO inference time
+    - FPS 
+    - write the output video to the root folder
+    - video format should be a grid with 4 videos (East, West, North, South)
+
+Notes:
+    - run inference on GPU
+    - use tracking techniques
+    - threading
+    - write out a full report on the results in a new file in the root

@@ -8,6 +8,12 @@ import cv2
 import yaml
 
 
+DEFAULT_WIDTH = 1920
+DEFAULT_HEIGHT = 1080
+DEFAULT_FPS = 30
+DEFAULT_FOURCC = "MJPG"
+
+
 def load_cameras(config_path):
     with open(config_path, "r") as f:
         data = yaml.safe_load(f) or {}
@@ -17,14 +23,15 @@ def load_cameras(config_path):
     return cams
 
 
-def open_capture(device, width, height, fourcc, buffer_size):
+def open_capture(device, width, height, fps, fourcc, buffer_size):
     cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         return None
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     if fourcc:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
     if buffer_size is not None:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
     return cap
@@ -166,7 +173,7 @@ def pre_record_delay(args, caps, clip_index):
     return True
 
 
-def main():
+def build_arg_parser():
     ap = argparse.ArgumentParser(
         description="Record short synchronized clips from garage cameras."
     )
@@ -181,11 +188,11 @@ def main():
         help="How many clips to record (0 = unlimited until q).",
     )
     ap.add_argument("--duration-sec", type=float, default=2.5)
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=720)
-    ap.add_argument("--fps", type=int, default=15)
-    ap.add_argument("--in-fourcc", default="MJPG")
-    ap.add_argument("--out-codec", default="MJPG")
+    ap.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    ap.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
+    ap.add_argument("--fps", type=int, default=DEFAULT_FPS)
+    ap.add_argument("--in-fourcc", default=DEFAULT_FOURCC)
+    ap.add_argument("--out-codec", default=DEFAULT_FOURCC)
     ap.add_argument("--ext", default="mkv")
     ap.add_argument("--buffer-size", type=int, default=1)
     ap.add_argument(
@@ -200,6 +207,11 @@ def main():
         default=True,
         help="Show preview windows (default: on). Use --no-show to disable.",
     )
+    return ap
+
+
+def main():
+    ap = build_arg_parser()
     args = ap.parse_args()
 
     if args.duration_sec <= 0:
@@ -223,6 +235,7 @@ def main():
                 device=device,
                 width=args.width,
                 height=args.height,
+                fps=args.fps,
                 fourcc=args.in_fourcc,
                 buffer_size=args.buffer_size,
             )

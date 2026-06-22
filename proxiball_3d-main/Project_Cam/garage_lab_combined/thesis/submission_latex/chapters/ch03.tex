@@ -1,0 +1,162 @@
+\section{3.1 Why Whole-Repository Analysis Is Required}
+The final garage pipeline cannot be explained only from \texttt{garage\_lab\_combined}. Critical assumptions, scripts, and design choices emerged across multiple stages. This chapter maps those stages and clarifies folder-level responsibilities.
+
+\subsection{Table 3.1 Whole-repository folder-to-function map}
+\begin{verbatim}
+| Folder | Role in project evolution | Key artifacts |
+|---|---|---|
+| `src/calibration`, `src/core`, `src/legacy` | Early algorithm prototypes and baseline 3D logic | `triangulate_3d.py`, `render_3d_robot.py`, `main_3d_tracker.py` |
+| `src/capture`, `src/tools`, `scripts` | Utility capture and calibration automation | `auto_sport_calibrate.py`, `record_dual_cameras.py` |
+| `GARAGE_CAMERAS` | Practical multi-camera recording reliability layer | `record_cams.py`, `sync_record_2.py` |
+| `garage-20260217T113109Z-3-001` | Imported baseline arena calibration and environment scripts | `extrinsics_1`, `environment/reconstruction.py` |
+| `garage_lab_combined` | Unified final pipeline and GT protocols | `process_4cam_to_3d.py`, `gt_eval/*`, `thesis/*` |
+| `output`, `data`, `cal`, `Intrinsicsdec17` | Historical data, calibration snapshots, and rendered evidence | videos, calibration JSONs |
+\end{verbatim}
+
+\section{3.2 Stage A: Baseline Geometry and Rendering (\texttt{src/*})}
+The earliest phase built foundational capabilities: video capture, 2D detection integration, geometric triangulation, and 3D rendering. \texttt{src/core/triangulate\_3d.py} and \texttt{src/core/triangulate\_v2.py} implemented multi-view reconstruction logic with projection-based consistency checks. \texttt{src/core/render\_3d\_robot.py} and related scripts provided visual sanity checks for skeleton and ball trajectories.
+
+At this stage, the system could demonstrate concept feasibility but lacked robust operational procedures. Scripts were often tuned to specific sessions and had limited standardized evaluation.
+
+\section{3.3 Stage B: Capture Robustness Under Real Constraints (\texttt{GARAGE\_CAMERAS})}
+As practical experiments intensified, capture became a bottleneck. USB camera IDs changed after reconnects, frame rates varied, and operator workflow required preview plus recording control. The \texttt{GARAGE\_CAMERAS} folder addressed these constraints with ffmpeg/openCV recording tools, camera discovery helpers, and synchronized recording scripts.
+
+This stage established an important lesson: poor capture discipline can invalidate even strong triangulation algorithms. Reliable input streams are a prerequisite for reproducible geometry.
+
+\section{3.4 Stage C: External Baseline Transfer (\texttt{garage-20260217...})}
+This folder supplied a prior garage setup with established AprilTag geometry and reconstruction scripts. It included:
+\begin{itemize}
+  \item \texttt{extrinsics\_1}: camera pose and arena visualization workflow,
+  \item \texttt{environment}: dual-camera high-speed tracking utilities,
+  \item \texttt{Intrinsics}: board/intrinsics references.
+\end{itemize}
+
+The transfer was not direct reuse. Intrinsics/extrinsics from the old setup were useful for understanding but not always valid for the current camera placement and lens conditions. The major outcome was methodological: reuse structure, recalibrate parameters.
+
+\section{3.5 Stage D: Unified Pipeline Construction (\texttt{garage\_lab\_combined})}
+\texttt{garage\_lab\_combined} became the operational research package integrating:
+\begin{itemize}
+  \item config management (\texttt{config/cameras.yaml}),
+  \item intrinsics/extrinsics scripts,
+  \item synchronized short-clip recorder,
+  \item 4-camera processing to 3D JSON,
+  \item rendering and live views,
+  \item GT evaluation pipelines for ball and joints.
+\end{itemize}
+
+This stage transformed the project from loosely coupled scripts into a coherent scientific workflow.
+
+\section{3.6 Stage E: Quantitative Validation and Bias Modeling (\texttt{gt\_eval})}
+The \texttt{gt\_eval} subtree formalized evaluation protocol design and reporting. For ball localization, static and dynamic protocols were separated to distinguish geometric bias from temporal instability. For joints, touch-based protocols highlighted the difference between algorithmic precision and human placement uncertainty.
+
+This stage enabled rigorous statements such as "raw mean error is 150.77 mm" instead of subjective statements such as "trajectory looks better".
+
+\section{3.7 Cross-Folder Dependency Graph}
+A simplified dependency graph is:
+
+\begin{enumerate}
+  \item \texttt{GARAGE\_CAMERAS} and \texttt{garage\_lab\_combined/scripts/record\_*} produce synchronized clips.
+  \item \texttt{garage\_lab\_combined/cal/*} produces intrinsics and extrinsics JSON files.
+  \item \texttt{process\_4cam\_to\_3d.py} consumes clips + calibration and outputs 3D motion JSON.
+  \item render scripts consume motion JSON + arena map and generate videos/plots.
+  \item evaluation scripts consume motion JSON + trials CSV and output reports/correction models.
+\end{enumerate}
+
+The historical \texttt{src/*} and \texttt{garage-20260217.../*} layers provide the mathematical and practical foundations for this final graph.
+
+\section{3.8 Repository-Level Contribution}
+This cross-folder evolution is a contribution in itself. In many student projects, older scripts are abandoned and final results become hard to reproduce. Here, the lineage is preserved and can be audited: from first prototype to quantitative evaluation and thesis-grade documentation.
+
+
+\section{3.9 Lessons Learned from Legacy-to-Unified Transition}
+The transition from legacy scripts to unified workflow produced several engineering lessons:
+
+\begin{enumerate}
+  \item Naming conventions matter.
+\end{enumerate}
+   Early scripts used generic camera names (\texttt{Cam1}, \texttt{Cam2}) while the unified system uses physical-role names (\texttt{camNorth}, \texttt{camEast}, \texttt{camSouth}, \texttt{camWest}). This reduced class of mistakes where processing used correct files with wrong physical semantics.
+
+\begin{enumerate}
+  \item Sessionized outputs are mandatory.
+\end{enumerate}
+   Moving from ad-hoc output filenames to timestamped session folders made experiment repeatability and report traceability significantly better.
+
+\begin{enumerate}
+  \item Visual diagnostics should be first-class outputs.
+\end{enumerate}
+   Overlay and 3D render diagnostics were not decorative; they detected calibration failure earlier than scalar metrics alone.
+
+\begin{enumerate}
+  \item Partial recalibration is operationally valuable.
+\end{enumerate}
+   In realistic operation, one camera may move while others remain stable. Being able to recalibrate and merge one camera's extrinsics reduced downtime.
+
+\section{3.10 Data Governance and Reproducibility Practices}
+Repository maturity improved when the team adopted data governance habits:
+\begin{itemize}
+  \item preserve raw clips before trimming/alignment,
+  \item keep processing outputs immutable per session,
+  \item store trial CSV and metadata near result files,
+  \item never overwrite reference calibration files without versioning,
+  \item generate summary reports as machine-readable JSON and human-readable markdown.
+\end{itemize}
+
+This thesis benefits directly from these practices because every major claim can be traced to a concrete file.
+
+\section{3.11 How Historical Folders Continue to Add Value}
+Although \texttt{garage\_lab\_combined} is the active integration folder, historical folders remain useful:
+\begin{itemize}
+  \item \texttt{src/*} preserves algorithmic prototypes and alternative renderers,
+  \item \texttt{garage-20260217...} preserves independent calibration/reporting approaches,
+  \item \texttt{GARAGE\_CAMERAS} keeps robust standalone capture tools.
+\end{itemize}
+
+Maintaining these layers avoids knowledge loss and supports troubleshooting when regressions appear in the main pipeline.
+
+
+
+\section{3.12 Detailed Chronology of Technical Milestones}
+The following chronology clarifies how engineering decisions were driven by observed failure modes rather than by theoretical preference:
+
+\begin{itemize}
+  \item Initial semester phase: early stereo and 3D rendering scripts demonstrated that reconstructed trajectories were possible from low-cost cameras, but produced unstable scale and orientation between sessions.
+  \item Lab phase: more controlled calibration and multi-camera processing produced convincing demonstration outputs (\texttt{final\_3d\_robot.mp4}), but assumptions from that environment did not transfer directly to the garage.
+  \item Garage migration phase: adoption of arena tags and room dimensions enabled physical-world interpretation, revealing hidden inconsistencies that were previously masked in lab-only visualizations.
+  \item Calibration hardening phase: repeated intrinsics and extrinsics recalibration, plus overlay-based diagnostics, improved geometric reliability.
+  \item Protocol phase: formal GT campaigns replaced impression-based evaluation and identified exact bias structure in ball and joint estimates.
+\end{itemize}
+
+This chronology is important because it shows methodological maturity: from prototype confidence to evidence-driven iteration.
+
+\section{3.13 Data Artifacts and Their Role in Scientific Argumentation}
+For each claim in this thesis, supporting artifacts exist:
+\begin{itemize}
+  \item Calibration quality claims: intrinsics JSON, extrinsics JSON, overlay image sets.
+  \item Tracking claims: per-session motion JSON files and rendered videos.
+  \item Accuracy claims: summary metrics and per-trial CSV reports from GT scripts.
+  \item Robustness claims: dynamic metrics from slow/fast/no-ball scenarios.
+\end{itemize}
+
+The artifact-oriented workflow allowed rapid dispute resolution when contradictory observations appeared. For example, when a render looked physically implausible, it was possible to inspect camera maps, overlays, and reprojection metrics to isolate root cause.
+
+\section{3.14 Integrating Human Workflow into Technical Design}
+A recurring practical issue was operator distance from workstation during capture. This influenced script evolution toward:
+\begin{itemize}
+  \item automatic triggers based on corner quality,
+  \item settle delays before recording,
+  \item compact keyboard controls and status overlays,
+  \item deterministic output naming.
+\end{itemize}
+
+This is not trivial UI work; it directly affects data quality and therefore scientific validity. In research systems involving physical spaces, user workflow is a technical dependency.
+
+\section{3.15 Repository Sustainability for Future Students}
+The project now has a structure that future researchers can extend:
+\begin{itemize}
+  \item clear folder responsibilities,
+  \item documented session pipelines,
+  \item reproducible report generators,
+  \item thesis-linked artifact paths.
+\end{itemize}
+
+This sustainability is a meaningful contribution in academic engineering labs where toolchains often become unusable after one cohort.
