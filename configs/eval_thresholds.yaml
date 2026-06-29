@@ -1,0 +1,32 @@
+# 3D accuracy regression thresholds for the CI eval gate.
+#
+# Upper bounds derived from the documented measured 4-camera `arena_fixed`
+# accuracy (docs/model_card.md / docs/performance_report.md) with headroom, so a
+# model-weight or calibration swap that meaningfully regresses accuracy fails CI.
+# Tighten these as accuracy improves; never loosen them silently to make a bad
+# run pass.
+#
+# Measured baseline (arena_fixed):
+#   ball static : mean 156.9 / P95 288.3 / precision 3.1 mm
+#   joint touch : mean 179.0 / P95 243.8 / precision 4.4 mm
+
+suites:
+  ball_static:
+    min_n: 5
+    max_mean_mm: 180.0
+    max_p95_mm: 320.0
+    max_precision_mm: 8.0
+
+  joint_touch:
+    min_n: 5
+    max_mean_mm: 205.0
+    max_p95_mm: 270.0
+    max_precision_mm: 10.0
+
+  # Tight gate for the static-ball calibration health check (the <25 px / mm
+  # validator): used once the 6-camera promotion gates are run.
+  static_calibration_check:
+    min_n: 3
+    max_mean_mm: 50.0
+    max_p95_mm: 90.0
+    max_precision_mm: 6.0

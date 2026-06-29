@@ -1,0 +1,26 @@
+# GPU stack: API on the CUDA image with weights + calibration mounted read-only.
+# Requires the NVIDIA Container Toolkit.
+#   docker compose -f docker-compose.gpu.yml up --build
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: project-cam-api:gpu
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      - PROJECT_CAM_CAMERA_PROFILE=usb6
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./models:/app/models:ro
+      - ./configs:/app/configs:ro
+      - ./arena_fixed:/app/arena_fixed:ro
+      - ./garage_lab_combined/cal:/app/garage_lab_combined/cal:ro

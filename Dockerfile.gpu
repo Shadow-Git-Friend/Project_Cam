@@ -1,0 +1,29 @@
+# GPU image for live inference (YOLO / YOLO-Pose / TensorRT). Large; built
+# manually on the GPU host, NOT in CI. Mount weights at runtime rather than
+# baking them in (see docker-compose.gpu.yml).
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONPATH=/app/src \
+    PROJECT_CAM_CAMERA_PROFILE=usb6
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3-pip python3.11-venv \
+        libgl1 libglib2.0-0 ffmpeg git && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python
+
+# Light API deps + full runtime stack. torch/TensorRT wheels resolve against the
+# CUDA 12.4 runtime in this base image.
+COPY requirements-api.txt requirements.txt pyproject.toml README.md ./
+RUN python -m pip install --no-cache-dir -U pip && \
+    python -m pip install --no-cache-dir -r requirements-api.txt && \
+    python -m pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN python -m pip install --no-cache-dir --no-deps -e .
+
+EXPOSE 8000
+CMD ["uvicorn", "services.api.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -77,6 +77,17 @@ def test_usb6_launcher_defaults_to_3d_only_low_latency_mode():
     assert "--pose-every 2" in launcher
 
 
+def test_usb6_launchers_default_to_usb2_safe_capture_size():
+    for launcher_path in [
+        Path("Parallel_working/run_live_usb6_mirrored_skeleton.sh"),
+        Path("Parallel_working/run_live_usb6_blm.sh"),
+    ]:
+        launcher = launcher_path.read_text()
+
+        assert 'WIDTH="${PROJECT_CAM_WIDTH:-640}"' in launcher
+        assert 'HEIGHT="${PROJECT_CAM_HEIGHT:-360}"' in launcher
+
+
 def test_yolopose_batches_stay_within_tensor_rt_profile_limit():
     live = load_live_module()
     calls = []

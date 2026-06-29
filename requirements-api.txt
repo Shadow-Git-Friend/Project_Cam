@@ -1,0 +1,14 @@
+# Lightweight dependency set for the API service container (CPU, no GPU stack).
+# This is the aim-only service surface: health, system info, cameras,
+# triangulation, prediction, session-report contract, and /metrics.
+#
+# The heavy inference stack (torch/ultralytics/mmpose/TensorRT) is NOT here --
+# GPU inference runs in the separate GPU image / live rig, not the API container.
+
+numpy>=1.26,<2.0
+PyYAML>=6.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+prometheus-client>=0.20
+python-multipart>=0.0.9

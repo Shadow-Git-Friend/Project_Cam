@@ -1,0 +1,64 @@
+# Model registry for the portfolio/runtime surface.
+#
+# This file tracks model provenance without importing model runtimes. Checksums
+# are intentionally optional here: when a SHA-256 is recorded, CI/API can verify
+# it; when it is absent, the registry reports `unregistered` rather than hashing
+# large local artifacts on every request.
+
+registry_version: 1
+
+default_models:
+  ball_detection: ball_yolo26m_672_trt
+  pose_estimation: pose_yolo11m_trt
+
+models:
+  - model_id: ball_yolo26m_672_trt
+    task: ball_detection
+    version: "2026-04-13"
+    backend: tensorrt
+    artifact_format: engine
+    path: models/ball/yolo26m-672.engine
+    input_size: [672, 672]
+    status: active
+    source: yolo26m garage ball detector, dynamic TensorRT FP16 export
+    metrics:
+      jump_01_detection_rate_old: 0.749
+      jump_01_detection_rate_new: 0.842
+      measured_latency_ms: 13.0
+    notes: Active live ball detector; dynamic batch export avoids 4-camera batch mismatch.
+
+  - model_id: ball_yolo26m_672_pt
+    task: ball_detection
+    version: "2026-04-13"
+    backend: pytorch
+    artifact_format: pt
+    path: models/ball/yolo26m-672.pt
+    input_size: [672, 672]
+    status: reference
+    source: yolo26m garage ball detector training artifact
+    metrics:
+      measured_latency_ms: 8.7
+
+  - model_id: ball_yolo26s_672_trt
+    task: ball_detection
+    version: "2026-04-13"
+    backend: tensorrt
+    artifact_format: engine
+    path: models/ball/yolo26s-672.engine
+    input_size: [672, 672]
+    status: reference
+    source: smaller garage ball detector TensorRT FP16 export
+
+  - model_id: pose_yolo11m_trt
+    task: pose_estimation
+    version: "2026-04-13"
+    backend: tensorrt
+    artifact_format: engine
+    path: yolo11m-pose.engine
+    input_size: [640, 640]
+    status: active
+    source: YOLO11m-Pose dynamic TensorRT FP16 export
+    metrics:
+      measured_latency_ms: 6.2
+      mmpose_latency_ms: 38.5
+    notes: Active real-time pose backend; MMPose remains the slower reference path.

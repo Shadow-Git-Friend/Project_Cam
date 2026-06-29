@@ -33,7 +33,8 @@ def _synthetic_camera_east_low(z_mm: float = 450.0):
     z_axis = look_at - cam_pos
     z_axis /= np.linalg.norm(z_axis)
     up_w = np.array([0.0, 0.0, 1.0])
-    x_axis = np.cross(up_w, z_axis); x_axis /= np.linalg.norm(x_axis)
+    x_axis = np.cross(up_w, z_axis)
+    x_axis /= np.linalg.norm(x_axis)
     y_axis = np.cross(z_axis, x_axis)
     # World->cam rotation: rows are the camera axes in world frame.
     R = np.stack([x_axis, y_axis, z_axis], axis=0)

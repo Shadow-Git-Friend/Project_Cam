@@ -15,7 +15,6 @@ import numpy as np
 
 from .rep_state import RepState
 
-
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 _TEXT = (245, 245, 245)

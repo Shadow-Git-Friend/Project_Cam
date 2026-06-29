@@ -1,8 +1,0 @@
-Package:ax900-wifi-adapter-linux-driver
-Version:1.0.1.4
-Provides:ax300-wifi-adapter-linux-driver 
-Conflicts: ax300-wifi-adapter-linux-driver
-Replaces: ax300-wifi-adapter-linux-driver
-Architecture:all
-Maintainer:aic
-Description:aic8800 wifi driver deb package

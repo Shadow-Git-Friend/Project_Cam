@@ -4,6 +4,32 @@
 - All FPS/perf work is isolated in `Parallel_working/`
 - Never modify `garage_lab_combined/scripts/` for performance without approval
 
+## Latest-frame capture fix (2026-06-23, CRITICAL for multi-cam responsiveness)
+- `ThreadedCapture.read_latest()` now returns each camera's MOST RECENT frame every call (returns `(ret, frame, ts, is_new)`); staleness is gated by the caller via `--max-frame-age-ms`. The main loop additionally `continue`s when no camera is new (`any_new_frame`), so pose isn't re-run on identical frames.
+- Why: the old version returned a frame only if brand-new+unconsumed, so a multi-cam batch needed >=2 async cameras to deliver within the SAME loop iteration. Rare at low fps -> with 6 USB cameras the 3D skeleton updated ~1 Hz even though the renderer showed 40 FPS. The displayed FPS is now the real skeleton update rate (whenever ANY camera refreshes, ~aggregate fps). At 4 cams/15 fps the old code coincided often, which is why it felt instant before.
+
+## Cinematic 3D renderer (2026-06-23, cv2 backend, display-only)
+- `--render-theme cinematic` (DEFAULT) | `classic`. Cinematic = dark gradient stage, 1 m floor grid, dim arena/tag wireframe, floor shadow of the skeleton, glowing depth-shaded skeleton colour-coded by body side (orange=left, cyan=right, mint=head, white=torso), white joint cores sized by camera depth, and a top "● LIVE · MULTI-VIEW 3D POSE · <Hz> · <N> cams" HUD. `classic` = the old flat light-grey look.
+- Motion trails for wrists+ankles (joints 9,10,15,16) reuse `--trail-len` (default 20). `--auto-orbit [--auto-orbit-speed deg/s]` slowly rotates the view for demos (off by default).
+- All additions are inside `draw_live_scene_cv2` + a trail deque + orbit azimuth in the main loop. They do NOT touch `triangulate_multi`, `transform_world_point_y`, `ema_update`, or UDP. Palette/side constants: `LEFT_JOINTS/RIGHT_JOINTS/COL_* /_bone_color/_shade` near `CONNECTIONS`.
+
+## Demo / startup feature set (2026-06-23, all display-only, cv2 backend)
+- **One-Euro display filter** (`--display-filter oneeuro` DEFAULT | `ema`): `OneEuroVec` class, one per joint, applied at the joints_state->joints_display stage. Low lag on fast motion, smooth when still — strictly better than the fixed EMA lerp for live display. Tunables `--oneeuro-mincutoff` (1.2), `--oneeuro-beta` (0.3). Does NOT touch `ema_update` (which still smooths joints_state upstream).
+- **Velocity heat-colouring** (`--limb-heat`): bones/joints coloured blue->red by per-joint speed (mm/s) via `_heat_color`; `--heat-vmax-mm-s` (2500) sets the hot end. Speed is computed from joints_state frame-deltas in the display block (`joint_speeds`), independent of the Kalman filters.
+- **Live metrics HUD** (`--metrics-hud`, default on): height (joint z-extent), reach (wrist-to-wrist span), peak joint speed. Bottom-left panel in cinematic.
+- **Squat + push-up rep counters** (`--count-reps`, on in both usb6 launchers): reuses the coach `make_counter`/`frame_kinematics`/`rep_state` (src/project_cam/assessment) but runs lightweight (no separate coach window), updated each frame from `joints_state`, shown in the ATHLETE panel (Squats / Push-ups). BOTH run simultaneously — do squats and the squat line ticks, push-ups and the push-up line ticks. Press **`c`** in the window to reset. Less rigorous than the full `--coach-overlay` window (no ROI/leg-prior cleanup) but good for live demos.
+- **2D camera thumbnails** (`--show-thumbnails`): live per-cam feeds inset down the right edge — shows the multi-view behind the 3D.
+- **MP4 record** of the 3D view: press `r` in the window to start/stop; writes `--record-dir/arena_demo_<ts>.mp4` (mp4v). Released cleanly on exit. Separate from `run_record_3d.sh`'s always-on `video_writer_3d`.
+- Multi-person is NOT implemented (needs cross-view identity association — a real architectural change, deferred).
+
+## BLM / ball-launcher live connection (2026-06-23)
+- `Parallel_working/run_live_usb6_blm.sh` = cinematic 6-USB viewer + UDP target broadcast (127.0.0.1:5005) + `--demo-blm` aim overlay. The VIEWER NEVER actuates the launcher; it only triangulates + broadcasts the chosen joint + draws where the BLM would aim. Actuation is only ever via `garage_lab_combined/scripts/live_aim_test.py` in Terminal 2.
+- **Geometry caveat (must validate before firing):** the 6-USB rig triangulates in the Y-MIRRORED frame and the launcher runs `--world-y-mirror` (so UDP is mirrored too). BLM aim was previously validated only on the canonical 4-cam frame. Do an aim-only S2 test first (`live_aim_test.py --no-shoot-enabled`): aim at a joint and confirm the launcher physically points at the person. If it points to the mirrored side, toggle `--udp-y-mirror/--no-udp-y-mirror` on the viewer. Only after aim is correct + RPM gate (S3) re-checked may `--shoot-enabled` be used (S4), per `.claude/rules/safety.md`.
+- Set the real BLM mount position via `BLM_X_MM/BLM_Y_MM/BLM_Z_MM` env vars (mirrored-frame mm); the overlay default is a placeholder.
+
+## Robust per-joint pose triangulation (2026-06-23)
+- `robust_triangulate_joint(...)` (`--pose-max-reproj-px`, default 40) rejects outlier camera rays per joint, mirroring `robust_triangulate_ball`. Stops a bad camera pose / transient 2D mis-detection from flinging a joint to a random point. See `.claude/rules/geometry.md`.
+
 ## Profiles (Parallel_working/)
 - quality: baseline behavior, no forced optimizations
 - balanced: best current skeleton placement + moderate speedup

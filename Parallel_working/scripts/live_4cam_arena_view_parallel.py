@@ -5,6 +5,7 @@ import math
 import multiprocessing as mp
 import re
 import shutil
+import os
 import socket
 import subprocess
 import sys
@@ -40,6 +41,90 @@ CONNECTIONS = [
     (1, 3),
     (2, 4),
 ]
+
+# --- skeleton side classification + cinematic palette (BGR) ---
+LEFT_JOINTS = {1, 3, 5, 7, 9, 11, 13, 15}
+RIGHT_JOINTS = {2, 4, 6, 8, 10, 12, 14, 16}
+COL_LEFT = (40, 170, 255)    # warm orange  (left side)
+COL_RIGHT = (255, 200, 40)   # cyan         (right side)
+COL_SPINE = (240, 240, 240)  # near-white   (torso/head links)
+COL_HEAD = (150, 255, 170)   # mint         (face)
+TRAIL_JOINTS = (9, 10, 15, 16)  # wrists + ankles get motion trails
+
+
+def _bone_color(s, e):
+    if s in LEFT_JOINTS and e in LEFT_JOINTS:
+        return COL_LEFT
+    if s in RIGHT_JOINTS and e in RIGHT_JOINTS:
+        return COL_RIGHT
+    if s <= 4 or e <= 4:
+        return COL_HEAD
+    return COL_SPINE
+
+
+def _shade(color, f):
+    """Scale a BGR colour brightness by f (for glow / depth shading)."""
+    return tuple(int(max(0, min(255, c * f))) for c in color)
+
+
+def _heat_color(speed_mm_s, vmax=2500.0):
+    """Map a joint speed (mm/s) to a blue->cyan->green->yellow->red BGR ramp."""
+    t = float(np.clip(speed_mm_s / max(1e-6, vmax), 0.0, 1.0))
+    stops = [(255, 80, 0), (255, 255, 0), (0, 255, 0), (0, 220, 255), (0, 40, 255)]  # BGR
+    p = t * (len(stops) - 1)
+    i = int(p); f = p - i
+    if i >= len(stops) - 1:
+        return stops[-1]
+    a, b = stops[i], stops[i + 1]
+    return tuple(int(a[k] * (1 - f) + b[k] * f) for k in range(3))
+
+
+class OneEuroVec:
+    """One-Euro filter for a 3D point: low lag on fast motion, smooth when slow.
+    Far better than a fixed EMA for live display (Casiez et al., CHI 2012).
+    Also exposes the last per-axis velocity estimate (dx) for heat-colouring."""
+
+    def __init__(self, mincutoff=1.2, beta=0.3, dcutoff=1.0):
+        self.mincutoff = float(mincutoff)
+        self.beta = float(beta)
+        self.dcutoff = float(dcutoff)
+        self.x_prev = None
+        self.dx_prev = np.zeros(3, dtype=np.float64)
+        self.t_prev = None
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2.0 * np.pi * max(1e-6, cutoff))
+        return 1.0 / (1.0 + tau / max(1e-6, dt))
+
+    def reset(self):
+        self.x_prev = None
+        self.t_prev = None
+        self.dx_prev = np.zeros(3, dtype=np.float64)
+
+    def __call__(self, x, t):
+        x = np.asarray(x, dtype=np.float64)
+        if self.x_prev is None or self.t_prev is None:
+            self.x_prev = x.copy()
+            self.t_prev = t
+            return x.copy()
+        dt = t - self.t_prev
+        if dt <= 0:
+            dt = 1e-3
+        dx = (x - self.x_prev) / dt
+        a_d = self._alpha(self.dcutoff, dt)
+        edx = a_d * dx + (1 - a_d) * self.dx_prev
+        cutoff = self.mincutoff + self.beta * np.abs(edx)
+        a = np.array([self._alpha(c, dt) for c in cutoff])
+        x_hat = a * x + (1 - a) * self.x_prev
+        self.x_prev = x_hat
+        self.dx_prev = edx
+        self.t_prev = t
+        return x_hat
+
+    def speed(self):
+        return float(np.linalg.norm(self.dx_prev))
+
 
 CAM_ORDER = ["camEast", "camNorth", "camSouth", "camWest"]
 
@@ -247,13 +332,20 @@ class ThreadedCapture:
                 self._has_unconsumed = True
 
     def read_latest(self):
+        # Return the camera's MOST RECENT frame every call (staleness is gated by
+        # the caller via --max-frame-age-ms). Previously this returned a frame only
+        # if brand-new+unconsumed, so a multi-cam batch required >=2 async cameras
+        # to deliver within the same loop iteration — rare at low fps -> the 3D
+        # skeleton updated ~1 Hz with 6 cameras. The is_new flag lets the caller
+        # tell whether the frame changed since the last read.
         with self.lock:
-            if self.frame is None or not self._has_unconsumed:
-                return False, None, 0.0
+            if self.frame is None:
+                return False, None, 0.0, False
             fr = self.frame
             ts = self.ts
+            is_new = self._has_unconsumed
             self._has_unconsumed = False
-        return True, fr, ts
+        return True, fr, ts, is_new
 
     def stats(self):
         with self.lock:
@@ -948,9 +1040,28 @@ def draw_live_scene_cv2(
     ghost_joints=None,
     predict_ahead_ms=0.0,
     blm_aim=None,
+    theme="cinematic",
+    trails=None,
+    cams_tracking=None,
+    joint_speeds=None,
+    limb_heat=False,
+    heat_vmax=2500.0,
+    metrics=None,
+    thumbnails=None,
+    recording=False,
 ):
     """Render the 3D arena scene onto a cv2 BGR image (~1-3 ms)."""
-    img = np.full((img_h, img_w, 3), 247, dtype=np.uint8)  # light grey bg
+    cine = (theme == "cinematic")
+    if cine:
+        # vertical gradient "stage" background (dark navy -> near black)
+        img = np.empty((img_h, img_w, 3), dtype=np.uint8)
+        top = np.array([46, 34, 28], dtype=np.float32)
+        bot = np.array([20, 16, 16], dtype=np.float32)
+        ramp = np.linspace(0.0, 1.0, img_h, dtype=np.float32)[:, None]
+        col = (top[None, :] * (1 - ramp) + bot[None, :] * ramp).astype(np.uint8)
+        img[:] = col[:, None, :]
+    else:
+        img = np.full((img_h, img_w, 3), 247, dtype=np.uint8)  # light grey bg
     x_max, y_max, z_max = dims["X"], dims["Y"], dims["Z"]
     center = np.array([x_max / 2, y_max / 2, z_max / 2])
     diag = np.sqrt(x_max**2 + y_max**2 + z_max**2)
@@ -975,24 +1086,44 @@ def draw_live_scene_cv2(
     ], dtype=np.float64)
     corners = transform_world_point_y(corners, y_max, enabled=world_y_mirror)
     sc, ok = proj(corners)
-    # floor fill
-    if np.all(ok[:4]):
-        cv2.fillPoly(img, [sc[:4].astype(np.int32)], (235, 230, 225))
+    verticals = {(0, 4), (1, 5), (2, 6), (3, 7)}
+    if cine:
+        if np.all(ok[:4]):
+            cv2.fillPoly(img, [sc[:4].astype(np.int32)], (40, 32, 28))
+        # studio floor grid every 1 m
+        for x in np.arange(0, x_max + 1, 1000.0):
+            p = transform_world_point_y(np.array([[x, 0, 0], [x, y_max, 0]]), y_max, enabled=world_y_mirror)
+            s2, o2 = proj(p)
+            if o2[0] and o2[1]:
+                line(s2[0], s2[1], (72, 60, 48), 1)
+        for y in np.arange(0, y_max + 1, 1000.0):
+            p = transform_world_point_y(np.array([[0, y, 0], [x_max, y, 0]]), y_max, enabled=world_y_mirror)
+            s2, o2 = proj(p)
+            if o2[0] and o2[1]:
+                line(s2[0], s2[1], (72, 60, 48), 1)
+        edge_col, vcol = (95, 80, 62), (150, 128, 92)
+    else:
+        if np.all(ok[:4]):
+            cv2.fillPoly(img, [sc[:4].astype(np.int32)], (235, 230, 225))
+        edge_col, vcol = (160, 160, 160), (160, 160, 160)
     arena_edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
     for a, b in arena_edges:
         if ok[a] and ok[b]:
-            line(sc[a], sc[b], (160, 160, 160), 1)
+            line(sc[a], sc[b], vcol if (a, b) in verticals else edge_col, 1)
 
     # --- AprilTag planes ---
     for tag_id, pts in tags.items():
         pts_v = transform_world_point_y(pts, y_max, enabled=world_y_mirror)
         sp, sok = proj(pts_v)
         if np.all(sok):
-            cv2.fillPoly(img, [sp.astype(np.int32)], (200, 230, 245))
-            cv2.polylines(img, [sp.astype(np.int32)], True, (168, 116, 12), 1, cv2.LINE_AA)
-            c2d = sp.mean(axis=0).astype(int)
-            cv2.putText(img, str(tag_id), (c2d[0]-4, c2d[1]+4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (168, 116, 12), 1, cv2.LINE_AA)
+            if cine:
+                cv2.polylines(img, [sp.astype(np.int32)], True, (92, 80, 56), 1, cv2.LINE_AA)
+            else:
+                cv2.fillPoly(img, [sp.astype(np.int32)], (200, 230, 245))
+                cv2.polylines(img, [sp.astype(np.int32)], True, (168, 116, 12), 1, cv2.LINE_AA)
+                c2d = sp.mean(axis=0).astype(int)
+                cv2.putText(img, str(tag_id), (c2d[0]-4, c2d[1]+4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (168, 116, 12), 1, cv2.LINE_AA)
 
     # --- camera markers ---
     cam_colors_bgr = {
@@ -1004,7 +1135,7 @@ def draw_live_scene_cv2(
         sp, sok = proj(pos.reshape(1, 3))
         if sok[0]:
             pt = (int(sp[0, 0]), int(sp[0, 1]))
-            col = cam_colors_bgr.get(name, (0, 0, 0))
+            col = cam_colors_bgr.get(name, (200, 180, 120))
             cv2.circle(img, pt, 6, col, -1, cv2.LINE_AA)
             cv2.putText(img, name, (pt[0]+8, pt[1]-4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
@@ -1030,12 +1161,71 @@ def draw_live_scene_cv2(
     if joints is not None:
         jv = transform_world_point_y(np.asarray(joints, dtype=np.float64), y_max, enabled=world_y_mirror)
         sp, sok = proj(jv)
-        for s, e in CONNECTIONS:
-            if s < len(sok) and e < len(sok) and sok[s] and sok[e]:
-                line(sp[s], sp[e], (30, 30, 30), 2)
-        for j in range(min(17, len(sok))):
-            if sok[j]:
-                cv2.circle(img, (int(sp[j,0]), int(sp[j,1])), 4, (50, 50, 50), -1, cv2.LINE_AA)
+        if not cine:
+            for s, e in CONNECTIONS:
+                if s < len(sok) and e < len(sok) and sok[s] and sok[e]:
+                    line(sp[s], sp[e], (30, 30, 30), 2)
+            for j in range(min(17, len(sok))):
+                if sok[j]:
+                    cv2.circle(img, (int(sp[j,0]), int(sp[j,1])), 4, (50, 50, 50), -1, cv2.LINE_AA)
+        else:
+            # camera-space depth per joint -> node size + shading
+            jhom = np.hstack([jv, np.ones((jv.shape[0], 1))])
+            zc = (view @ jhom.T)[2]
+            zf = zc[np.isfinite(zc) & (zc > 1)]
+            znear, zfar = (float(zf.min()), float(zf.max())) if len(zf) else (1.0, 2.0)
+            zspan = max(1e-3, zfar - znear)
+
+            # floor shadow (joints dropped to z=0)
+            jfloor = jv.copy(); jfloor[:, 2] = 0.0
+            fsp, fok = proj(jfloor)
+            for s, e in CONNECTIONS:
+                if s < len(fok) and e < len(fok) and fok[s] and fok[e]:
+                    line(fsp[s], fsp[e], (26, 22, 20), 6)
+
+            # motion trails for wrists/ankles
+            if trails:
+                for jidx, hist in trails.items():
+                    if hist is None or len(hist) < 2:
+                        continue
+                    hv = transform_world_point_y(np.asarray(hist, dtype=np.float64),
+                                                 y_max, enabled=world_y_mirror)
+                    tsp, tok = proj(hv)
+                    base = COL_LEFT if jidx in LEFT_JOINTS else COL_RIGHT
+                    n = len(tsp)
+                    for i in range(1, n):
+                        if tok[i-1] and tok[i]:
+                            f = i / n
+                            line(tsp[i-1], tsp[i], _shade(base, 0.20 + 0.6 * f),
+                                 max(1, int(1 + 3 * f)))
+
+            heat = limb_heat and joint_speeds is not None
+
+            # glowing bones — coloured by body side, or by joint speed in heat mode
+            for s, e in CONNECTIONS:
+                if s < len(sok) and e < len(sok) and sok[s] and sok[e]:
+                    if heat:
+                        spd = 0.5 * (float(joint_speeds[s]) + float(joint_speeds[e]))
+                        c = _heat_color(spd, heat_vmax)
+                    else:
+                        c = _bone_color(s, e)
+                    line(sp[s], sp[e], _shade(c, 0.30), 7)   # outer glow
+                    line(sp[s], sp[e], c, 2)                  # bright core
+
+            # depth-shaded joint nodes (white core + coloured halo)
+            for j in range(min(17, len(sok))):
+                if not sok[j] or not np.isfinite(zc[j]):
+                    continue
+                t = 1.0 - float(np.clip((zc[j] - znear) / zspan, 0, 1))  # 1 = nearest
+                r = int(3 + 4 * t)
+                if heat:
+                    c = _heat_color(float(joint_speeds[j]), heat_vmax)
+                else:
+                    c = COL_LEFT if j in LEFT_JOINTS else (COL_RIGHT if j in RIGHT_JOINTS else COL_HEAD)
+                p = (int(sp[j, 0]), int(sp[j, 1]))
+                cv2.circle(img, p, r + 3, _shade(c, 0.30), -1, cv2.LINE_AA)   # halo
+                cv2.circle(img, p, r, (255, 255, 255), -1, cv2.LINE_AA)       # core
+                cv2.circle(img, p, r, c, 1, cv2.LINE_AA)
 
     # --- ghost skeleton (predicted position) ---
     if ghost_joints is not None:
@@ -1172,9 +1362,86 @@ def draw_live_scene_cv2(
             cv2.putText(img, f"CMD: {cmd}", (panel_x, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1, cv2.LINE_AA)
 
+    # --- live camera thumbnails (the multi-view behind the 3D) ---
+    if thumbnails:
+        n = max(1, len(thumbnails))
+        pad = 6
+        # start below the BLM aim panel (top-right) if it is shown, else under the top bar
+        top = 200 if blm_aim is not None else 42
+        bottom = img_h - 8
+        th = int(min(84, (bottom - top - (n - 1) * pad) / n))
+        th = max(38, th)
+        tw = int(round(th * 16 / 9))
+        x0 = img_w - (tw + pad)
+        for i, (cname, tf) in enumerate(thumbnails):
+            yy = top + i * (th + pad)
+            if yy + th > bottom or tf is None:
+                break
+            img[yy:yy+th, x0:x0+tw] = cv2.resize(tf, (tw, th))
+            cv2.rectangle(img, (x0, yy), (x0+tw, yy+th), (120, 120, 120), 1)
+            cv2.putText(img, cname.replace("_", " ")[:14], (x0+4, yy+13),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.34, (60, 255, 120), 1, cv2.LINE_AA)
+
     # --- HUD ---
-    cv2.putText(img, f"Frame: {frame_idx}  FPS: {fps_est:.1f}", (12, img_h - 16),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 80, 80), 1, cv2.LINE_AA)
+    if cine:
+        cv2.rectangle(img, (0, 0), (img_w, 34), (18, 14, 13), -1)
+        pulse = 0.5 + 0.5 * float(np.sin(frame_idx * 0.3))
+        cv2.circle(img, (20, 17), 7, _shade((60, 60, 255), 0.5 + 0.5 * pulse), -1, cv2.LINE_AA)
+        cv2.putText(img, "LIVE", (34, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(img, "MULTI-VIEW 3D POSE", (104, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (205, 205, 205), 1, cv2.LINE_AA)
+        info = f"{fps_est:4.1f} Hz"
+        if cams_tracking is not None:
+            info += f"   |   {cams_tracking} cams"
+        cv2.putText(img, info, (img_w - 240, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (150, 255, 170), 1, cv2.LINE_AA)
+
+        if recording:
+            cv2.circle(img, (img_w - 300, 17), 7, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.putText(img, "REC", (img_w - 288, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 0, 255), 2, cv2.LINE_AA)
+
+        # athlete metrics panel (bottom-left, dynamic height for rep counters)
+        if metrics:
+            mx = 14
+            base_rows = (("Height", metrics.get("height_cm"), "cm"),
+                         ("Reach", metrics.get("reach_cm"), "cm"),
+                         ("Max spd", metrics.get("max_speed_ms"), "m/s"))
+            reps = metrics.get("reps") or {}
+            n_rows = len(base_rows) + (2 if reps else 0)
+            panel_h = 30 + n_rows * 24 + (12 if reps else 6)
+            my = img_h - panel_h
+            cv2.rectangle(img, (mx - 8, my - 6), (mx + 214, img_h - 8), (18, 14, 13), -1)
+            cv2.putText(img, "ATHLETE", (mx, my + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (150, 255, 170), 1, cv2.LINE_AA)
+            yy = my + 40
+            for label, v, unit in base_rows:
+                txt = (f"{label:8s}{v:6.1f} {unit}" if v is not None else f"{label:8s}    -- {unit}")
+                cv2.putText(img, txt, (mx, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (228, 228, 228), 1, cv2.LINE_AA)
+                yy += 24
+            if reps:
+                cv2.line(img, (mx, yy - 15), (mx + 200, yy - 15), (60, 60, 60), 1)
+                yy += 4
+                cv2.putText(img, f"Squats   {reps.get('squat', 0)}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (40, 220, 255), 2, cv2.LINE_AA)
+                yy += 28
+                cv2.putText(img, f"Push-ups {reps.get('push_up', 0)}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 40), 2, cv2.LINE_AA)
+                yy += 26
+
+        # speed heat legend
+        if limb_heat:
+            lx, ly = 14, 48
+            for i in range(60):
+                cv2.line(img, (lx + i * 2, ly), (lx + i * 2, ly + 9),
+                         _heat_color(i / 60.0 * heat_vmax, heat_vmax), 2)
+            cv2.putText(img, "slow", (lx, ly + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (200, 200, 200), 1, cv2.LINE_AA)
+            cv2.putText(img, "fast", (lx + 98, ly + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (200, 200, 200), 1, cv2.LINE_AA)
+    else:
+        cv2.putText(img, f"Frame: {frame_idx}  FPS: {fps_est:.1f}", (12, img_h - 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 80, 80), 1, cv2.LINE_AA)
 
     return img
 
@@ -1556,6 +1823,40 @@ def main():
     ap.add_argument("--global-axis-len-mm", type=float, default=900.0, help="Global axes length in mm for visualization.")
     ap.add_argument("--view-elev", type=float, default=22.0, help="3D camera elevation angle.")
     ap.add_argument("--view-azim", type=float, default=-58.0, help="3D camera azimuth angle.")
+    ap.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=False,
+                    help="Open the 3D arena window in true fullscreen (press q to exit). "
+                         "The window is resizable/maximisable either way.")
+    ap.add_argument("--camera-open-retries", type=int, default=0,
+                    help="Retry opening each camera this many times before skipping it "
+                         "(for slow USB / deep-hub cameras that take a while to enumerate).")
+    ap.add_argument("--camera-open-retry-delay", type=float, default=5.0,
+                    help="Seconds between camera-open retries.")
+    ap.add_argument("--render-theme", choices=["cinematic", "classic"], default="cinematic",
+                    help="3D arena visual style (cv2 backend): cinematic dark stage with "
+                         "glowing depth-shaded skeleton + floor shadow + motion trails, or classic.")
+    ap.add_argument("--auto-orbit", action=argparse.BooleanOptionalAction, default=False,
+                    help="Slowly rotate the 3D view (cinematic demo fly-around).")
+    ap.add_argument("--auto-orbit-speed", type=float, default=8.0,
+                    help="Auto-orbit speed, degrees/second.")
+    ap.add_argument("--display-filter", choices=["oneeuro", "ema"], default="oneeuro",
+                    help="Display smoothing: oneeuro (low-lag adaptive, default) or ema (legacy lerp).")
+    ap.add_argument("--oneeuro-mincutoff", type=float, default=1.2,
+                    help="One-Euro min cutoff Hz (lower=smoother when still).")
+    ap.add_argument("--oneeuro-beta", type=float, default=0.3,
+                    help="One-Euro speed coefficient (higher=less lag on fast motion).")
+    ap.add_argument("--limb-heat", action=argparse.BooleanOptionalAction, default=False,
+                    help="Colour skeleton bones by joint speed (blue=slow -> red=fast) instead of side colours.")
+    ap.add_argument("--heat-vmax-mm-s", type=float, default=2500.0,
+                    help="Joint speed (mm/s) mapped to the hottest colour.")
+    ap.add_argument("--metrics-hud", action=argparse.BooleanOptionalAction, default=True,
+                    help="Show live height/reach/speed panel (cinematic theme).")
+    ap.add_argument("--count-reps", action=argparse.BooleanOptionalAction, default=False,
+                    help="Run squat + push-up rep counters on the live 3D pose and show "
+                         "them in the ATHLETE panel.")
+    ap.add_argument("--show-thumbnails", action=argparse.BooleanOptionalAction, default=False,
+                    help="Inset the live camera feeds as thumbnails in the 3D view corner.")
+    ap.add_argument("--record-dir", default="Parallel_working/output/recordings",
+                    help="Where 'r'-keypress MP4 captures of the 3D view are written.")
     ap.add_argument(
         "--viz-backend",
         choices=["cv2", "matplotlib"],
@@ -1836,6 +2137,25 @@ def main():
             coach_evaluate_ankle_fallback = _evaluate_ankle_fallback
         print(f"[INFO] Coach overlay enabled for {args.coach_exercise}")
 
+    # Lightweight squat + push-up rep counters for the cinematic ATHLETE HUD
+    # (independent of the heavy --coach-overlay window).
+    rep_counters = {}
+    rep_frame_kinematics = None
+    rep_count_state = {"squat": 0, "push_up": 0}
+    if args.count_reps:
+        ensure_project_src_on_path()
+        from project_cam.assessment.kinematics import frame_kinematics as _rk_fk  # noqa: E402
+        from project_cam.assessment.live_trainer.rep_state import make_counter as _rk_make  # noqa: E402
+        from project_cam.assessment.rules import (  # noqa: E402
+            DEFAULT_CONFIG_PATH as _RK_CFG, exercise_rules as _rk_rules, load_rules as _rk_load)
+        _rk_all = _rk_load(_RK_CFG)
+        rep_rules_map = {_ex: _rk_rules(_rk_all, _ex) for _ex in ("squat", "push_up")}
+        rep_make_fn = _rk_make
+        for _ex in ("squat", "push_up"):
+            rep_counters[_ex] = _rk_make(_ex, rep_rules_map[_ex])
+        rep_frame_kinematics = _rk_fk
+        print("[INFO] Rep counters enabled: squat + push_up  (press 'c' to reset)")
+
     # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
     # every time blm_aim transitions from non-AIM_OK to AIM_OK (or the joint name
     # changes while still AIM_OK), not on every frame.
@@ -1960,16 +2280,36 @@ def main():
         print("[INFO] Pose inferencer disabled (no active 2D/3D/UDP pose consumers).")
 
     caps = {}
+    open_retries = int(args.camera_open_retries)
+    open_delay = float(args.camera_open_retry_delay)
     for cam, dev in active_cams:
-        apply_uvc_low_latency_controls(dev, cam, args, log=False)
-        cap = open_camera_capture(dev)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*args.fourcc))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-        cap.set(cv2.CAP_PROP_FPS, args.fps)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, args.buffer_size)
-        if not cap.isOpened():
-            raise RuntimeError(f"Cannot open {cam}: {dev}")
+        cap = None
+        for attempt in range(open_retries + 1):
+            apply_uvc_low_latency_controls(dev, cam, args, log=False)
+            cap = open_camera_capture(dev)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*args.fourcc))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+            cap.set(cv2.CAP_PROP_FPS, args.fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, args.buffer_size)
+            if cap.isOpened():
+                break
+            try:
+                cap.release()
+            except Exception:
+                pass
+            cap = None
+            if attempt < open_retries:
+                print(f"[..] {cam} not ready (attempt {attempt + 1}/{open_retries + 1}); "
+                      f"retrying in {open_delay:.0f}s (slow USB / deep hub): {dev}")
+                time.sleep(open_delay)
+        if cap is None or not cap.isOpened():
+            # Graceful degrade: a flaky USB port (e.g. a camera on a deep hub chain)
+            # may never come up. Skip it and run with the cameras that DO work, rather
+            # than aborting the whole session. Need >=2 for 3D (checked below).
+            print(f"[WARN] Cannot open {cam}: {dev} -- skipping after "
+                  f"{open_retries + 1} attempt(s).")
+            continue
         apply_uvc_low_latency_controls(dev, cam, args, log=True)
         eff_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         eff_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1978,6 +2318,14 @@ def main():
         eff_fourcc_str = "".join(chr((eff_fourcc >> (8 * i)) & 0xFF) for i in range(4))
         caps[cam] = ThreadedCapture(cap, name=cam)
         print(f"[OK] {cam}: {dev} ({eff_w}x{eff_h}@{eff_fps:.1f}, {eff_fourcc_str})")
+
+    # Drop cameras that failed to open; triangulation needs at least two.
+    active_cams = [(c, d) for (c, d) in active_cams if c in caps]
+    if len(active_cams) < 2:
+        raise RuntimeError(
+            f"Only {len(active_cams)} camera(s) opened; need >=2 for 3D. "
+            f"Check USB connections / config device paths.")
+    print(f"[INFO] {len(active_cams)} cameras active: {[c for c, _ in active_cams]}")
 
     fig = None
     ax = None
@@ -2037,6 +2385,16 @@ def main():
     joints_cam_state = np.zeros((17,), dtype=np.int32)
     joint_last_seen_frame = np.full((17,), -10_000_000, dtype=np.int64)
     ball_traj = deque(maxlen=args.trail_len)
+    # cinematic motion trails for wrists/ankles (display-only)
+    joint_trails = {j: deque(maxlen=max(2, args.trail_len)) for j in TRAIL_JOINTS}
+    # One-Euro display filters (one per joint) + speed estimate for heat-colouring
+    oneeuro_filters = [OneEuroVec(args.oneeuro_mincutoff, args.oneeuro_beta) for _ in range(17)]
+    joint_speeds = np.zeros((17,), dtype=np.float64)
+    prev_speed_pos = np.full((17, 3), np.nan, dtype=np.float64)
+    prev_speed_t = None
+    # 'r'-keypress MP4 recording of the cinematic 3D view
+    rec_writer = None
+    rec_path = None
 
     # Kalman filters: one per joint for predictive targeting
     use_prediction = args.predict_ahead_ms > 0
@@ -2059,6 +2417,14 @@ def main():
     coach_output_size = (int(args.viz_width), int(args.viz_height))
 
     frame_idx = 0
+    # Create the 3D window resizable (WINDOW_NORMAL lets the user drag/maximise it
+    # and stretch the render to fit); optionally force true fullscreen.
+    if use_cv2_viz and args.show_3d:
+        cv2.namedWindow("Live 3D Arena", cv2.WINDOW_NORMAL)
+        if args.fullscreen:
+            cv2.setWindowProperty("Live 3D Arena", cv2.WND_PROP_FULLSCREEN,
+                                  cv2.WINDOW_FULLSCREEN)
+
     t_start = time.time()
     t_prev = t_start
     fps_est = 0.0
@@ -2121,8 +2487,9 @@ def main():
             dropped_frames_per_cam = {}
             stale_frames_per_cam = {}
             t_capture_now = time.perf_counter()
+            any_new_frame = False
             for cam, _ in active_cams:
-                ret, frame, ts = caps[cam].read_latest()
+                ret, frame, ts, is_new = caps[cam].read_latest()
                 stats = caps[cam].stats()
                 dropped_total = int(stats["dropped"])
                 dropped_prev = int(prev_dropped_counts.get(cam, 0))
@@ -2135,12 +2502,25 @@ def main():
                 if age_ms > float(args.max_frame_age_ms):
                     stale_frames_per_cam[cam] = age_ms
                     continue
+                if is_new:
+                    any_new_frame = True
                 cam_frames[cam] = frame
                 frame_batch.append(frame)
                 batch_order.append(cam)
             timer.stop("capture")
 
             if len(frame_batch) < 2:
+                timer.stop("total")
+                time.sleep(0.002)
+                continue
+
+            # No camera produced a NEW frame since the last cycle: the inputs are
+            # identical, so re-running pose/triangulation would just burn GPU on
+            # the same skeleton. Skip; the async renderer keeps displaying. This
+            # plus read_latest() always returning the freshest frame means the
+            # skeleton now refreshes whenever ANY camera updates (~aggregate fps)
+            # instead of only when >=2 cameras happen to align in one iteration.
+            if not any_new_frame:
                 timer.stop("total")
                 time.sleep(0.002)
                 continue
@@ -2672,21 +3052,35 @@ def main():
             # Uses adaptive alpha: fast movements (jumps) snap instantly.
             d_alpha_base = args.display_smooth_alpha
             snap_thresh = args.ema_snap_thresh_mm
+            use_oneeuro = (args.display_filter == "oneeuro")
+            t_disp = time.perf_counter()
+            sdt = None if prev_speed_t is None else max(1e-3, t_disp - prev_speed_t)
             for j in range(17):
                 src = joints_state[j]
                 if not np.isfinite(src).all():
                     joints_display[j] = np.nan
+                    oneeuro_filters[j].reset()
+                    joint_speeds[j] = 0.0
+                    prev_speed_pos[j] = np.nan
                     continue
-                dst = joints_display[j]
-                if not np.isfinite(dst).all():
-                    joints_display[j] = src.copy()
+                # per-joint speed (mm/s) from the smoothed 3D state -> heat colour
+                if sdt is not None and np.all(np.isfinite(prev_speed_pos[j])):
+                    joint_speeds[j] = float(np.linalg.norm(src - prev_speed_pos[j]) / sdt)
+                prev_speed_pos[j] = src.astype(np.float64)
+                if use_oneeuro:
+                    joints_display[j] = oneeuro_filters[j](src, t_disp).astype(np.float32)
                 else:
-                    d_alpha = d_alpha_base
-                    if snap_thresh > 0:
-                        disp = float(np.linalg.norm(src - dst))
-                        if disp > snap_thresh:
-                            d_alpha = min(1.0, d_alpha_base * (disp / snap_thresh))
-                    joints_display[j] = dst + d_alpha * (src - dst)
+                    dst = joints_display[j]
+                    if not np.isfinite(dst).all():
+                        joints_display[j] = src.copy()
+                    else:
+                        d_alpha = d_alpha_base
+                        if snap_thresh > 0:
+                            disp = float(np.linalg.norm(src - dst))
+                            if disp > snap_thresh:
+                                d_alpha = min(1.0, d_alpha_base * (disp / snap_thresh))
+                        joints_display[j] = dst + d_alpha * (src - dst)
+            prev_speed_t = t_disp
             timer.stop("triang")
 
             timer.start("coach")
@@ -2853,8 +3247,45 @@ def main():
                     }
                     _prev_aim_status = "NO_TARGET"
 
+            # update cinematic motion trails (wrists/ankles)
+            for _tj in TRAIL_JOINTS:
+                _p = joints_display[_tj]
+                if np.all(np.isfinite(_p)):
+                    joint_trails[_tj].append(np.array(_p, copy=True))
+
+            # --- live squat / push-up rep counters (independent of coach window) ---
+            if rep_counters and rep_frame_kinematics is not None:
+                rk_frame = joints_array_to_frame(
+                    joints_state, joints_conf_state, joints_cam_state, frame_idx, args.fps)
+                rk_metrics = rep_frame_kinematics(rk_frame)
+                for _ex, _ctr in rep_counters.items():
+                    try:
+                        _st = _ctr.update(rk_metrics)
+                        rep_count_state[_ex] = int(getattr(_st, "rep_count", 0))
+                    except Exception:
+                        pass
+
+            # --- live athlete metrics (height / arm-span reach / peak joint speed) ---
+            metrics_hud = None
+            if args.metrics_hud:
+                fin = np.isfinite(joints_display).all(axis=1)
+                metrics_hud = {}
+                if fin.any():
+                    zs = joints_display[fin, 2]
+                    metrics_hud["height_cm"] = float((zs.max() - zs.min()) / 10.0)
+                if fin[9] and fin[10]:
+                    metrics_hud["reach_cm"] = float(
+                        np.linalg.norm(joints_display[9] - joints_display[10]) / 10.0)
+                metrics_hud["max_speed_ms"] = float(np.nanmax(joint_speeds) / 1000.0)
+                if rep_counters:
+                    metrics_hud["reps"] = dict(rep_count_state)
+
             if args.show_3d and (frame_idx % args.viz_every == 0):
+                orbit_azim = (args.view_azim + (time.time() - t_start) * args.auto_orbit_speed
+                              if args.auto_orbit else args.view_azim)
                 if use_cv2_viz:
+                    thumbs = ([(c, cam_frames[c]) for c in batch_order if c in cam_frames]
+                              if args.show_thumbnails else None)
                     viz_img = draw_live_scene_cv2(
                         img_w=args.viz_width,
                         img_h=args.viz_height,
@@ -2868,16 +3299,28 @@ def main():
                         fps_est=fps_est,
                         world_y_mirror=display_world_y_mirror,
                         view_elev=args.view_elev,
-                        view_azim=args.view_azim,
+                        view_azim=orbit_azim,
                         draw_axes=args.draw_global_axes,
                         axis_len=args.global_axis_len_mm,
                         ghost_joints=joints_predicted.copy() if show_ghost else None,
                         predict_ahead_ms=args.predict_ahead_ms,
                         blm_aim=blm_aim_data,
+                        theme=args.render_theme,
+                        trails=({j: list(joint_trails[j]) for j in TRAIL_JOINTS}
+                                if args.render_theme == "cinematic" else None),
+                        cams_tracking=len(batch_order),
+                        joint_speeds=joint_speeds,
+                        limb_heat=args.limb_heat,
+                        heat_vmax=args.heat_vmax_mm_s,
+                        metrics=metrics_hud,
+                        thumbnails=thumbs,
+                        recording=(rec_writer is not None),
                     )
                     cv2.imshow("Live 3D Arena", viz_img)
                     if video_writer_3d is not None:
                         video_writer_3d.write(viz_img)
+                    if rec_writer is not None:
+                        rec_writer.write(viz_img)
                 elif render_q is not None and render_proc is not None:
                     if not render_proc.is_alive():
                         print("[WARN] Render worker stopped unexpectedly; disabling 3D updates.")
@@ -3047,6 +3490,33 @@ def main():
                 _key = cv2.waitKey(1) & 0xFF
                 if _key == ord("q"):
                     break
+                # Closing the window with the mouse (X button) also stops cleanly.
+                if use_cv2_viz and args.show_3d:
+                    try:
+                        if cv2.getWindowProperty("Live 3D Arena", cv2.WND_PROP_VISIBLE) < 1:
+                            break
+                    except cv2.error:
+                        break
+                if _key == ord("c") and rep_counters:
+                    for _ex in list(rep_counters.keys()):
+                        rep_counters[_ex] = rep_make_fn(_ex, rep_rules_map[_ex])
+                        rep_count_state[_ex] = 0
+                    print("[reps] counters reset")
+                if _key == ord("r") and use_cv2_viz:
+                    if rec_writer is None:
+                        os.makedirs(args.record_dir, exist_ok=True)
+                        rec_path = os.path.join(
+                            args.record_dir,
+                            f"arena_demo_{time.strftime('%Y%m%d_%H%M%S')}.mp4")
+                        rec_writer = cv2.VideoWriter(
+                            rec_path, cv2.VideoWriter_fourcc(*"mp4v"),
+                            max(5.0, float(fps_est)),
+                            (int(args.viz_width), int(args.viz_height)))
+                        print(f"[REC] started -> {rec_path}")
+                    else:
+                        rec_writer.release()
+                        print(f"[REC] saved -> {rec_path}")
+                        rec_writer = None
                 if args.coach_overlay:
                     try:
                         if cv2.getWindowProperty(coach_window, cv2.WND_PROP_VISIBLE) < 1:
@@ -3105,6 +3575,9 @@ def main():
                     perf_fh.flush()
 
     finally:
+        if rec_writer is not None:
+            rec_writer.release()
+            print(f"[REC] saved -> {rec_path}")
         if video_writer_3d is not None:
             video_writer_3d.release()
             print(f"[REC] Saved 3D video: {args.record_video}")

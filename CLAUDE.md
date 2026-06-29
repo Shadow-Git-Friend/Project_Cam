@@ -154,7 +154,7 @@
 - [x] Full integrated live test passed (2026-04-09): pose→aim→fire on multiple joints (left_shoulder, right_knee, nose). First nose shot slightly low. Second nose shot off — ball speed at 800 RPM not yet calibrated.
 - [x] Thesis engineering chapter drafted (2026-04-13): `thesis_engineering_chapter.md` — chassis/electronics/firmware FSM/comm stack/safety/integration/ECE-curriculum mapping/BOM rationale
 - [x] Defense Q&A pack drafted (2026-04-13): `thesis_defense_qa.md` — ECE panel hardware questions + PhD CV examiner methodology questions + defense tactics
-- [x] Pipeline reference doc drafted (2026-04-13): `new_complete.md` — full per-script reference with math/formulas/CLI flags
+- [x] Pipeline reference doc drafted (2026-04-13): `docs/archive/legacy_notes/new_complete.md` — full per-script reference with math/formulas/CLI flags
 - [x] Ball detection upgraded (2026-04-13): swapped `y26s_v1_garage.pt` (75 epochs, old garage dataset) → `yolo26m-672.engine` (100 epochs, dataset-main, TRT FP16 @imgsz 1280). Benchmark on recorded sequences: walk_01 99.6%→99.6% with higher conf; jump_01 (hard case) **74.9%→84.2% detection rate**, balanced across all 4 cameras (OLD had camEast drop to 22%). Default device moved CPU→cuda:0. Inference ~13 ms. New weights live in `models/ball/`, selection evaluated in `Parallel_working/scripts/ball_model_sanity_check.py`.
 - [x] TRT engines re-exported with `dynamic=True, batch=4` (2026-04-13): previous static-batch engines segfaulted on 4-cam batched inference. `export_models_tensorrt.py` patched. Rebuilt `models/ball/yolo26m-672.engine` and `yolo11m-pose.engine`. Pose skeleton now renders in recordings (was silently failing on batch mismatch).
 - [x] Ball tracking robustness (2026-04-13): live viewer now uses `robust_triangulate_ball` (iterative per-cam reprojection rejection, `--ball-max-reproj-px 15`), dedicated ball Kalman filter (CV model, PN=800/MN=25), max-speed gate (`--ball-max-speed-mps 25`), and coast-through-drop (`--ball-coast-frames 6`). Replaces naive EMA — eliminates teleports, false positives across cams, and visual drops on fast motion.
@@ -164,7 +164,7 @@
 - Next: (1) RPM→m/s calibration (Phase 0 close-out — blocking shot accuracy at 800 RPM), (2) Test voice + auto-reload in live lab, (3) Phase 1.1 `common.py` + `ArenaConfig` before defense.
 
 ## Documentation Files (thesis-related, do not modify without approval)
-- `new_complete.md` — full pipeline + per-script reference
+- `docs/archive/legacy_notes/new_complete.md` — full pipeline + per-script reference
 - `thesis_engineering_chapter.md` — engineering chapter draft for thesis
 - `thesis_defense_qa.md` — defense prep Q&A pack
 - `thesis_draft.md` — pre-existing thesis draft (do not touch unless asked)
@@ -173,9 +173,9 @@
 ## Session Log
 
 ### 2026-04-14 — Stack freeze pre-defense
-- Done today: ball KF + robust triangulation, dynamic-batch TRT engines (ball + pose), recording SIGTERM fix, README updated, suggestions.md audit + verdicts, plan.md created (Phase 0–5)
+- Done today: ball KF + robust triangulation, dynamic-batch TRT engines (ball + pose), recording SIGTERM fix, README updated, docs/archive/legacy_notes/suggestions.md audit + verdicts, docs/archive/legacy_notes/plan.md created (Phase 0–5)
 - Frozen: tag `v0.9-predefense` — rollback point if anything breaks
-- Decision: отложили Pipeline/Strategy, batch SVD, ROS2, HMAC до Phase 5 (post-funding). См. suggestions.md.
+- Decision: отложили Pipeline/Strategy, batch SVD, ROS2, HMAC до Phase 5 (post-funding). См. docs/archive/legacy_notes/suggestions.md.
 - Next: Phase 0 — ball tuning in lab + RPM→m/s calibration. Then Phase 1.1 — `common.py` + `ArenaConfig` before defense if time permits.
 
 ### 2026-04-17 — Voice + auto-reload + repo cleanup
@@ -197,7 +197,7 @@
 - Next: live arena test with `--ball-imgsz 960 --ball-single-cam-fallback --ball-ballistic-fallback` + defaults on the new gates; compare 3D trajectory stability vs pre-gate runs. If stable, consider lowering `--ball-conf` default 0.40→0.25.
 
 ### 2026-04-20 — Ball detection diagnosis + single-cam fallback + Gemini review
-- **Tier 0 additions from second-pass review + Gemini/tree review analysis landed.** New `suggestions.md` section (Tier verdicts for gemini3.1pro.md, industrial-tree critique). Safe additions only; pre-defense freeze intact.
+- **Tier 0 additions from second-pass review + Gemini/tree review analysis landed.** New `docs/archive/legacy_notes/suggestions.md` section (Tier verdicts for docs/archive/legacy_notes/gemini3.1pro.md, industrial-tree critique). Safe additions only; pre-defense freeze intact.
 - **Ball detection offline analyzer** (`Parallel_working/scripts/ball_detection_analyzer.py`): sweeps conf thresholds + top-K on either per-cam frame directories OR `mosaic2d_*.mp4` 2×2 tiled videos. Reveals how many detections the current conf=0.40 threshold silently discards.
 - **Real-recording findings (bounce/fast/slow from 2026-04-15):**
   - `slow`: 64.8% @ conf=0.40 → 67.3% @ 0.15 (small gain, ball confident)

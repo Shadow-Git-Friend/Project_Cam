@@ -45,3 +45,32 @@ weights-20260413T135335Z-3-001/
 
 # Local orientation file, not for repo history
 START_HERE.md
+
+# --- Production-portfolio additions (2026-06-29) ---
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.torchscript
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Raw capture / per-camera frame dumps (kept local, see docs/data_card.md)
+camUsb*/
+scripts/coverage_out/
+artifacts_local/
+.codex_tmp/
+
+# Generated reports + benchmark results are local artifacts, not history
+data/raw/*.jsonl
+data/reports/*.html
+data/reports/*.c3d
+benchmarks/results/*.csv
+benchmarks/results/*.jsonl
+# but keep the results README + schema docs
+!benchmarks/results/README.md

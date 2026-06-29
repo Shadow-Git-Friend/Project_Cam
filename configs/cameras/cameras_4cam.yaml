@@ -1,0 +1,46 @@
+# 4-camera VALIDATED production profile (the fallback baseline).
+#
+# This is the geometry the project is calibrated and ground-truth-evaluated on.
+# It mirrors garage_lab_combined/config/cameras.yaml (the live runtime source of
+# truth) and points the service layer at the arena_fixed calibration that owns
+# the Y-axis fix. Do NOT overwrite arena_fixed.
+
+profile: arena_fixed_4cam
+camera_count: 4
+units: mm
+status: validated          # static + joint-touch GT documented, see docs/performance_report.md
+
+arena_dimensions_mm:
+  x: 6230
+  y: 3050
+  z: 2950
+
+cameras:
+  camNorth:
+    role: north
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:11.1:1.0-video-index0
+    calibrated: true
+  camEast:
+    role: east
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:13.1:1.0-video-index0
+    calibrated: true
+  camSouth:
+    role: south
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:7.1.1:1.0-video-index0
+    calibrated: true
+  camWest:
+    role: west
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:5.1.1:1.0-video-index0
+    calibrated: true
+
+calibration:
+  intrinsics_dir: garage_lab_combined/cal/intrinsics
+  intrinsics_resolution: [1280, 720]
+  extrinsics: arena_fixed/cal/extrinsics/extrinsics_fixed.json
+  dimensions: arena_fixed/cal/extrinsics/Dimensions_fixed.txt
+
+# Triangulation input convention (see src/project_cam/geometry/triangulation.py):
+# normalized undistorted observations paired with the bare extrinsic [R|t].
+geometry:
+  observation_space: normalized
+  projection: extrinsic_only   # [R|t], NOT K @ [R|t]

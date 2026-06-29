@@ -1,0 +1,13 @@
+# Prometheus scrape config for the Project_Cam API.
+# Used by docker-compose.cpu.yml (the prometheus service mounts this read-only).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: project-cam-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: project-cam-api

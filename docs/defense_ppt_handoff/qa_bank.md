@@ -1,6 +1,6 @@
 # Defense Q&A Bank
 
-All answers are grounded in [`thesis_defense_qa.md`](../../thesis_defense_qa.md), [`thesis_engineering_chapter.md`](../../thesis_engineering_chapter.md), [`new_complete.md`](../../new_complete.md), [`CLAUDE.md`](../../CLAUDE.md), and the repo's GT evaluation results. Each answer is ≤ 120 words, structured as **Answer → Evidence → (Optional pivot)**. Mark any fact not directly traceable to those sources as `[VERIFY]` before rehearsing.
+All answers are grounded in [`thesis_defense_qa.md`](../thesis_archive/root_thesis/thesis_defense_qa.md), [`thesis_engineering_chapter.md`](../thesis_archive/root_thesis/thesis_engineering_chapter.md), [`new_complete.md`](../archive/legacy_notes/new_complete.md), [`CLAUDE.md`](../../CLAUDE.md), and the repo's GT evaluation results. Each answer is ≤ 120 words, structured as **Answer → Evidence → (Optional pivot)**. Mark any fact not directly traceable to those sources as `[VERIFY]` before rehearsing.
 
 ---
 
@@ -96,10 +96,10 @@ It's the next filter iteration. The plan is a 9-state [x, y, z, vx, vy, vz, ax, 
 A radar-gun sweep: chronograph the exit velocity across 400, 500, 600, 700, 800 RPM in 100 RPM steps, fit a linear or quadratic curve, and feed that into the ballistic solver in place of the fixed 10 m/s assumption. Equipment: a commercial radar chronograph (~USD 150) or a dual-photogate timer (~USD 60). Planned duration: one afternoon of recording plus an hour of curve-fitting. This is the only remaining Phase 0 item before sub-200 mm ball delivery can be validated end-to-end at 800 RPM. Currently tagged `[MISSING EVIDENCE]` on slide 13.
 
 **Q6.3 — What's the cost of migrating to ROS2?**
-Non-trivial. ROS2 would replace the UDP-over-loopback supervisor with a `rclpy` node graph, add deterministic QoS guarantees, and open the system to ROS2-compatible tooling (rviz, rosbag). The cost is: containerized build, rewrite of the supervisor + launcher runtime as nodes, retime-validation of the serial path against ROS2 executor latency, and CI integration. Estimated two developer-months for a first working version. Currently deferred to Phase 5 in `suggestions.md` because the existing UDP stack meets the real-time budget.
+Non-trivial. ROS2 would replace the UDP-over-loopback supervisor with a `rclpy` node graph, add deterministic QoS guarantees, and open the system to ROS2-compatible tooling (rviz, rosbag). The cost is: containerized build, rewrite of the supervisor + launcher runtime as nodes, retime-validation of the serial path against ROS2 executor latency, and CI integration. Estimated two developer-months for a first working version. Currently deferred to Phase 5 in `docs/archive/legacy_notes/suggestions.md` because the existing UDP stack meets the real-time budget.
 
 **Q6.4 — Why does the system need HMAC link authentication?**
-Because today the UDP supervisor accepts any packet on its port. In the lab this is fine. For public or multi-tenant deployment — a physiotherapy clinic with multiple launchers on the same subnet — an attacker could inject targeting packets. Adding HMAC-SHA256 with a shared pre-shared key inside each UDP packet closes that vector at ~10 µs per packet. This is straightforward engineering work scoped in `suggestions.md`; it was deferred to keep the MSc scope bounded but is the first security hardening we would add for a real product.
+Because today the UDP supervisor accepts any packet on its port. In the lab this is fine. For public or multi-tenant deployment — a physiotherapy clinic with multiple launchers on the same subnet — an attacker could inject targeting packets. Adding HMAC-SHA256 with a shared pre-shared key inside each UDP packet closes that vector at ~10 µs per packet. This is straightforward engineering work scoped in `docs/archive/legacy_notes/suggestions.md`; it was deferred to keep the MSc scope bounded but is the first security hardening we would add for a real product.
 
 ---
 

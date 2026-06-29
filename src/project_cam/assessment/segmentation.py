@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 SIGNAL_BY_EXERCISE = {
     "squat": ("angles_deg", "knee"),
     "single_leg_squat": ("angles_deg", "knee"),
@@ -151,7 +150,6 @@ def _detect_pelvis_z_reps(frame_metrics: list[dict[str, Any]], exercise: str, ru
             if z < bottom_z:
                 bottom_z = z
                 bottom_pos = pos
-            travel = start_z - bottom_z
             has_returned = (z - bottom_z) >= min_travel and (knee is None or knee >= exit_angle)
             if has_returned:
                 _append_pelvis_rep_or_rejection(

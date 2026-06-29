@@ -13,14 +13,13 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 
 from project_cam.closed_loop.event_log import (
     EVENT_TYPES,
-    EventLogger,
     SCHEMA_VERSION,
+    EventLogger,
     validate_event_record,
 )
 

@@ -122,7 +122,7 @@ You must inspect at least these files before giving a recommendation:
 ```text
 CLAUDE.md
 CANONICAL.md
-plan.md
+docs/archive/legacy_notes/plan.md
 cameras.md
 docs/project_cam_full_work_and_projector_plan.md
 docs/remount_playbook_2026-05-20.md
@@ -329,4 +329,3 @@ remount -> calibration -> static validation -> S2 aim-only -> correction-model r
 ```
 
 If your layout is only suitable for pose/projector testing but not shooting, say that explicitly.
-

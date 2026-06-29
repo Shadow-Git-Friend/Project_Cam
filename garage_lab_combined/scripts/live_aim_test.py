@@ -37,6 +37,7 @@ Usage:
 
 import argparse
 import json
+import math
 import socket
 import sys
 import threading
@@ -45,7 +46,9 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-from launcher_common import apply_correction, load_correction_model, solve_angles_ballistic, world_to_launcher_xy_delta
+from launcher_common import (apply_correction, load_correction_model, load_rpm_speed_model,
+                             rpm_in_calibrated_range, rpm_to_speed, solve_angles_ballistic,
+                             world_to_launcher_xy_delta)
 
 try:
     import serial
@@ -214,6 +217,9 @@ def main():
     ap.add_argument("--launcher-y-mm", type=float, default=1560.0)
     ap.add_argument("--launcher-z-mm", type=float, default=500.0)
     ap.add_argument("--launcher-yaw-deg", type=float, required=True)
+    ap.add_argument("--rpm-speed-model", default="garage_lab_combined/cal/blm/rpm_speed_model.json",
+                    help="v(RPM) model from scripts/fit_rpm_speed.py. If present, exit speed is "
+                         "derived from --wheel-rpm instead of --v-base-mps.")
     ap.add_argument("--v-base-mps", type=float, default=10.0,
                     help="Assumed ball exit speed (m/s) for ballistic calculation")
     ap.add_argument("--wheel-rpm", type=float, default=800.0,
@@ -239,6 +245,20 @@ def main():
         else:
             print(f"[WARN] Correction model failed to load, falling back to mode=none")
             args.correction_mode = "none"
+
+    # Load RPM->speed model (calibrated exit velocity); fall back to --v-base-mps
+    rpm_speed_model = load_rpm_speed_model(args.rpm_speed_model)
+    v_exit_mps = rpm_to_speed(args.wheel_rpm, rpm_speed_model, fallback_mps=args.v_base_mps)
+    if rpm_speed_model:
+        print(f"[OK] RPM speed model loaded -> v={v_exit_mps:.2f} m/s at {args.wheel_rpm:.0f} RPM")
+        if not rpm_in_calibrated_range(args.wheel_rpm, rpm_speed_model):
+            print(f"[WARN] {args.wheel_rpm:.0f} RPM is OUTSIDE the calibrated range "
+                  f"[{rpm_speed_model.get('rpm_min','?')}-{rpm_speed_model.get('rpm_max','?')}] "
+                  f"-- speed is CLAMPED to the nearest calibrated RPM (shots may miss). "
+                  f"Calibrate this RPM or use one in range.")
+    else:
+        print(f"[WARN] No RPM speed model; using fixed v={v_exit_mps:.2f} m/s "
+              f"(shots may land short/long -- run scripts/fit_rpm_speed.py)")
 
     # Start UDP listener
     udp = UDPJointListener(args.udp_host, args.udp_port)
@@ -417,7 +437,7 @@ def main():
         )
         d_m = math.sqrt(x_lat_m**2 + y_fwd_m**2)
 
-        sol = solve_angles_ballistic(x_lat_m, y_fwd_m, dz_m, v_ms=args.v_base_mps)
+        sol = solve_angles_ballistic(x_lat_m, y_fwd_m, dz_m, v_ms=v_exit_mps)
         if sol is None:
             print(f"  UNREACHABLE: {joint_name} at ({raw_xyz[0]:.0f}, {raw_xyz[1]:.0f}, {raw_xyz[2]:.0f}) mm")
             print(f"  Launcher frame: lat={x_lat_m:.3f}m fwd={y_fwd_m:.3f}m dz={dz_m:.3f}m dist={d_m:.2f}m")
@@ -444,6 +464,8 @@ def main():
         if args.correction_mode != "none":
             print(f"  Corrected: X={corrected_xyz[0]:.1f}  Y={corrected_xyz[1]:.1f}  Z={corrected_xyz[2]:.1f} mm")
         print(f"  Launcher:  lat={x_lat_m:.3f}m  fwd={y_fwd_m:.3f}m  dz={dz_m:.3f}m  dist={d_m:.2f}m")
+        print(f"  Exit v:    {v_exit_mps:.2f} m/s @ {args.wheel_rpm:.0f} RPM"
+              f"{' (calibrated)' if rpm_speed_model else ' (UNCALIBRATED default)'}")
         print(f"  Angles:    pitch={v_raw:.2f} deg  yaw={h_raw:.2f} deg")
         if was_clamped:
             print(f"  CLAMPED:   pitch={v_deg:.2f} deg  yaw={h_deg:.2f} deg")

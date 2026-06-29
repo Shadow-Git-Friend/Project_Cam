@@ -17,7 +17,6 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-
 _LOW_TRACKING_CUE = "Low tracking - step fully into camera view"
 _SHALLOW_CUE = "Shallow rep - go deeper"
 _GOOD_REP_CUE = "Good rep - keep it up"
