@@ -1,0 +1,35 @@
+# Supine leg-raise exercise mode (post-processor over COCO-17 joints).
+# Loaded by apps/athlete_assessment/run_live_leg_raise.sh and the
+# LegRaiseTracker (src/project_cam/assessment/live_trainer/leg_raise_mode.py).
+#
+# This mode does NOT change squat/push-up/BLM/live-viewer behaviour and never
+# enables --shoot-enabled.
+
+exercise: leg_raise
+
+# Which leg(s) to score.
+side: alternating            # left | right | alternating
+
+# Elevation thresholds (degrees from horizontal). Lying flat ~ 0, vertical ~ 90.
+min_angle_deg: 60.0          # rep "down" threshold
+target_angle_deg: 90.0       # rep "up" threshold
+
+# Acquisition gates (looser than standing exercises -- supine poses are harder).
+conf_min: 0.25
+max_reproj_px: 70.0
+
+# Identity + anatomical priors.
+left_right_lock: true        # resist left/right label swaps when legs cross
+segment_length_prior: true   # reject anatomically impossible frames
+segment_tolerance: 0.25      # +/- 25 % thigh/shin deviation allowed
+calibration_frames: 15       # short straight-leg hold at session start
+
+# Single-camera joint recovery is OFF by default: joints have no floor-plane
+# prior. Enable only for constrained inference along the known segment direction.
+allow_constrained_inference: false
+
+# Diagnostic profile (run BEFORE implementing new logic, per the plan):
+#   ./Parallel_working/run_live_usb6_blm.sh \
+#     --pose-conf 0.25 --udp-target-conf-min 0.25 --pose-max-reproj-px 70 \
+#     --no-show-ghost-skeleton --predict-ahead-ms 0 --limb-heat
+# If leg motion is obvious there, the blocker is gating/confidence, not calibration.

@@ -28,7 +28,6 @@ from typing import Iterable
 
 import numpy as np
 
-
 # Tight per-athlete tolerance. Floor clutter typically yields bone lengths
 # well outside +/- 15% of the prior (often 2-5x). Tightening below 15%
 # starts to drop legitimate frames where the athlete bends a knee slightly.

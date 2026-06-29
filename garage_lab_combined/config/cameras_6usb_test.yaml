@@ -14,6 +14,11 @@ cameras:
   camUsb04_1080P:
     device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:5.1:1.0-video-index0
   camUsb05_1080P:
-    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:7.1.1:1.0-video-index0
-  camUsb06_1080P:
+    # re-mapped 2026-06-25 (was .7.1.1) after BLM-driven re-plug; verified by tag signature
+    # (sees North 7/8/9 + East/West, no South). Deep hub (.6.1.1.1) — may be flaky.
     device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:6.1.1.1:1.0-video-index0
+  camUsb06_1080P:
+    # re-enumerated 2026-06-25: was .6.1.1.1 (3 hubs deep, node vanished), now .4.1.1.
+    # NOTE: all 1080P units share serial SN0002, so by-id is AMBIGUOUS -> use by-path.
+    # If this camera is replugged, re-map via scripts/identify_cameras.py.
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:4.1.1:1.0-video-index0

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
 from .io import load_motion, write_json
-from .kinematics import distance_mm
 from .joints import JOINT_NAME_TO_INDEX
+from .kinematics import distance_mm
 
 
 def run_calibration_check(

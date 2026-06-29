@@ -1,0 +1,36 @@
+# 6-camera calibration manifest (Phase 0 promotion tracker).
+#
+# Single place that records WHERE the 6-camera calibration artifacts live and
+# WHICH promotion gates have passed. Fill the `gates` block from real runs of
+# scripts/usb6_capture_gate.py + scripts/solve_extrinsics_usb6.py + the static
+# 3D GT validation. Until every gate is true, status stays `prototype` and the
+# 4-camera profile remains the runtime fallback.
+
+profile: usb6
+units: mm
+status: prototype
+
+resolution: [1280, 720]      # intrinsics MUST be calibrated at the live resolution
+
+artifacts:
+  intrinsics_dir: garage_lab_combined/cal/intrinsics_usb6_1280x720
+  extrinsics: garage_lab_combined/cal/extrinsics_usb6/extrinsics_usb6.json
+  extrinsics_mirrored: garage_lab_combined/cal/extrinsics_usb6/extrinsics_20260623_105831_mirrored.json
+  dimensions: garage_lab_combined/cal/extrinsics_usb6/Dimensions_mirrored_y.txt
+
+# Phase 0 acceptance gates (see PROJECT_IMPROVEMENT_PLAN). All must be true
+# before any 6-camera production accuracy claim.
+gates:
+  capture_ok: null                 # 30 s gate, no camera drops, max_gap_ms <= 100
+  all_intrinsics_at_runtime_res: null
+  all_extrinsics_solved: null
+  mean_reprojection_px_under_25: null
+  static_3d_gt_mean_mm: null       # fill measured value
+  static_3d_gt_p95_mm: null        # fill measured value
+  four_cam_fallback_runs: true     # the 4-cam path stays runnable regardless
+
+# Measured numbers go here once the gate scripts have been run (see
+# docs/performance_report.md for the human-readable report).
+measured:
+  capture_gate_report: null        # path to Parallel_working/output/usb6_gate_latest
+  reprojection_px: null

@@ -1,0 +1,36 @@
+name: docker-smoke
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  cpu-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CPU API image
+        run: docker build -t project-cam-api:cpu .
+
+      - name: Run container
+        run: |
+          docker run -d --rm --name project-cam-smoke -p 8000:8000 project-cam-api:cpu
+          # Wait for the service to come up (no GPU, cameras, or model files needed).
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then ok=1; break; fi
+            sleep 2
+          done
+          echo
+          test "${ok:-0}" = "1" || { docker logs project-cam-smoke; exit 1; }
+
+      - name: Check endpoints
+        run: |
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:8000/metrics | grep -q project_cam_camera_count
+          curl -fsS "http://127.0.0.1:8000/v1/system/info" | grep -q '"shooting_enabled":false'
+
+      - name: Tear down
+        if: always()
+        run: docker stop project-cam-smoke || true

@@ -1,6 +1,9 @@
 """Tests for the launcher aim solver."""
 
+import importlib.util
 import math
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,6 +15,18 @@ from project_cam.geometry import (
 )
 
 G = 9.81
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_script(relative_path):
+    path = PROJECT_ROOT / relative_path
+    script_dir = str(path.parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_forward_right_vectors_zero_yaw():
@@ -56,3 +71,9 @@ def test_out_of_range_returns_none():
 
 def test_target_behind_returns_none():
     assert solve_angles_ballistic(0.0, 0.1, 0.0, v_ms=12.0) is None
+
+
+def test_live_aim_test_has_math_for_distance_calculation():
+    live_aim = load_script("garage_lab_combined/scripts/live_aim_test.py")
+
+    assert live_aim.math.sqrt(3.0**2 + 4.0**2) == pytest.approx(5.0)

@@ -7,8 +7,12 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-WIDTH="${PROJECT_CAM_WIDTH:-1280}"
-HEIGHT="${PROJECT_CAM_HEIGHT:-720}"
+# USB2-safe default for the current six-webcam rig. The generic 1080P cameras
+# ignore 5 FPS at 1280x720 MJPG and stream at 25 FPS, which can starve the
+# deep-hub camera during concurrent startup. Override to 1280x720 after moving
+# the cameras to powered USB3 hubs.
+WIDTH="${PROJECT_CAM_WIDTH:-640}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-360}"
 FPS="${PROJECT_CAM_FPS:-5}"
 
 POSE_MODEL="yolo11m-pose.engine"
@@ -37,7 +41,8 @@ fi
   --mosaic-every 4 \
   --no-show-2d --show-3d \
   --viz-backend cv2 \
-  --viz-width 960 --viz-height 720 \
+  --viz-width 1600 --viz-height 900 \
+  --camera-open-retries 20 --camera-open-retry-delay 5 \
   --ema-alpha 0.55 \
   --ema-snap-thresh-mm 80 \
   --display-smooth-alpha 0.75 \
@@ -47,5 +52,6 @@ fi
   --kalman-process-noise 500 \
   --kalman-measurement-noise 10 \
   --no-show-ghost-skeleton \
+  --count-reps \
   --perf-log-every 60 \
   "$@"

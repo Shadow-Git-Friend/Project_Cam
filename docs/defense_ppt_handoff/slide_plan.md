@@ -257,7 +257,7 @@
 
 - **Objective:** Pivot the defense to ECE coursework if a panelist goes there.
 - **Content:** 3-column grid — Course | Concept used | Evidence in thesis.
-  - Signals & Systems → sampling, aliasing → 15 FPS frame sync notes in `new_complete.md`.
+  - Signals & Systems → sampling, aliasing → 15 FPS frame sync notes in `docs/archive/legacy_notes/new_complete.md`.
   - Control Systems → stability gate, Kalman CV model → §Filtering in thesis.
   - Embedded Systems → ESP32 cooperative FSM, DRV8825 timing → `control_12_full.ino`.
   - Computer Networks → UDP-over-loopback payload schema → `launcher_runtime_from_udp.py`.

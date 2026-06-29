@@ -1,4 +1,3 @@
-import json
 import math
 import tempfile
 import unittest
@@ -160,8 +159,9 @@ class KairatHardeningTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "garage_report.json"
+            fixture = Path(__file__).resolve().parent / "fixtures" / "motion_capture_data_garage.json"
             report = run_assessment(
-                input_path="garage_lab_combined/output/motion_capture_data_garage.json",
+                input_path=fixture,
                 output_path=out,
                 exercise="squat",
                 athlete_id="garage_test",
