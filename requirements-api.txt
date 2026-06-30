@@ -12,3 +12,9 @@ uvicorn[standard]>=0.27
 pydantic>=2.5
 prometheus-client>=0.20
 python-multipart>=0.0.9
+# project_cam.geometry.triangulation imports cv2 at module load, which the API
+# import chain (pipeline_adapter -> geometry) reaches on startup. Without this
+# the Docker CPU container crashes at boot with ModuleNotFoundError: cv2.
+# Headless = no GUI libs (the image still installs libgl1/libglib2.0-0). Capped
+# below 4.13 because 4.13 requires numpy>=2, which conflicts with numpy<2 above.
+opencv-python-headless>=4.10,<4.13
