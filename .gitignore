@@ -22,6 +22,10 @@ venv/
 !garage_lab_combined/gt_eval/reeval_arena_fixed_20260406/reports_*/*.json
 !Parallel_working/output/ablation_results/*.json
 !Parallel_working/output/prediction_results/*.json
+# Curated portfolio + CI surface (must be in git history, see docs/current_status.md)
+!tests/fixtures/*.json
+!docs/openapi.json
+!deploy/grafana/*.json
 
 # IDE
 .vscode/

@@ -1,0 +1,99 @@
+{
+  "__inputs": [],
+  "title": "Project_Cam — Pipeline & Service",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": ["project-cam", "cv", "edge-ai"],
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "camera_profile",
+        "type": "custom",
+        "query": "usb6,arena_fixed_4cam",
+        "current": { "text": "usb6", "value": "usb6" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Camera count",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "project_cam_camera_count{camera_profile=\"$camera_profile\"}" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Pose cameras (live)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        { "expr": "project_cam_pose_camera_count{camera_profile=\"$camera_profile\"}" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "GPU memory (MB)",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "project_cam_gpu_memory_mb" }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Dropped frames (rate)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(project_cam_dropped_frames_total{camera_profile=\"$camera_profile\"}[5m]))" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Capture FPS (per camera)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "rate(project_cam_frames_total{camera_profile=\"$camera_profile\"}[1m])",
+          "legendFormat": "{{camera_id}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Pipeline latency p95 (ms)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(project_cam_pipeline_latency_ms_bucket{camera_profile=\"$camera_profile\"}[5m])) by (le))",
+          "legendFormat": "pipeline p95" },
+        { "expr": "histogram_quantile(0.95, sum(rate(project_cam_inference_latency_ms_bucket{camera_profile=\"$camera_profile\"}[5m])) by (le))",
+          "legendFormat": "inference p95" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Reprojection error (px)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(project_cam_ball_reprojection_error_px_bucket{camera_profile=\"$camera_profile\"}[5m])) by (le))",
+          "legendFormat": "ball p95" },
+        { "expr": "histogram_quantile(0.95, sum(rate(project_cam_joint_reprojection_error_px_bucket{camera_profile=\"$camera_profile\"}[5m])) by (le))",
+          "legendFormat": "joint p95" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Safety-gate blocks (by reason)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "sum(rate(project_cam_safety_gate_blocked_total[5m])) by (gate_reason)",
+          "legendFormat": "{{gate_reason}}" }
+      ]
+    }
+  ]
+}
