@@ -42,8 +42,12 @@ where = ["src"]
 include = ["project_cam*"]
 
 [tool.pytest.ini_options]
-# Make `pytest` work without an explicit PYTHONPATH=src.
-pythonpath = ["src"]
+# Make `pytest` work without an explicit PYTHONPATH. "src" exposes the
+# project_cam package; "." exposes the repo-root `services` (and `benchmarks`)
+# packages the API tests import. The bare `pytest` console script CI runs does
+# NOT add the CWD to sys.path (unlike `python -m pytest`), so without "." here
+# `from services.api.app.main import app` fails collection with exit code 2.
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-q"
 
