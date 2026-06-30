@@ -70,6 +70,16 @@ until model-backed) · `POST /v1/session/report` · `GET /v1/models` ·
 # Supine leg-raise diagnostic/tracking mode (aim-only)
 apps/athlete_assessment/run_live_leg_raise.sh --side right
 
+# 6-camera 3D arena with leg-raise identity lock + JSONL diagnostics
+# Keep both legs flat for the first ~15 s; that window calibrates leg lengths.
+mkdir -p artifacts_local/leg_raise_debug
+DISPLAY=:1 PROJECT_CAM_WIDTH=640 PROJECT_CAM_HEIGHT=360 PROJECT_CAM_FPS=5 \
+  ./Parallel_working/run_live_usb6_mirrored_skeleton.sh \
+  --pose-conf 0.25 --udp-target-conf-min 0.25 --pose-max-reproj-px 70 \
+  --no-show-ghost-skeleton --predict-ahead-ms 0 --limb-heat \
+  --leg-raise-mode \
+  --leg-raise-log-jsonl artifacts_local/leg_raise_debug/leg_raise_$(date +%Y%m%d_%H%M%S).jsonl
+
 # Edge streaming demo (RTSP / file / device; BLM-disabled)
 apps/edge_stream_demo/run_rtsp_demo.sh data/benchmark/walk.mp4
 ```

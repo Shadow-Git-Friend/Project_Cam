@@ -1409,10 +1409,11 @@ def draw_live_scene_cv2(
                          ("Reach", metrics.get("reach_cm"), "cm"),
                          ("Max spd", metrics.get("max_speed_ms"), "m/s"))
             reps = metrics.get("reps") or {}
-            n_rows = len(base_rows) + (2 if reps else 0)
-            panel_h = 30 + n_rows * 24 + (12 if reps else 6)
+            leg_raise = metrics.get("leg_raise") or {}
+            n_rows = len(base_rows) + (2 if reps else 0) + (3 if leg_raise else 0)
+            panel_h = 30 + n_rows * 24 + (12 if (reps or leg_raise) else 6)
             my = img_h - panel_h
-            cv2.rectangle(img, (mx - 8, my - 6), (mx + 214, img_h - 8), (18, 14, 13), -1)
+            cv2.rectangle(img, (mx - 8, my - 6), (mx + 256, img_h - 8), (18, 14, 13), -1)
             cv2.putText(img, "ATHLETE", (mx, my + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (150, 255, 170), 1, cv2.LINE_AA)
             yy = my + 40
@@ -1430,6 +1431,24 @@ def draw_live_scene_cv2(
                 cv2.putText(img, f"Push-ups {reps.get('push_up', 0)}", (mx, yy),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 40), 2, cv2.LINE_AA)
                 yy += 26
+            if leg_raise:
+                cv2.line(img, (mx, yy - 15), (mx + 242, yy - 15), (60, 60, 60), 1)
+                yy += 4
+                l_ang = leg_raise.get("left_angle_deg")
+                r_ang = leg_raise.get("right_angle_deg")
+                l_txt = "--" if l_ang is None else f"{float(l_ang):4.0f}deg"
+                r_txt = "--" if r_ang is None else f"{float(r_ang):4.0f}deg"
+                cv2.putText(img, f"L leg {l_txt} r{leg_raise.get('left_reps', 0)}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (40, 170, 255), 1, cv2.LINE_AA)
+                yy += 24
+                cv2.putText(img, f"R leg {r_txt} r{leg_raise.get('right_reps', 0)}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 200, 40), 1, cv2.LINE_AA)
+                yy += 24
+                ident = str(leg_raise.get("identity_status", "--"))[:12]
+                swap = " swap" if leg_raise.get("swapped") else ""
+                cv2.putText(img, f"ID {ident}{swap}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 220, 255), 1, cv2.LINE_AA)
+                yy += 22
 
         # speed heat legend
         if limb_heat:
@@ -1850,6 +1869,16 @@ def main():
                     help="Joint speed (mm/s) mapped to the hottest colour.")
     ap.add_argument("--metrics-hud", action=argparse.BooleanOptionalAction, default=True,
                     help="Show live height/reach/speed panel (cinematic theme).")
+    ap.add_argument("--leg-raise-mode", action=argparse.BooleanOptionalAction, default=False,
+                    help="Enable supine leg-raise stabilization: lower-body left/right identity "
+                         "lock before EMA plus leg-angle HUD/log metrics. Off by default.")
+    ap.add_argument("--leg-raise-conf-min", type=float, default=0.25,
+                    help="Minimum 3D joint confidence used by the leg-raise tracker.")
+    ap.add_argument("--leg-raise-calibration-frames", type=int, default=450,
+                    help="Initial live-loop frames used to learn straight-leg segment priors "
+                         "(default 450, about 15 s at ~30 Hz).")
+    ap.add_argument("--leg-raise-log-jsonl", default="",
+                    help="Optional JSONL path for per-frame leg-raise diagnostics.")
     ap.add_argument("--count-reps", action=argparse.BooleanOptionalAction, default=False,
                     help="Run squat + push-up rep counters on the live 3D pose and show "
                          "them in the ATHLETE panel.")
@@ -2156,6 +2185,57 @@ def main():
         rep_frame_kinematics = _rk_fk
         print("[INFO] Rep counters enabled: squat + push_up  (press 'c' to reset)")
 
+    leg_raise_tracker = None
+    leg_raise_identity_tracker = None
+    leg_raise_apply_identity_lock = None
+    leg_raise_apply_segment_drops = None
+    leg_raise_lower_body_snapshot = None
+    leg_raise_pose2d_snapshot = None
+    leg_raise_segment_lengths_snapshot = None
+    leg_raise_prior_acc = None
+    leg_raise_prior_validator = None
+    leg_raise_priors = None
+    leg_raise_state = None
+    if args.leg_raise_mode:
+        ensure_project_src_on_path()
+        from project_cam.assessment.live_trainer.leg_raise_mode import (  # noqa: E402
+            LegRaiseConfig as _LegRaiseConfig,
+            LegRaiseTracker as _LegRaiseTracker,
+        )
+        from project_cam.assessment.live_trainer.leg_priors import (  # noqa: E402
+            LegChainValidator3D as _LegRaiseLegChainValidator3D,
+            LegPriorAccumulator as _LegRaiseLegPriorAccumulator,
+        )
+        from project_cam.assessment.live_trainer.leg_raise_stabilizer import (  # noqa: E402
+            apply_leg_identity_lock as _apply_leg_identity_lock,
+            apply_leg_segment_drops as _apply_leg_segment_drops,
+            lower_body_pose2d_snapshot as _lower_body_pose2d_snapshot,
+            lower_body_snapshot as _lower_body_snapshot,
+            segment_lengths_snapshot as _segment_lengths_snapshot,
+        )
+        from project_cam.assessment.live_trainer.limb_identity import (  # noqa: E402
+            LimbIdentityTracker as _LimbIdentityTracker,
+        )
+
+        leg_raise_calibration_frames = max(0, int(args.leg_raise_calibration_frames))
+        leg_raise_tracker = _LegRaiseTracker(_LegRaiseConfig(
+            conf_min=float(args.leg_raise_conf_min),
+            max_reproj_px=float(args.pose_max_reproj_px),
+            calibration_frames=leg_raise_calibration_frames,
+        ))
+        leg_raise_identity_tracker = _LimbIdentityTracker()
+        leg_raise_apply_identity_lock = _apply_leg_identity_lock
+        leg_raise_apply_segment_drops = _apply_leg_segment_drops
+        leg_raise_lower_body_snapshot = _lower_body_snapshot
+        leg_raise_pose2d_snapshot = _lower_body_pose2d_snapshot
+        leg_raise_segment_lengths_snapshot = _segment_lengths_snapshot
+        leg_raise_prior_acc = _LegRaiseLegPriorAccumulator(min_frames=8, std_tol_mm=50.0)
+        leg_raise_prior_validator = _LegRaiseLegChainValidator3D
+        print(
+            "[INFO] Leg-raise mode enabled: lower-body identity lock + segment gate "
+            f"+ angle diagnostics (calibration_frames={leg_raise_calibration_frames})"
+        )
+
     # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
     # every time blm_aim transitions from non-AIM_OK to AIM_OK (or the joint name
     # changes while still AIM_OK), not on every frame.
@@ -2441,6 +2521,12 @@ def main():
         ball_log_path.parent.mkdir(parents=True, exist_ok=True)
         ball_log_fh = ball_log_path.open("a", encoding="utf-8")
         print(f"[INFO] Ball JSONL enabled: {ball_log_path}")
+    leg_raise_log_fh = None
+    if args.leg_raise_log_jsonl:
+        leg_raise_log_path = Path(args.leg_raise_log_jsonl)
+        leg_raise_log_path.parent.mkdir(parents=True, exist_ok=True)
+        leg_raise_log_fh = leg_raise_log_path.open("a", encoding="utf-8")
+        print(f"[INFO] Leg-raise JSONL enabled: {leg_raise_log_path}")
 
     stop_hints = []
     if args.coach_overlay:
@@ -2887,6 +2973,14 @@ def main():
                 rec["ball_fallback_reject_reason"] = ball_debug_reason
                 ball_log_fh.write(json.dumps(rec) + "\n")
 
+            leg_raise_identity_result = None
+            leg_raise_pose2d_for_log = None
+            leg_raise_raw_joints_for_log = None
+            leg_raise_raw_lengths_for_log = None
+            leg_raise_identity_joints_for_log = None
+            leg_raise_identity_lengths_for_log = None
+            leg_raise_dropped_joints_for_log = []
+            leg_raise_prior_status_for_log = None
             if run_pose:
                 for j in triangulated_joint_indices:
                     obs = {}
@@ -3009,6 +3103,64 @@ def main():
                         joints_conf_state[_ank_j] = max(0.0, min(1.0, _solo_conf * 0.5))
                         joints_cam_state[_ank_j] = 1
                         coach_ankle_fallback_streak[_ank_j] += 1
+
+                if leg_raise_lower_body_snapshot is not None:
+                    leg_raise_raw_joints_for_log = leg_raise_lower_body_snapshot(joints_3d_now)
+                    leg_raise_raw_lengths_for_log = leg_raise_segment_lengths_snapshot(joints_3d_now)
+                    if leg_raise_pose2d_snapshot is not None:
+                        leg_raise_pose2d_for_log = leg_raise_pose2d_snapshot(
+                            {cam: per_cam_pose_curr.get(cam) for cam in batch_order}
+                        )
+
+                if (
+                    leg_raise_apply_identity_lock is not None
+                    and leg_raise_identity_tracker is not None
+                ):
+                    leg_raise_identity_result = leg_raise_apply_identity_lock(
+                        joints_3d_now,
+                        joints_conf_state,
+                        joints_cam_state,
+                        leg_raise_identity_tracker,
+                    )
+                    for _leg_j in (11, 12, 13, 14, 15, 16):
+                        if _leg_j in joints_3d_now:
+                            joint_last_seen_frame[_leg_j] = frame_idx
+
+                if leg_raise_lower_body_snapshot is not None:
+                    leg_raise_identity_joints_for_log = leg_raise_lower_body_snapshot(joints_3d_now)
+                    leg_raise_identity_lengths_for_log = leg_raise_segment_lengths_snapshot(joints_3d_now)
+
+                if (
+                    leg_raise_prior_acc is not None
+                    and leg_raise_prior_validator is not None
+                    and leg_raise_apply_segment_drops is not None
+                ):
+                    if frame_idx <= int(args.leg_raise_calibration_frames):
+                        leg_raise_prior_status_for_log = "calibrating"
+                        leg_raise_prior_acc.observe(joints_3d_now, joints_cam_state, frame_idx)
+                    elif leg_raise_priors is None:
+                        leg_raise_priors = leg_raise_prior_acc.try_lock()
+                        leg_raise_prior_status_for_log = "locked" if leg_raise_priors is not None else "unlocked"
+                    else:
+                        leg_raise_prior_status_for_log = "locked"
+
+                    if leg_raise_priors is not None:
+                        _drops = leg_raise_prior_validator.filter_drops(
+                            joints_3d_now, leg_raise_priors, tol_pct=0.25
+                        )
+                        if _drops:
+                            _expanded_drops = leg_raise_apply_segment_drops(
+                                joints_3d_now,
+                                joints_conf_state,
+                                joints_cam_state,
+                                _drops,
+                            )
+                            leg_raise_dropped_joints_for_log = sorted(int(j) for j in _expanded_drops)
+                            for _drop_j in _expanded_drops:
+                                joint_last_seen_frame[_drop_j] = -10_000_000
+                                joints_state[_drop_j] = np.nan
+                                joints_display[_drop_j] = np.nan
+                                joints_predicted[_drop_j] = np.nan
 
                 for j, pt in joints_3d_now.items():
                     prev = None if force_pose_snap else (joints_state[j] if np.isfinite(joints_state[j]).all() else None)
@@ -3265,6 +3417,49 @@ def main():
                     except Exception:
                         pass
 
+            # --- live leg-raise metrics + diagnostics ---
+            if leg_raise_tracker is not None:
+                _lr_frame = joints_array_to_frame(
+                    joints_state, joints_conf_state, joints_cam_state, frame_idx, args.fps)
+                leg_raise_state = leg_raise_tracker.process(_lr_frame)
+                if leg_raise_log_fh is not None:
+                    _identity_payload = None
+                    if leg_raise_identity_result is not None:
+                        _identity_payload = {
+                            "swapped": bool(leg_raise_identity_result.swapped),
+                            "status": leg_raise_identity_result.status,
+                            "keep_cost": leg_raise_identity_result.keep_cost,
+                            "swap_cost": leg_raise_identity_result.swap_cost,
+                        }
+                    _leg_indices = (11, 12, 13, 14, 15, 16)
+                    _priors_payload = None
+                    if leg_raise_priors is not None:
+                        _priors_payload = {
+                            "femur_l_mm": float(leg_raise_priors.femur_l_mm),
+                            "femur_r_mm": float(leg_raise_priors.femur_r_mm),
+                            "tibia_l_mm": float(leg_raise_priors.tibia_l_mm),
+                            "tibia_r_mm": float(leg_raise_priors.tibia_r_mm),
+                            "sample_count": int(leg_raise_priors.sample_count),
+                            "locked_at_frame": int(leg_raise_priors.locked_at_frame),
+                        }
+                    leg_raise_log_fh.write(json.dumps({
+                        "ts": time.time(),
+                        "frame": int(frame_idx),
+                        "identity": _identity_payload,
+                        "prior_status": leg_raise_prior_status_for_log,
+                        "priors": _priors_payload,
+                        "dropped_joints": leg_raise_dropped_joints_for_log,
+                        "raw_lower_body_3d": leg_raise_raw_joints_for_log,
+                        "raw_segment_lengths_mm": leg_raise_raw_lengths_for_log,
+                        "identity_lower_body_3d": leg_raise_identity_joints_for_log,
+                        "identity_segment_lengths_mm": leg_raise_identity_lengths_for_log,
+                        "pose2d_lower_body": leg_raise_pose2d_for_log,
+                        "state": leg_raise_state.to_dict(),
+                        "joint_conf": {str(i): float(joints_conf_state[i]) for i in _leg_indices},
+                        "joint_cams": {str(i): int(joints_cam_state[i]) for i in _leg_indices},
+                    }, ensure_ascii=True) + "\n")
+                    leg_raise_log_fh.flush()
+
             # --- live athlete metrics (height / arm-span reach / peak joint speed) ---
             metrics_hud = None
             if args.metrics_hud:
@@ -3279,6 +3474,15 @@ def main():
                 metrics_hud["max_speed_ms"] = float(np.nanmax(joint_speeds) / 1000.0)
                 if rep_counters:
                     metrics_hud["reps"] = dict(rep_count_state)
+                if leg_raise_state is not None:
+                    metrics_hud["leg_raise"] = {
+                        "left_angle_deg": leg_raise_state.left.angle_deg,
+                        "right_angle_deg": leg_raise_state.right.angle_deg,
+                        "left_reps": leg_raise_state.left.reps,
+                        "right_reps": leg_raise_state.right.reps,
+                        "identity_status": leg_raise_state.identity_status,
+                        "swapped": leg_raise_state.swapped,
+                    }
 
             if args.show_3d and (frame_idx % args.viz_every == 0):
                 orbit_azim = (args.view_azim + (time.time() - t_start) * args.auto_orbit_speed
@@ -3604,6 +3808,8 @@ def main():
             perf_fh.close()
         if ball_log_fh is not None:
             ball_log_fh.close()
+        if leg_raise_log_fh is not None:
+            leg_raise_log_fh.close()
         cv2.destroyAllWindows()
         plt.close("all")
         print("[DONE] Live viewer stopped.")
