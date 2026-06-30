@@ -16,9 +16,18 @@ modify the protected geometry functions, do not enable `--shoot-enabled` on the
 
 Current reviewer-facing status is tracked in
 [`docs/current_status.md`](docs/current_status.md). As of 2026-06-30, public
-GitHub `main` still showed failed `ci` and `docker-smoke` runs for commit
-`18b3baba5b2799b8777940a061101fd6f8d9a8a4`; local checks are not a substitute
-for green public Actions.
+GitHub `main` had failed `ci` and `docker-smoke` runs (commit
+`18b3baba5b2799b8777940a061101fd6f8d9a8a4`). Both were root-caused and fixed on
+branch `projector-goal-detection-fixes-20260528`, which is now **green on both
+`ci` and `docker-smoke`** (verified via the Actions API at `8fd49734`/`d35312e8`).
+Four distinct causes: (1) `/v1/session/report` imported a non-existent
+`summarize_session`; (2) a blanket `*.json` `.gitignore` hid the CI test fixtures
+from every fresh checkout; (3) the CPU API image never installed `cv2`, so the
+container crashed on boot; (4) bare `pytest` (vs `python -m pytest`) does not add
+the CWD to `sys.path`, so the repo-root `services.*` API-test imports failed
+collection (exit 2) — fixed with `pythonpath = ["src", "."]`. Public `main` goes
+green when this branch merges. Local checks are not a substitute for green public
+Actions.
 
 Legend: ✅ done (software, tested) · 🟡 partial · ⏳ needs hardware/operator · ⛔ deliberately not done.
 

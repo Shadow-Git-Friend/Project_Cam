@@ -89,3 +89,13 @@ Root cause of the goal game barely scoring is software, not broken calibration (
 - Diagnose root cause before bypassing (e.g., port held by zombie → find PID, don't blindly retry)
 - Filter problems (MMMM noise, boot output, RPM spam) → add filter, don't disable serial reads
 - Hangs on `readline()` → confirm timeout is set AND use background thread, not bounded loops
+
+## Reproducing public CI failures (2026-06-30, learned the hard way)
+When GitHub Actions is red but local is green, do NOT trust the working tree — reproduce the runner:
+1. **Fresh `git clone` of the exact pushed commit** into a temp dir (CI checks out only committed files). The working tree can contain gitignored fixtures/configs that exist on disk but were never committed.
+2. **Clean `python3.11 -m venv` with `--no-cache-dir`** install matching `ci.yml` exactly (the pip cache can serve older, working wheels while the runner resolves newer ones).
+3. **Run the bare `pytest` console script, NOT `python -m pytest`.** `python -m pytest` silently prepends the CWD to `sys.path`; bare `pytest` does not. CI uses bare `pytest`, so `from services.api.app.main import app` (repo-root package outside `src/`) fails collection (exit code 2) on the runner but passes under `-m` locally. Fix was `pythonpath = ["src", "."]` in `pyproject [tool.pytest.ini_options]`.
+- **pytest exit codes:** `1` = test assertion failures; `2` = collection/import error or interrupted; `5` = no tests collected. Exit 2 means look at module-level imports, not test bodies.
+- **Blanket `*.json` in `.gitignore`** silently dropped every `tests/fixtures/*.json` (and `docs/openapi.json`, the Grafana dashboard) from all checkouts → fresh-checkout `FileNotFoundError`. Curated JSON needs explicit `!` negations; generated/output JSON stays ignored.
+- Actions logs need repo auth (no token on this box; push is SSH-only) — diagnose by local reproduction or a diagnostic CI commit, not by reading the runner log.
+- **Never merge a fix to `main` without first seeing the branch go green on the real runner** — local green is necessary, not sufficient.
