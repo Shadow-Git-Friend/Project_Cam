@@ -9,9 +9,34 @@ each GitHub Actions run or hardware validation pass.
 
 - Repository: `Shadow-Git-Friend/Project_Cam`
 - Public `main` commit checked via GitHub API: `18b3baba5b2799b8777940a061101fd6f8d9a8a4`
-- Latest public `main` CI run checked on 2026-06-30: failed at `Tests (hardware-free)`.
-- Latest public `main` Docker smoke run checked on 2026-06-30: image build passed, container startup failed.
-- Raw GitHub Actions logs require admin access, so the exact public stack traces were not available from this machine.
+- Public `main` on 2026-06-30 (before this branch lands): `ci` failed at
+  `Tests (hardware-free)`; `docker-smoke` built the image but the container
+  failed to start. **Both are now diagnosed and fixed on branch
+  `projector-goal-detection-fixes-20260528`.**
+- Branch `projector-goal-detection-fixes-20260528` @ `8fd49734`: GitHub Actions
+  `ci` -> **success** and `docker-smoke` -> **success** (verified via the Actions
+  API on 2026-06-30). Public `main` goes green once this branch merges.
+
+### Root causes fixed on the branch (2026-06-30)
+1. `/v1/session/report` returned `501`: the route imported a non-existent
+   `summarize_session` from `offline_assess`. Added the helper (`2137da0f`).
+2. `ci` `Tests` step + `3D accuracy regression gate` failed on a fresh checkout:
+   `.gitignore` `*.json` silently ignored the CI test fixtures, so a clean clone
+   had no `tests/fixtures/*.json`. Committed the fixtures + `docs/openapi.json`
+   (a previously dead README link) + the Grafana dashboard via `.gitignore`
+   negations (`cb707c7a`).
+3. `docker-smoke` container crash at boot: the API import chain reaches
+   `triangulation` -> `import cv2`, but `requirements-api.txt` never installed
+   OpenCV. Added `opencv-python-headless` (capped `<4.13` for the `numpy<2` pin)
+   (`a56e7e0f`).
+4. `ci` `Tests` step exit code `2` (collection error, not a test failure): CI
+   runs the bare `pytest` console script, which does not put the CWD on
+   `sys.path`, so the four API tests doing `from services.api.app.main import app`
+   failed collection (`services/` lives at the repo root, outside `src/`). Set
+   `pythonpath = ["src", "."]` (`8fd49734`).
+- Each fix was reproduced in a clean Python 3.11 venv mirroring the CI install
+  (pytest 9.1.1, numpy 2.4.6, cv2 4.13) and against a fresh `git clone` of the
+  pushed commit, then confirmed green by the GitHub Actions runners themselves.
 
 ## Local branch state
 
