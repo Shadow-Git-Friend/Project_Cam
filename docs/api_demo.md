@@ -57,6 +57,21 @@ POST /v1/predict  ->  200
 }
 ```
 
+## Session report
+```http
+POST /v1/session/report  ->  200
+{
+  "schema_version": "project_cam.assessment.v1",
+  "exercise": "squat",
+  "session": { "frame_count": 221, "athlete_id": "api_session" },
+  "quality": { "confidence_score": 96.15, "...": "..." },
+  "metrics": { "...": "..." }
+}
+```
+
+The route wraps the offline assessment stack and returns `404 input_not_found`
+for missing files. It does not touch cameras, GPU, or the launcher.
+
 ## Metrics
 ```http
 GET /metrics  ->  200   (Prometheus text exposition)

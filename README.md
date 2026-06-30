@@ -110,13 +110,16 @@ API and edge demo are architecturally incapable of firing (tested). See
 [docs/safety_boundaries.md](docs/safety_boundaries.md).
 
 ## Documentation
+- [Current status](docs/current_status.md) · [Improvement plan + status](PROJECT_IMPROVEMENT_PLAN.md)
 - [Architecture](docs/architecture.md) · [Case study](docs/portfolio_case_study.md)
 - [Job alignment](docs/job_alignment.md) · [Performance report](docs/performance_report.md)
 - [Model card](docs/model_card.md) · [Data card](docs/data_card.md)
+- [KZ youth data governance](docs/data_governance/kz_youth_academy_pilot.md)
+- [KZ academy pricing hypothesis](docs/product/kz_academy_pricing_hypothesis.md)
 - [Monitoring](docs/monitoring.md) · [Safety boundaries](docs/safety_boundaries.md)
 - [MLOps quality layer](docs/mlops.md)
 - [API demo (real responses)](docs/api_demo.md) · [OpenAPI spec](docs/openapi.json)
-- [Improvement plan + status](PROJECT_IMPROVEMENT_PLAN.md) · [Canonical runtime](CANONICAL.md)
+- [Canonical runtime](CANONICAL.md)
 - [Archive manifest](docs/archive_manifest.md)
 
 ## Repository layout

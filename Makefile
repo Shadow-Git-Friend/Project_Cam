@@ -32,6 +32,7 @@ test-core:
 		tests/test_camera_profiles.py tests/test_monitoring_metrics.py \
 		tests/test_model_registry.py tests/test_frame_quality.py \
 		tests/test_eval_gate_cli.py tests/test_api_mlops.py \
+		tests/test_api_session_report.py \
 		tests/test_leg_raise_mode.py tests/test_limb_identity.py \
 		tests/test_limb_constraints.py tests/test_rtsp_source_config.py \
 		tests/test_benchmark_dry_run.py

@@ -14,6 +14,12 @@ modify the protected geometry functions, do not enable `--shoot-enabled` on the
 
 ## Implementation status — 2026-06-29
 
+Current reviewer-facing status is tracked in
+[`docs/current_status.md`](docs/current_status.md). As of 2026-06-30, public
+GitHub `main` still showed failed `ci` and `docker-smoke` runs for commit
+`18b3baba5b2799b8777940a061101fd6f8d9a8a4`; local checks are not a substitute
+for green public Actions.
+
 Legend: ✅ done (software, tested) · 🟡 partial · ⏳ needs hardware/operator · ⛔ deliberately not done.
 
 | Phase | Status | What landed |
@@ -31,13 +37,14 @@ Legend: ✅ done (software, tested) · 🟡 partial · ⏳ needs hardware/operat
 **Tests added** (hardware-free): `test_camera_profiles`,
 `test_monitoring_metrics`, `test_api_schemas`, `test_api_health`,
 `test_api_triangulate`, `test_model_registry`, `test_frame_quality`,
-`test_eval_gate_cli`, `test_api_mlops`, `test_leg_raise_mode`,
+`test_eval_gate_cli`, `test_api_mlops`, `test_api_session_report`,
+`test_leg_raise_mode`,
 `test_limb_identity`, `test_limb_constraints`, `test_leg_raise_stabilizer`,
 `test_rtsp_source_config`,
 `test_benchmark_dry_run`. API/FastAPI tests skip cleanly without the `api` extra
 and run in CI/Docker.
 
-**Verification run 2026-06-29**:
+**Historical local verification run 2026-06-29**:
 
 ```bash
 make lint          # ruff: all checks passed
@@ -46,15 +53,30 @@ make eval-gate     # ball_static CI regression gate passed
 make benchmark-dry # wrote camera-count, inference, and pipeline dry-run CSVs
 ```
 
-The `api` extra (fastapi/pydantic/prometheus/httpx/uvicorn) is now installed in
-the venv, so the API tests run for real and the service was booted end-to-end:
-health, system-info, cameras, triangulate (recovers a synthetic point to
-sub-micron), predict, and `/metrics` all verified. Captured in
-`docs/api_demo.md`; OpenAPI committed at `docs/openapi.json`.
+The `api` extra (fastapi/pydantic/prometheus/httpx/uvicorn) is installed in the
+repo venv, so API tests run for real locally. Public trust still depends on
+GitHub Actions passing after this branch is pushed.
 
 Docker smoke was not run in this local checkout because Docker is not installed
 (`docker: command not found`). The Docker smoke workflow is present in
 `.github/workflows/docker-smoke.yml` for a runner/host with Docker.
+
+**Local verification run 2026-06-30 (this working tree):**
+
+```bash
+./venv/bin/python -m pytest                  # 276 passed
+./venv/bin/python -m project_cam.evaluation.gate --pairs tests/fixtures/eval_pairs_ball_static.json --suite ball_static
+```
+
+The exact CI subset listed in `.github/workflows/ci.yml` passed twice:
+`123 passed` under the repo Python 3.10 venv and `123 passed` under a clean
+temporary Python 3.11.15 venv.
+The production-surface Ruff check used by CI, plus `offline_assess.py` and the
+new session-report test, also passed.
+
+The June 30 pass also adds a route-level regression test for
+`/v1/session/report`; that route previously returned `501 assessment_not_configured`
+because the API imported a missing `summarize_session` symbol.
 
 **Not done on purpose:** Phase 0 hardware runs (no cameras here), moving
 runtime-linked paths such as `proxiball_3d-main/projector/`,
