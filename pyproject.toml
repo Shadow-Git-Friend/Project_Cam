@@ -36,6 +36,18 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.5",
 ]
+# Optional SMPL avatar stack. The actual SMPL/SMPL-X model files still require
+# separate registration/download from the model owners; they are not bundled.
+avatar = [
+    "torch",
+    "torchvision",
+    "scipy>=1.11",
+    "smplx",
+    "trimesh[easy]",
+    "pyrender",
+    "PyOpenGL",
+    "PyOpenGL_accelerate",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

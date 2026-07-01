@@ -75,6 +75,8 @@ def test_usb6_launcher_defaults_to_3d_only_low_latency_mode():
     assert "--no-show-ghost-skeleton" in launcher
     assert "--predict-ahead-ms 0" in launcher
     assert "--pose-every 2" in launcher
+    assert "--avatar-body" in launcher
+    assert "--avatar-markers" in launcher
 
 
 def test_usb6_launchers_default_to_usb2_safe_capture_size():
@@ -108,3 +110,76 @@ def test_yolopose_batches_stay_within_tensor_rt_profile_limit():
 
     assert calls == [4, 2]
     assert len(results) == 6
+
+
+def test_cv2_renderer_accepts_avatar_switches():
+    live = load_live_module()
+    joints = np.full((17, 3), np.nan, dtype=np.float64)
+    joints[5] = [900.0, 900.0, 1500.0]
+    joints[6] = [1300.0, 900.0, 1500.0]
+    joints[11] = [950.0, 900.0, 950.0]
+    joints[12] = [1250.0, 900.0, 950.0]
+    joints[0] = [1100.0, 900.0, 1780.0]
+
+    img = live.draw_live_scene_cv2(
+        img_w=320,
+        img_h=240,
+        dims={"X": 2200.0, "Y": 1800.0, "Z": 2200.0},
+        tags={},
+        extr={},
+        ball_pt=None,
+        ball_traj=[],
+        joints=joints,
+        frame_idx=1,
+        fps_est=0.0,
+        theme="classic",
+        draw_axes=False,
+        avatar_body=True,
+        avatar_markers=True,
+        avatar_alpha=0.85,
+    )
+
+    assert img.shape == (240, 320, 3)
+    assert int(img.sum()) > 0
+
+
+def test_cv2_renderer_accepts_smpl_mesh_overlay():
+    live = load_live_module()
+    vertices = np.asarray([
+        [900.0, 900.0, 900.0],
+        [1300.0, 900.0, 900.0],
+        [1100.0, 900.0, 1500.0],
+    ], dtype=np.float64)
+    faces = np.asarray([[0, 1, 2]], dtype=np.int32)
+
+    img = live.draw_live_scene_cv2(
+        img_w=320,
+        img_h=240,
+        dims={"X": 2200.0, "Y": 1800.0, "Z": 2200.0},
+        tags={},
+        extr={},
+        ball_pt=None,
+        ball_traj=[],
+        joints=None,
+        frame_idx=1,
+        fps_est=0.0,
+        theme="classic",
+        draw_axes=False,
+        smpl_mesh_vertices=vertices,
+        smpl_mesh_faces=faces,
+        smpl_mesh_alpha=1.0,
+    )
+
+    assert img.shape == (240, 320, 3)
+    assert int(img.sum()) > 0
+
+
+def test_live_script_exposes_optional_smpl_avatar_flags():
+    script = Path("Parallel_working/scripts/live_4cam_arena_view_parallel.py").read_text()
+
+    assert "--smpl-avatar" in script
+    assert "--smpl-model-path" in script
+    assert "--smpl-fit-every" in script
+    assert "--smpl-fit-iters" in script
+    assert "--smpl-shape-calib-frames" in script
+    assert "SmplSessionFitter" in script

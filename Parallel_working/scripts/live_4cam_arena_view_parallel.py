@@ -1049,6 +1049,13 @@ def draw_live_scene_cv2(
     metrics=None,
     thumbnails=None,
     recording=False,
+    avatar_body=False,
+    avatar_markers=False,
+    avatar_alpha=0.85,
+    smpl_mesh_vertices=None,
+    smpl_mesh_faces=None,
+    smpl_mesh_alpha=0.45,
+    smpl_mesh_max_faces=1500,
 ):
     """Render the 3D arena scene onto a cv2 BGR image (~1-3 ms)."""
     cine = (theme == "cinematic")
@@ -1157,18 +1164,60 @@ def draw_live_scene_cv2(
             cv2.circle(img, (int(sp[0,0]), int(sp[0,1])), 10, (0, 180, 244), -1, cv2.LINE_AA)
             cv2.circle(img, (int(sp[0,0]), int(sp[0,1])), 11, (255,255,255), 1, cv2.LINE_AA)
 
+    # --- optional SMPL mesh avatar ---
+    if smpl_mesh_vertices is not None and smpl_mesh_faces is not None:
+        ensure_project_src_on_path()
+        from project_cam.avatar.mesh_renderer import draw_mesh_cv2  # noqa: E402
+
+        mesh_vertices_vis = transform_world_point_y(
+            np.asarray(smpl_mesh_vertices, dtype=np.float64),
+            y_max,
+            enabled=world_y_mirror,
+        )
+        draw_mesh_cv2(
+            img,
+            mesh_vertices_vis,
+            smpl_mesh_faces,
+            proj,
+            color_bgr=(224, 224, 218) if cine else (205, 205, 200),
+            edge_bgr=None,
+            alpha=float(smpl_mesh_alpha),
+            max_faces=int(smpl_mesh_max_faces),
+        )
+
     # --- skeleton ---
     if joints is not None:
         jv = transform_world_point_y(np.asarray(joints, dtype=np.float64), y_max, enabled=world_y_mirror)
         sp, sok = proj(jv)
-        if not cine:
+        avatar_enabled = bool(avatar_body or avatar_markers)
+        avatar_draw = None
+        avatar_cfg = None
+        if avatar_enabled:
+            ensure_project_src_on_path()
+            from project_cam.assessment.live_trainer.avatar_renderer import (  # noqa: E402
+                AvatarRenderConfig,
+                draw_avatar_body_cv2,
+            )
+            avatar_draw = draw_avatar_body_cv2
+            avatar_cfg = AvatarRenderConfig(body_alpha=float(avatar_alpha))
+            if avatar_body:
+                avatar_draw(
+                    img,
+                    jv,
+                    proj,
+                    avatar_cfg,
+                    draw_body=True,
+                    draw_markers=False,
+                )
+
+        if not cine and not avatar_body:
             for s, e in CONNECTIONS:
                 if s < len(sok) and e < len(sok) and sok[s] and sok[e]:
                     line(sp[s], sp[e], (30, 30, 30), 2)
             for j in range(min(17, len(sok))):
                 if sok[j]:
                     cv2.circle(img, (int(sp[j,0]), int(sp[j,1])), 4, (50, 50, 50), -1, cv2.LINE_AA)
-        else:
+        elif cine and not avatar_body:
             # camera-space depth per joint -> node size + shading
             jhom = np.hstack([jv, np.ones((jv.shape[0], 1))])
             zc = (view @ jhom.T)[2]
@@ -1226,6 +1275,16 @@ def draw_live_scene_cv2(
                 cv2.circle(img, p, r + 3, _shade(c, 0.30), -1, cv2.LINE_AA)   # halo
                 cv2.circle(img, p, r, (255, 255, 255), -1, cv2.LINE_AA)       # core
                 cv2.circle(img, p, r, c, 1, cv2.LINE_AA)
+
+        if avatar_markers and avatar_draw is not None and avatar_cfg is not None:
+            avatar_draw(
+                img,
+                jv,
+                proj,
+                avatar_cfg,
+                draw_body=False,
+                draw_markers=True,
+            )
 
     # --- ghost skeleton (predicted position) ---
     if ghost_joints is not None:
@@ -1853,6 +1912,32 @@ def main():
     ap.add_argument("--render-theme", choices=["cinematic", "classic"], default="cinematic",
                     help="3D arena visual style (cv2 backend): cinematic dark stage with "
                          "glowing depth-shaded skeleton + floor shadow + motion trails, or classic.")
+    ap.add_argument("--avatar-body", action=argparse.BooleanOptionalAction, default=False,
+                    help="Render a white/gray mannequin body from the live 3D joints.")
+    ap.add_argument("--avatar-markers", action=argparse.BooleanOptionalAction, default=False,
+                    help="Render blue joint and virtual body markers on the 3D avatar.")
+    ap.add_argument("--avatar-alpha", type=float, default=0.85,
+                    help="Mannequin body opacity in the OpenCV 3D view.")
+    ap.add_argument("--smpl-avatar", action=argparse.BooleanOptionalAction, default=False,
+                    help="Fit and render an optional SMPL mesh avatar from live 3D joints.")
+    ap.add_argument("--smpl-model-path", default="",
+                    help="Path to downloaded SMPL model files/directory. Required for --smpl-avatar.")
+    ap.add_argument("--smpl-model-type", default="smpl", choices=["smpl", "smplx"],
+                    help="Parametric body model type for the optional mesh avatar.")
+    ap.add_argument("--smpl-gender", default="neutral", choices=["neutral", "male", "female"],
+                    help="SMPL gender model to load.")
+    ap.add_argument("--smpl-device", default="cpu",
+                    help="Torch device for SMPL fitting. CPU is safest for live YOLO/TensorRT runs.")
+    ap.add_argument("--smpl-fit-every", type=int, default=5,
+                    help="Fit the optional SMPL mesh once every N live frames.")
+    ap.add_argument("--smpl-fit-iters", type=int, default=8,
+                    help="Adam iterations per live SMPL fit.")
+    ap.add_argument("--smpl-shape-calib-frames", type=int, default=30,
+                    help="Reliable SMPL fit frames used to estimate shape betas before locking them.")
+    ap.add_argument("--smpl-mesh-alpha", type=float, default=0.42,
+                    help="Opacity for the rendered SMPL mesh.")
+    ap.add_argument("--smpl-mesh-max-faces", type=int, default=1500,
+                    help="Maximum SMPL faces drawn per frame in the OpenCV renderer.")
     ap.add_argument("--auto-orbit", action=argparse.BooleanOptionalAction, default=False,
                     help="Slowly rotate the 3D view (cinematic demo fly-around).")
     ap.add_argument("--auto-orbit-speed", type=float, default=8.0,
@@ -2196,8 +2281,13 @@ def main():
     leg_raise_prior_validator = None
     leg_raise_priors = None
     leg_raise_state = None
+    leg_raise_contact_interpreter = None
     if args.leg_raise_mode:
         ensure_project_src_on_path()
+        from project_cam.assessment.live_trainer.contact_interpreter import (  # noqa: E402
+            ContactAwarePoseInterpreter as _ContactAwarePoseInterpreter,
+            ContactInterpretationConfig as _ContactInterpretationConfig,
+        )
         from project_cam.assessment.live_trainer.leg_raise_mode import (  # noqa: E402
             LegRaiseConfig as _LegRaiseConfig,
             LegRaiseTracker as _LegRaiseTracker,
@@ -2231,10 +2321,55 @@ def main():
         leg_raise_segment_lengths_snapshot = _segment_lengths_snapshot
         leg_raise_prior_acc = _LegRaiseLegPriorAccumulator(min_frames=8, std_tol_mm=50.0)
         leg_raise_prior_validator = _LegRaiseLegChainValidator3D
+        leg_raise_contact_interpreter = _ContactAwarePoseInterpreter(
+            _ContactInterpretationConfig(min_confidence=float(args.leg_raise_conf_min))
+        )
         print(
             "[INFO] Leg-raise mode enabled: lower-body identity lock + segment gate "
-            f"+ angle diagnostics (calibration_frames={leg_raise_calibration_frames})"
+            f"+ angle/contact diagnostics (calibration_frames={leg_raise_calibration_frames})"
         )
+
+    smpl_fitter = None
+    smpl_fit_result = None
+    if args.smpl_avatar:
+        if not args.smpl_model_path:
+            print("[WARN] --smpl-avatar requested but --smpl-model-path is empty; disabling SMPL mesh.")
+        else:
+            ensure_project_src_on_path()
+            _OptionalAvatarDependencyError = RuntimeError
+            try:
+                from project_cam.avatar import (  # noqa: E402
+                    OptionalAvatarDependencyError as _OptionalAvatarDependencyError,
+                    SmplFitConfig as _SmplFitConfig,
+                    SmplSessionFitter as _SmplSessionFitter,
+                )
+
+                smpl_fitter = _SmplSessionFitter(_SmplFitConfig(
+                    model_path=str(args.smpl_model_path),
+                    model_type=str(args.smpl_model_type),
+                    gender=str(args.smpl_gender),
+                    device=str(args.smpl_device),
+                    max_iters=int(args.smpl_fit_iters),
+                    learning_rate=0.04,
+                    min_confidence=float(args.pose_conf),
+                    include_head=False,
+                    optimize_betas=False,
+                    temporal_weight=1e-3,
+                    floor_z_mm=0.0,
+                    floor_penalty_weight=1e-7,
+                ), shape_calibration_frames=int(args.smpl_shape_calib_frames))
+                print(
+                    "[INFO] SMPL mesh avatar enabled "
+                    f"(fit_every={max(1, int(args.smpl_fit_every))}, "
+                    f"shape_calib_frames={max(0, int(args.smpl_shape_calib_frames))}, "
+                    f"device={args.smpl_device})"
+                )
+            except (_OptionalAvatarDependencyError, FileNotFoundError, ValueError) as exc:
+                print(f"[WARN] SMPL mesh avatar disabled: {exc}")
+                smpl_fitter = None
+            except Exception as exc:
+                print(f"[WARN] SMPL mesh avatar failed to initialize; disabled: {exc}")
+                smpl_fitter = None
 
     # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
     # every time blm_aim transitions from non-AIM_OK to AIM_OK (or the joint name
@@ -2981,6 +3116,7 @@ def main():
             leg_raise_identity_lengths_for_log = None
             leg_raise_dropped_joints_for_log = []
             leg_raise_prior_status_for_log = None
+            leg_raise_contact_for_log = None
             if run_pose:
                 for j in triangulated_joint_indices:
                     obs = {}
@@ -3422,6 +3558,10 @@ def main():
                 _lr_frame = joints_array_to_frame(
                     joints_state, joints_conf_state, joints_cam_state, frame_idx, args.fps)
                 leg_raise_state = leg_raise_tracker.process(_lr_frame)
+                if leg_raise_contact_interpreter is not None:
+                    leg_raise_contact_for_log = (
+                        leg_raise_contact_interpreter.process(_lr_frame).to_dict()
+                    )
                 if leg_raise_log_fh is not None:
                     _identity_payload = None
                     if leg_raise_identity_result is not None:
@@ -3455,6 +3595,7 @@ def main():
                         "identity_segment_lengths_mm": leg_raise_identity_lengths_for_log,
                         "pose2d_lower_body": leg_raise_pose2d_for_log,
                         "state": leg_raise_state.to_dict(),
+                        "contact": leg_raise_contact_for_log,
                         "joint_conf": {str(i): float(joints_conf_state[i]) for i in _leg_indices},
                         "joint_cams": {str(i): int(joints_cam_state[i]) for i in _leg_indices},
                     }, ensure_ascii=True) + "\n")
@@ -3483,6 +3624,19 @@ def main():
                         "identity_status": leg_raise_state.identity_status,
                         "swapped": leg_raise_state.swapped,
                     }
+
+            if smpl_fitter is not None and frame_idx % max(1, int(args.smpl_fit_every)) == 0:
+                try:
+                    smpl_fit_result = smpl_fitter.fit(
+                        joints_display,
+                        joints_conf_state,
+                    )
+                except ValueError:
+                    # Not enough reliable joints this frame; keep the last mesh.
+                    pass
+                except Exception as exc:
+                    print(f"[WARN] SMPL mesh fit failed; disabling SMPL avatar: {exc}")
+                    smpl_fitter = None
 
             if args.show_3d and (frame_idx % args.viz_every == 0):
                 orbit_azim = (args.view_azim + (time.time() - t_start) * args.auto_orbit_speed
@@ -3519,6 +3673,19 @@ def main():
                         metrics=metrics_hud,
                         thumbnails=thumbs,
                         recording=(rec_writer is not None),
+                        avatar_body=args.avatar_body,
+                        avatar_markers=args.avatar_markers,
+                        avatar_alpha=args.avatar_alpha,
+                        smpl_mesh_vertices=(
+                            smpl_fit_result.vertices_mm
+                            if smpl_fit_result is not None else None
+                        ),
+                        smpl_mesh_faces=(
+                            smpl_fit_result.faces
+                            if smpl_fit_result is not None else None
+                        ),
+                        smpl_mesh_alpha=args.smpl_mesh_alpha,
+                        smpl_mesh_max_faces=args.smpl_mesh_max_faces,
                     )
                     cv2.imshow("Live 3D Arena", viz_img)
                     if video_writer_3d is not None:
