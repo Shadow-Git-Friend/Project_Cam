@@ -370,6 +370,34 @@ def open_camera_capture(device):
     return cv2.VideoCapture(device)
 
 
+def v4l2_device_ready(device, timeout_s=3.0, run_fn=subprocess.run, v4l2_ctl=None):
+    """Return whether a Linux V4L2 node responds before OpenCV opens it."""
+    if timeout_s is None or float(timeout_s) <= 0:
+        return True, "disabled"
+    if not sys.platform.startswith("linux") or not str(device).startswith("/dev/"):
+        return True, "not_v4l2"
+    tool = v4l2_ctl or shutil.which("v4l2-ctl")
+    if not tool:
+        return True, "v4l2-ctl missing"
+    cmd = [tool, "-d", str(device), "--info"]
+    try:
+        result = run_fn(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=float(timeout_s),
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"v4l2-ctl --info timed out after {float(timeout_s):.1f}s"
+    except OSError as exc:
+        return False, str(exc)
+    if int(getattr(result, "returncode", 1)) != 0:
+        detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+        return False, detail or f"v4l2-ctl --info exited {result.returncode}"
+    return True, "ok"
+
+
 def apply_uvc_low_latency_controls(device, cam, args, log=False):
     """Stabilize USB webcams so auto exposure cannot silently drop FPS."""
     if args.no_uvc_controls:
@@ -1909,6 +1937,8 @@ def main():
                          "(for slow USB / deep-hub cameras that take a while to enumerate).")
     ap.add_argument("--camera-open-retry-delay", type=float, default=5.0,
                     help="Seconds between camera-open retries.")
+    ap.add_argument("--camera-preflight-timeout", type=float, default=3.0,
+                    help="Seconds to wait for v4l2-ctl --info before opening a /dev/video* node. 0 disables.")
     ap.add_argument("--render-theme", choices=["cinematic", "classic"], default="cinematic",
                     help="3D arena visual style (cv2 backend): cinematic dark stage with "
                          "glowing depth-shaded skeleton + floor shadow + motion trails, or classic.")
@@ -2498,6 +2528,13 @@ def main():
     open_retries = int(args.camera_open_retries)
     open_delay = float(args.camera_open_retry_delay)
     for cam, dev in active_cams:
+        ready, ready_reason = v4l2_device_ready(
+            dev,
+            timeout_s=float(args.camera_preflight_timeout),
+        )
+        if not ready:
+            print(f"[WARN] {cam} preflight failed: {dev} -- {ready_reason}; skipping.")
+            continue
         cap = None
         for attempt in range(open_retries + 1):
             apply_uvc_low_latency_controls(dev, cam, args, log=False)

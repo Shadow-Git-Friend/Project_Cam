@@ -1,4 +1,5 @@
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -110,6 +111,33 @@ def test_yolopose_batches_stay_within_tensor_rt_profile_limit():
 
     assert calls == [4, 2]
     assert len(results) == 6
+
+
+def test_v4l2_preflight_rejects_timed_out_device():
+    live = load_live_module()
+
+    def timeout_runner(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    ok, reason = live.v4l2_device_ready(
+        "/dev/video8",
+        timeout_s=0.25,
+        run_fn=timeout_runner,
+        v4l2_ctl="/usr/bin/v4l2-ctl",
+    )
+
+    assert ok is False
+    assert "timed out" in reason
+
+
+def test_v4l2_preflight_allows_non_v4l_or_disabled_timeout():
+    live = load_live_module()
+
+    def failing_runner(*args, **kwargs):
+        raise AssertionError("runner should not be called")
+
+    assert live.v4l2_device_ready("rtsp://example", run_fn=failing_runner)[0] is True
+    assert live.v4l2_device_ready("/dev/video0", timeout_s=0, run_fn=failing_runner)[0] is True
 
 
 def test_cv2_renderer_accepts_avatar_switches():
