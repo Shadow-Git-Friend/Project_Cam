@@ -46,6 +46,23 @@ def test_config_device_index_becomes_int():
     assert cfg.capture_argument() == 0
 
 
+def test_config_stores_requested_device_capture_mode():
+    cfg = StreamConfig.from_source(
+        "/dev/video10",
+        width=640,
+        height=360,
+        fps=5,
+        fourcc="MJPG",
+        buffer_size=1,
+    )
+
+    assert cfg.width == 640
+    assert cfg.height == 360
+    assert cfg.fps == 5
+    assert cfg.fourcc == "MJPG"
+    assert cfg.buffer_size == 1
+
+
 def test_gstreamer_pipeline_only_for_rtsp():
     cfg = StreamConfig.from_source("rtsp://h/cam", use_gstreamer=True, latency_ms=120)
     assert "rtspsrc location=rtsp://h/cam latency=120" in cfg.gst_pipeline
