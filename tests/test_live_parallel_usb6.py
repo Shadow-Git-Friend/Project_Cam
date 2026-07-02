@@ -97,8 +97,10 @@ def test_lowlag_launcher_contract_for_pose_avatar_and_ball():
     assert 'WIDTH="${PROJECT_CAM_WIDTH:-1280}"' in launcher
     assert 'HEIGHT="${PROJECT_CAM_HEIGHT:-720}"' in launcher
     assert "FPS=15" in launcher
-    assert "POSE_IMGSZ=960" in launcher
-    assert "POSE_IMGSZ=640" in launcher
+    # Inference sizes are LOCKED to each engine's export size: TRT engines
+    # decode garbage at any other imgsz (proven on real frames 2026-07-02).
+    assert 'POSE_IMGSZ="${POSE_IMGSZ:-960}"' in launcher
+    assert 'BALL_IMGSZ="${BALL_IMGSZ:-672}"' in launcher
     assert '--pose-imgsz "$POSE_IMGSZ"' in launcher
     assert '--pose-max-reproj-px "$POSE_REPROJ"' in launcher
     assert "--ball-ballistic-fallback" in launcher

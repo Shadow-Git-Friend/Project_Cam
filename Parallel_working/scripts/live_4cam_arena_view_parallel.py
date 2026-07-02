@@ -1973,8 +1973,9 @@ def main():
     ap.add_argument("--pose-max-batch", type=int, default=4,
                     help="Max frames per pose inference call. Keep 4 for TensorRT engines exported with max batch 4.")
     ap.add_argument("--pose-imgsz", type=int, default=0,
-                    help="Inference size for YOLO-Pose (0 = engine/model default). Set to 640 on the "
-                         "640x360 USB rig: the default 1280 letterboxes small frames up 4x for nothing.")
+                    help="Inference size for YOLO-Pose (0 = engine/model default). WARNING: TRT "
+                         "engines only decode correctly at their EXPORT imgsz — off-size calls emit "
+                         "garbage detections (300/frame, NMS stalls). Match the engine or re-export.")
     ap.add_argument("--pose-min-cams", type=int, default=2,
                     help="Minimum agreeing camera rays per 3D joint. With 6 cameras, 3 rejects the "
                          "2-cam wrong-association tangles that appear on crouched/floor poses; a joint "

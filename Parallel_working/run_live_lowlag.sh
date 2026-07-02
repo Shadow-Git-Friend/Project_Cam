@@ -15,9 +15,9 @@
 #                               prediction ~capture+inference delay ahead. UDP
 #                               and joints_state unchanged.
 #   --pose-every 1              TRT pose is cheap; no reason to skip frames.
-#   --pose-imgsz (auto)         pose inference size follows the capture width
-#                               (960 at 1280x720, 640 at 640x360) — never
-#                               upsample small frames, never waste big ones.
+#   --pose-imgsz 960            LOCKED to the pose engine's export size (see
+#                               the POSE_IMGSZ block below — off-size calls
+#                               produce garbage detections on TRT engines).
 #   (parallel-inference REMOVED 2026-07-02: concurrent ball+pose TRT calls
 #    from two threads race on the CUDA stream — pose died every frame with
 #    'illegal memory access' on torch 2.1 + TensorRT 10.16. Sequential until
@@ -76,16 +76,13 @@ fi
 POSE_MODEL="yolo11m-pose.engine"
 [ -f "$POSE_MODEL" ] || POSE_MODEL="yolo11m-pose.pt"
 
-# Pose inference size follows the capture: at 640-wide capture anything above
-# 640 is upsampling noise; at 1280-wide capture 960 actually feeds the model
-# more person pixels (engine profile max is 1280). Override: POSE_IMGSZ=...
-if [ -n "${POSE_IMGSZ:-}" ]; then
-  :
-elif [ "$WIDTH" -ge 960 ]; then
-  POSE_IMGSZ=960
-else
-  POSE_IMGSZ=640
-fi
+# Inference size is LOCKED to each engine's export size (pose 960, ball 672).
+# Proven on real frames 2026-07-02: a TRT engine only decodes correctly at
+# its export imgsz — the "dynamic" profile covers batch, NOT the spatial
+# decode. Any other size emits ~300 garbage detections/frame, drowns NMS
+# ("NMS time limit exceeded") and empties the arena. If you change POSE_IMGSZ
+# you must re-export the pose engine at that size (--yolo-imgsz) first.
+POSE_IMGSZ="${POSE_IMGSZ:-960}"
 
 # Both engines were re-exported 2026-07-02 with a batch<=6 TRT optimization
 # profile (tight shapes: ball imgsz 672/max 1344, pose imgsz 640/max 1280 —
@@ -99,10 +96,11 @@ MAX_BATCH="${MAX_BATCH:-6}"
 # same angular error covers half the pixels at 640-wide, so gates halve there
 # — unscaled loose gates are what let arm fliers and crouch tangles through).
 if [ "$WIDTH" -ge 960 ]; then
-  POSE_REPROJ=40; BALL_REPROJ=25; BALL_KF_GATE=150; BALL_MAXBOX=220; BALL_IMGSZ=960
+  POSE_REPROJ=40; BALL_REPROJ=25; BALL_KF_GATE=150; BALL_MAXBOX=220
 else
-  POSE_REPROJ=20; BALL_REPROJ=15; BALL_KF_GATE=75; BALL_MAXBOX=110; BALL_IMGSZ=672
+  POSE_REPROJ=20; BALL_REPROJ=15; BALL_KF_GATE=75; BALL_MAXBOX=110
 fi
+BALL_IMGSZ="${BALL_IMGSZ:-672}"  # locked to the ball engine's export size
 BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback
            --ball-max-reproj-px "$BALL_REPROJ" --ball-kf-gate-px "$BALL_KF_GATE"
            --ball-max-box-side-px "$BALL_MAXBOX" --ball-imgsz "$BALL_IMGSZ")
