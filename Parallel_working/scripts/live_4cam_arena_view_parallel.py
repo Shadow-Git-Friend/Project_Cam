@@ -1889,6 +1889,9 @@ def main():
                      help="YOLO-Pose model path (.pt or .engine for TensorRT).")
     ap.add_argument("--pose-max-batch", type=int, default=4,
                     help="Max frames per pose inference call. Keep 4 for TensorRT engines exported with max batch 4.")
+    ap.add_argument("--pose-imgsz", type=int, default=0,
+                    help="Inference size for YOLO-Pose (0 = engine/model default). Set to 640 on the "
+                         "640x360 USB rig: the default 1280 letterboxes small frames up 4x for nothing.")
     ap.add_argument("--pose-conf", type=float, default=0.45)
     ap.add_argument("--pose-max-reproj-px", type=float, default=40.0,
                     help="Per-joint robust triangulation: reject camera rays whose "
@@ -2935,13 +2938,22 @@ def main():
             if run_pose and use_yolopose and yolopose_model is not None:
                 # YOLO-Pose path: single model for detection + keypoints
                 try:
-                    yp_results = run_yolopose_batched(
-                        yolopose_model,
-                        frame_batch,
+                    yp_kwargs = dict(
                         max_batch_size=args.pose_max_batch,
                         device=args.pose_device,
                         verbose=False,
                         conf=0.15,
+                    )
+                    if int(args.pose_imgsz) > 0:
+                        # Without this, ultralytics letterboxes every frame to
+                        # the engine's default imgsz (1280) — 4x wasted compute
+                        # when the capture is 640x360. Dynamic engines accept
+                        # any size in the profile, so 640 is a pure speedup.
+                        yp_kwargs["imgsz"] = int(args.pose_imgsz)
+                    yp_results = run_yolopose_batched(
+                        yolopose_model,
+                        frame_batch,
+                        **yp_kwargs,
                     )
                 except Exception:
                     yp_results = [None] * len(frame_batch)

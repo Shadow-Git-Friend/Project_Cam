@@ -75,10 +75,12 @@
 - This run script lives in `Parallel_working/` but its serial counterpart in `garage_lab_combined/` is the only path that touches BLM hardware
 
 ## TensorRT Export (mandatory)
-- Always export YOLO engines with `dynamic=True, batch=4` — `export_models_tensorrt.py` already patched
-- Static batch=1 engines segfault (ball) or silently fail (pose) when viewer passes 4-frame batch
+- Always export YOLO engines with `dynamic=True` and `--yolo-batch` = camera count (4-cam rig → 4, 6-USB rig → 6). `export_models_tensorrt.py` takes `--yolo-batch` since 2026-07-02.
+- Static batch=1 engines segfault (ball) or silently fail (pose) when viewer passes multi-frame batch; a batch-4 engine crashes ultralytics (`setInputShape` error → IndexError) on a 6-frame batch. The viewer chunks via `--ball-max-batch`/`--pose-max-batch` as the runtime guard.
+- **Size the profile to the real operating point** (2026-07-02): ultralytics sets profile max = 2×imgsz, and the TRT execution context pre-allocates activation memory for batch×max². `--yolo-imgsz 1280` at batch 6 → 2560² max → ~6 GB per context → ball+pose cannot coexist on the 11 GB 2080 Ti. Export ball with `--yolo-imgsz 672` (max 1344, still covers imgsz 960) and pose with `--yolo-imgsz 640` (max 1280); contexts shrink ~3.6× and opt-shape tactics match actual inference sizes.
 - ONNX input `[1, 3, H, W]` = broken; `['batch', 3, 'height', 'width']` = correct
 - After any `.pt` swap, rebuild the `.engine` from scratch (delete old `.onnx` + `.engine` first)
+- Never run the live viewer (or any GPU process) during an engine build — the builder needs headroom for tactic search and OOMs otherwise (transient `virtualMemoryBuffer OutOfMemory` lines during a build with free GPU are just oversized tactics being skipped, harmless)
 
 ## Ball Tracking Robustness (2026-04-13, extended 2026-04-20)
 - Live viewer uses `robust_triangulate_ball`: iteratively rejects cameras with reprojection error > `--ball-max-reproj-px` (default 25 px as of 2026-04-17)

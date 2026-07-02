@@ -11,10 +11,13 @@
 #                               "any camera refreshed" (~aggregate fps), not
 #                               --fps, so the fixed 1/fps step badly skews KF
 #                               velocities and predict-ahead.
-#   --pose-latency-comp-ms 150  display-only: render joints from the KF
-#                               prediction ~1 capture interval ahead. UDP and
-#                               joints_state unchanged.
-#   --pose-every 1              TRT pose is 6.2 ms; no reason to skip frames.
+#   --pose-latency-comp-ms 100  display-only: render joints from the KF
+#                               prediction ~capture+inference delay ahead. UDP
+#                               and joints_state unchanged.
+#   --pose-every 1              TRT pose is cheap; no reason to skip frames.
+#   --pose-imgsz 640            infer pose at 640 instead of the engine default
+#                               1280 — 640x360 frames gain nothing from 1280
+#                               letterboxing, and 640 is ~3-4x less compute.
 #
 # Ball tracking is ENABLED here (the stock usb6 scripts pass --no-track-ball).
 #   TRACK_BALL=0  to disable it for a pose-only session.
@@ -37,11 +40,18 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p Parallel_working/output
 
-# USB2-safe defaults for the six-webcam rig (see run_live_usb6_blm.sh notes).
-# Override to 1280x720 only after the cameras move to powered USB3 hubs.
+# 640x360 keeps six cameras inside the USB2 budget; 1280x720 only after the
+# cameras move to powered USB3 hubs.
+#
+# FPS 25 (was 5): the stock usb6 scripts pinned 5 to ride out concurrent-
+# startup starvation on the deep hub, but the generic 1080P cams ignore 5 and
+# stream 25 anyway, so steady-state bandwidth already carries ~25 fps. Higher
+# capture rate = fresher frames (max_age ~200 ms -> ~40 ms) even when the
+# processing loop runs slower. If cameras fail to open after the retries,
+# fall back: PROJECT_CAM_FPS=5 ./Parallel_working/run_live_lowlag.sh
 WIDTH="${PROJECT_CAM_WIDTH:-640}"
 HEIGHT="${PROJECT_CAM_HEIGHT:-360}"
-FPS="${PROJECT_CAM_FPS:-5}"
+FPS="${PROJECT_CAM_FPS:-25}"
 
 POSE_MODEL="yolo11m-pose.engine"
 [ -f "$POSE_MODEL" ] || POSE_MODEL="yolo11m-pose.pt"
@@ -86,6 +96,7 @@ fi
   --pose-device cuda:0 --pose-backend yolopose --yolopose-model "$POSE_MODEL" \
   --pose-max-batch "$MAX_BATCH" \
   --ball-max-batch "$MAX_BATCH" \
+  --pose-imgsz 640 \
   --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" --fourcc MJPG \
   --pose-every 1 --viz-every 1 --mosaic-every 4 \
   --no-show-2d --show-3d --viz-backend cv2 --viz-width 1600 --viz-height 900 \
@@ -97,7 +108,7 @@ fi
   --joint-stale-frames 8 \
   --max-frame-age-ms 350 \
   --kalman-measured-dt \
-  --pose-latency-comp-ms 150 \
+  --pose-latency-comp-ms 100 \
   --predict-ahead-ms 300 \
   --no-show-ghost-skeleton \
   --kalman-process-noise 500 \
