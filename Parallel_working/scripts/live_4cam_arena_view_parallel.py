@@ -1723,6 +1723,25 @@ class JointKalmanFilter:
         return self._initialized
 
 
+def latency_compensated_point(kf, state_pt, t_ahead_sec, max_uncertainty_mm):
+    """Display-only latency compensation for one joint.
+
+    Returns the KF's short-horizon prediction instead of the smoothed state,
+    so the rendered skeleton cancels capture+inference+smoothing delay. Falls
+    back to the smoothed state whenever the filter is missing, uninitialized,
+    too uncertain at this horizon, or non-finite. Never mutates KF state and
+    never feeds back into joints_state/UDP/triangulation.
+    """
+    if kf is None or t_ahead_sec <= 0.0 or not kf.initialized:
+        return state_pt
+    if kf.prediction_uncertainty(t_ahead_sec) >= float(max_uncertainty_mm):
+        return state_pt
+    pred = kf.predict_ahead(t_ahead_sec)
+    if not np.isfinite(pred).all():
+        return state_pt
+    return pred.astype(np.float32)
+
+
 def make_mosaic(cam_frames, ball_boxes, per_cam_pose, cam_order=None, tile_size=None, copy_frames=False):
     order = list(cam_order) if cam_order is not None else list(CAM_ORDER)
     panels = []
@@ -1968,6 +1987,12 @@ def main():
                     help="Opacity for the rendered SMPL mesh.")
     ap.add_argument("--smpl-mesh-max-faces", type=int, default=1500,
                     help="Maximum SMPL faces drawn per frame in the OpenCV renderer.")
+    ap.add_argument("--smpl-async", action=argparse.BooleanOptionalAction, default=True,
+                    help="Run SMPL fitting in a background thread (latest-only queue) so the live "
+                         "loop never blocks on a fit. --no-smpl-async restores the old inline fit.")
+    ap.add_argument("--smpl-anchor-follow", action=argparse.BooleanOptionalAction, default=True,
+                    help="Between fits, translate the last fitted mesh to the current mid-hip so the "
+                         "avatar tracks the person at full frame rate (pose trails, position does not).")
     ap.add_argument("--auto-orbit", action=argparse.BooleanOptionalAction, default=False,
                     help="Slowly rotate the 3D view (cinematic demo fly-around).")
     ap.add_argument("--auto-orbit-speed", type=float, default=8.0,
@@ -2073,6 +2098,15 @@ def main():
                      help="Show predicted-position ghost skeleton in 3D view (auto-enabled when predict-ahead-ms > 0).")
     ap.add_argument("--predict-max-uncertainty-mm", type=float, default=500.0,
                      help="Max prediction uncertainty (mm) before prediction is discarded.")
+    ap.add_argument("--pose-latency-comp-ms", type=float, default=0.0,
+                     help="Display-only latency compensation: render each joint from its Kalman "
+                          "prediction this many ms ahead (0 = off; try 100-150 at 15 FPS). Falls back "
+                          "per joint when uncertainty exceeds --predict-max-uncertainty-mm. Does NOT "
+                          "change joints_state, UDP packets, or triangulation.")
+    ap.add_argument("--kalman-measured-dt", action=argparse.BooleanOptionalAction, default=False,
+                     help="Propagate joint KFs by measured wall-clock time between pose updates instead "
+                          "of a fixed 1/fps step. Fixes velocity over-estimation (and predict-ahead "
+                          "overshoot) when the loop runs below --fps or --pose-every > 1.")
 
     # --- BLM Demo Mode ---
     ap.add_argument("--demo-blm", action="store_true", default=False,
@@ -2361,6 +2395,9 @@ def main():
 
     smpl_fitter = None
     smpl_fit_result = None
+    smpl_fit_pelvis = None
+    smpl_async_active = False
+    smpl_pelvis_fn = None
     if args.smpl_avatar:
         if not args.smpl_model_path:
             print("[WARN] --smpl-avatar requested but --smpl-model-path is empty; disabling SMPL mesh.")
@@ -2388,11 +2425,20 @@ def main():
                     floor_z_mm=0.0,
                     floor_penalty_weight=1e-7,
                 ), shape_calibration_frames=int(args.smpl_shape_calib_frames))
+                from project_cam.avatar import (  # noqa: E402
+                    pelvis_from_coco as _smpl_pelvis_from_coco,
+                )
+                smpl_pelvis_fn = _smpl_pelvis_from_coco
+                if args.smpl_async:
+                    from project_cam.avatar import AsyncSmplFitter as _AsyncSmplFitter  # noqa: E402
+                    smpl_fitter = _AsyncSmplFitter(smpl_fitter)
+                    smpl_async_active = True
                 print(
                     "[INFO] SMPL mesh avatar enabled "
                     f"(fit_every={max(1, int(args.smpl_fit_every))}, "
                     f"shape_calib_frames={max(0, int(args.smpl_shape_calib_frames))}, "
-                    f"device={args.smpl_device})"
+                    f"device={args.smpl_device}, async={smpl_async_active}, "
+                    f"anchor_follow={bool(args.smpl_anchor_follow)})"
                 )
             except (_OptionalAvatarDependencyError, FileNotFoundError, ValueError) as exc:
                 print(f"[WARN] SMPL mesh avatar disabled: {exc}")
@@ -2660,6 +2706,8 @@ def main():
         )
         for _ in range(17)
     ]
+    # Wall-clock time of each joint's last KF update (for --kalman-measured-dt).
+    joint_kf_last_update_t = [None] * 17
     coach_prev_camera = None
     coach_lock_hold = 0  # frames the push-up camera stays locked after acquisition loss
     coach_rois = {}
@@ -3353,10 +3401,21 @@ def main():
 
             # Kalman filter update and prediction
             if run_pose:
+                t_kf_now = time.perf_counter()
                 for j in triangulated_joint_indices:
                     kf = joint_kfs[j]
                     if j in joints_3d_now:
-                        kf.predict_step()
+                        if args.kalman_measured_dt:
+                            last_t = joint_kf_last_update_t[j]
+                            # Clamp: first update falls back to the nominal step,
+                            # long gaps cap at 0.5 s so a re-acquired joint does
+                            # not inherit a huge covariance blow-up.
+                            dt_meas = (kalman_dt if last_t is None
+                                       else min(0.5, max(1e-3, t_kf_now - last_t)))
+                            kf.predict_step(dt_meas)
+                            joint_kf_last_update_t[j] = t_kf_now
+                        else:
+                            kf.predict_step()
                         kf.update_step(joints_3d_now[j])
             if use_prediction:
                 t_ahead_sec = args.predict_ahead_ms / 1000.0
@@ -3378,10 +3437,17 @@ def main():
             d_alpha_base = args.display_smooth_alpha
             snap_thresh = args.ema_snap_thresh_mm
             use_oneeuro = (args.display_filter == "oneeuro")
+            comp_s = max(0.0, float(args.pose_latency_comp_ms)) / 1000.0
             t_disp = time.perf_counter()
             sdt = None if prev_speed_t is None else max(1e-3, t_disp - prev_speed_t)
             for j in range(17):
                 src = joints_state[j]
+                if comp_s > 0.0 and np.isfinite(src).all():
+                    # Display-only: cancel capture+inference+smoothing delay by
+                    # rendering the KF's short-horizon prediction. joints_state,
+                    # UDP and triangulation are untouched.
+                    src = latency_compensated_point(
+                        joint_kfs[j], src, comp_s, args.predict_max_uncertainty_mm)
                 if not np.isfinite(src).all():
                     joints_display[j] = np.nan
                     oneeuro_filters[j].reset()
@@ -3663,17 +3729,47 @@ def main():
                     }
 
             if smpl_fitter is not None and frame_idx % max(1, int(args.smpl_fit_every)) == 0:
-                try:
-                    smpl_fit_result = smpl_fitter.fit(
-                        joints_display,
-                        joints_conf_state,
-                    )
-                except ValueError:
-                    # Not enough reliable joints this frame; keep the last mesh.
-                    pass
-                except Exception as exc:
-                    print(f"[WARN] SMPL mesh fit failed; disabling SMPL avatar: {exc}")
+                if smpl_async_active:
+                    # Non-blocking: replaces any pending snapshot; the worker
+                    # thread fits at its own pace and skips stale frames.
+                    smpl_fitter.submit(joints_display, joints_conf_state)
+                else:
+                    try:
+                        smpl_fit_result = smpl_fitter.fit(
+                            joints_display,
+                            joints_conf_state,
+                        )
+                        if smpl_pelvis_fn is not None:
+                            smpl_fit_pelvis = smpl_pelvis_fn(joints_display)
+                    except ValueError:
+                        # Not enough reliable joints this frame; keep the last mesh.
+                        pass
+                    except Exception as exc:
+                        print(f"[WARN] SMPL mesh fit failed; disabling SMPL avatar: {exc}")
+                        smpl_fitter = None
+            if smpl_fitter is not None and smpl_async_active:
+                smpl_err = smpl_fitter.error
+                if smpl_err is not None:
+                    print(f"[WARN] SMPL mesh fit failed; disabling SMPL avatar: {smpl_err}")
+                    smpl_fitter.close()
                     smpl_fitter = None
+                else:
+                    smpl_snap = smpl_fitter.latest()
+                    if smpl_snap is not None:
+                        smpl_fit_result = smpl_snap.result
+                        smpl_fit_pelvis = smpl_snap.pelvis_mm
+            # Anchor-follow: between (slow) fits, glue the last mesh to the
+            # current mid-hip so the avatar moves at full frame rate.
+            smpl_render_vertices = None
+            if smpl_fit_result is not None:
+                smpl_render_vertices = smpl_fit_result.vertices_mm
+                if (args.smpl_anchor_follow and smpl_fit_pelvis is not None
+                        and smpl_pelvis_fn is not None):
+                    cur_pelvis = smpl_pelvis_fn(joints_display)
+                    if cur_pelvis is not None:
+                        delta = np.asarray(cur_pelvis) - np.asarray(smpl_fit_pelvis)
+                        if np.isfinite(delta).all():
+                            smpl_render_vertices = smpl_fit_result.vertices_mm + delta.reshape(1, 3)
 
             if args.show_3d and (frame_idx % args.viz_every == 0):
                 orbit_azim = (args.view_azim + (time.time() - t_start) * args.auto_orbit_speed
@@ -3713,10 +3809,7 @@ def main():
                         avatar_body=args.avatar_body,
                         avatar_markers=args.avatar_markers,
                         avatar_alpha=args.avatar_alpha,
-                        smpl_mesh_vertices=(
-                            smpl_fit_result.vertices_mm
-                            if smpl_fit_result is not None else None
-                        ),
+                        smpl_mesh_vertices=smpl_render_vertices,
                         smpl_mesh_faces=(
                             smpl_fit_result.faces
                             if smpl_fit_result is not None else None
@@ -3994,6 +4087,8 @@ def main():
             print(f"[REC] Saved 2D mosaic: {args.record_mosaic}")
         for cap in caps.values():
             cap.release()
+        if smpl_fitter is not None and smpl_async_active:
+            smpl_fitter.close()
         if udp_sock is not None:
             udp_sock.close()
         if event_logger is not None:
