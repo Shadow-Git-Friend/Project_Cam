@@ -91,6 +91,54 @@ def test_usb6_launchers_default_to_usb2_safe_capture_size():
         assert 'HEIGHT="${PROJECT_CAM_HEIGHT:-360}"' in launcher
 
 
+def test_lowlag_launcher_contract_for_pose_avatar_and_ball():
+    launcher = Path("Parallel_working/run_live_lowlag.sh").read_text()
+
+    assert 'WIDTH="${PROJECT_CAM_WIDTH:-1280}"' in launcher
+    assert 'HEIGHT="${PROJECT_CAM_HEIGHT:-720}"' in launcher
+    assert "FPS=15" in launcher
+    assert "POSE_IMGSZ=960" in launcher
+    assert "POSE_IMGSZ=640" in launcher
+    assert '--pose-imgsz "$POSE_IMGSZ"' in launcher
+    assert '--pose-max-reproj-px "$POSE_REPROJ"' in launcher
+    assert "--ball-ballistic-fallback" in launcher
+    assert "--avatar-body" in launcher
+    assert "--avatar-alpha" in launcher
+
+
+def test_pose_health_payload_explains_empty_avatar_path():
+    live = load_live_module()
+    per_cam_pose_curr = {
+        "camUsb01": (np.zeros((17, 2), dtype=np.float32), np.ones(17, dtype=np.float32)),
+        "camUsb03": (np.zeros((17, 2), dtype=np.float32), np.ones(17, dtype=np.float32)),
+    }
+    pose_und_by_cam = {
+        "camUsb01": {0: np.array([0.1, 0.2]), 5: np.array([0.2, 0.3])},
+        "camUsb03": {0: np.array([0.3, 0.4])},
+    }
+    joints_display = np.full((17, 3), np.nan, dtype=np.float32)
+    joints_display[0] = [100.0, 200.0, 300.0]
+
+    payload = live.pose_health_payload(
+        run_pose=True,
+        pose_error="",
+        batch_order=["camUsb01", "camUsb02", "camUsb03"],
+        pose_raw_counts={"camUsb01": 1, "camUsb02": 0, "camUsb03": 2},
+        per_cam_pose_curr=per_cam_pose_curr,
+        pose_und_by_cam=pose_und_by_cam,
+        joints_3d_now={0: np.array([100.0, 200.0, 300.0])},
+        joints_display=joints_display,
+    )
+
+    assert payload["pose_run"] is True
+    assert payload["pose_raw_person_count"] == 3
+    assert payload["pose_selected_cam_count"] == 2
+    assert payload["pose_selected_cams"] == ["camUsb01", "camUsb03"]
+    assert payload["pose_high_conf_keypoint_count"] == 3
+    assert payload["pose_triangulated_joint_count"] == 1
+    assert payload["pose_visible_joint_count"] == 1
+
+
 def test_yolopose_batches_stay_within_tensor_rt_profile_limit():
     live = load_live_module()
     calls = []

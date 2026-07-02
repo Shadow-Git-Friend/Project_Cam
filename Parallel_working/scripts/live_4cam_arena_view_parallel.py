@@ -862,6 +862,44 @@ def select_target_person(candidates, prev_state, conf_thresh, switch_area_ratio)
     return tracked
 
 
+def pose_health_payload(
+    *,
+    run_pose,
+    pose_error,
+    batch_order,
+    pose_raw_counts,
+    per_cam_pose_curr,
+    pose_und_by_cam,
+    joints_3d_now,
+    joints_display,
+):
+    selected_cams = sorted(str(cam) for cam in per_cam_pose_curr.keys())
+    raw_counts = {str(cam): int(pose_raw_counts.get(cam, 0)) for cam in batch_order}
+    high_conf_counts = {
+        str(cam): int(len(pose_und_by_cam.get(cam, {})))
+        for cam in batch_order
+    }
+    visible = 0
+    if joints_display is not None:
+        arr = np.asarray(joints_display, dtype=np.float64)
+        if arr.ndim == 2 and arr.shape[1] == 3:
+            visible = int(np.count_nonzero(np.isfinite(arr).all(axis=1)))
+    payload = {
+        "pose_run": bool(run_pose),
+        "pose_raw_person_count": int(sum(raw_counts.values())),
+        "pose_raw_person_count_per_cam": raw_counts,
+        "pose_selected_cam_count": int(len(selected_cams)),
+        "pose_selected_cams": selected_cams,
+        "pose_high_conf_keypoint_count": int(sum(high_conf_counts.values())),
+        "pose_high_conf_keypoint_count_per_cam": high_conf_counts,
+        "pose_triangulated_joint_count": int(len(joints_3d_now)),
+        "pose_visible_joint_count": visible,
+    }
+    if pose_error:
+        payload["pose_error"] = str(pose_error)
+    return payload
+
+
 def draw_arena_static(ax, dims, tags, extr, world_y_mirror=True):
     x_max, y_max, z_max = dims["X"], dims["Y"], dims["Z"]
     corners = np.array(
@@ -2960,6 +2998,8 @@ def main():
             run_pose = (pose_infer is not None or yolopose_model is not None) and (frame_idx % pose_every_eff == 0)
             per_cam_pose_curr = {}
             pose_und_by_cam = {}
+            pose_raw_counts = {}
+            pose_error = ""
             timer.start("pose")
             if run_pose and use_yolopose and yolopose_model is not None:
                 # YOLO-Pose path: single model for detection + keypoints
@@ -2981,14 +3021,17 @@ def main():
                         frame_batch,
                         **yp_kwargs,
                     )
-                except Exception:
+                except Exception as exc:
+                    pose_error = repr(exc)
                     yp_results = [None] * len(frame_batch)
                 for cam, yp_res in zip(batch_order, yp_results):
                     if yp_res is None or not hasattr(yp_res, "keypoints") or yp_res.keypoints is None:
+                        pose_raw_counts[cam] = 0
                         pose_state[cam] = None
                         per_cam_pose_state.pop(cam, None)
                         continue
                     kpts_all = yp_res.keypoints.data.cpu().numpy()  # (N, 17, 3) — x, y, conf
+                    pose_raw_counts[cam] = int(len(kpts_all))
                     if len(kpts_all) == 0:
                         pose_state[cam] = None
                         per_cam_pose_state.pop(cam, None)
@@ -3022,12 +3065,14 @@ def main():
                 # MMPose path (original)
                 try:
                     res_list = list(pose_infer(frame_batch, return_vis=False, batch_size=len(frame_batch)))
-                except Exception:
+                except Exception as exc:
+                    pose_error = repr(exc)
                     res_list = []
 
                 for cam, res in zip(batch_order, res_list):
                     preds = res.get("predictions", []) if isinstance(res, dict) else []
                     persons = flatten_predictions(preds)
+                    pose_raw_counts[cam] = int(len(persons))
                     cands = []
                     for p in persons:
                         cand = extract_person_pose(p)
@@ -4198,7 +4243,6 @@ def main():
                     f" | end_to_end={end_to_end_ms:.1f} | q={queue_depth} | max_age={max_age:.1f}"
                     f" | usable={usable_cam_count} | stale={stale_cam_count}"
                 )
-                print(line)
                 payload["ts"] = time.time()
                 payload["end_to_end_ms"] = float(end_to_end_ms)
                 payload["frame_age_ms_per_cam"] = frame_age_ms_per_cam
@@ -4207,9 +4251,29 @@ def main():
                 payload["usable_cam_count"] = int(usable_cam_count)
                 payload["stale_cam_count"] = int(stale_cam_count)
                 payload["queue_depth"] = int(queue_depth)
+                pose_health = pose_health_payload(
+                    run_pose=run_pose,
+                    pose_error=pose_error,
+                    batch_order=batch_order,
+                    pose_raw_counts=pose_raw_counts,
+                    per_cam_pose_curr=per_cam_pose_curr,
+                    pose_und_by_cam=pose_und_by_cam,
+                    joints_3d_now=joints_3d_now,
+                    joints_display=joints_display,
+                )
+                payload.update(pose_health)
+                line += (
+                    f" | pose_raw={pose_health['pose_raw_person_count']}"
+                    f" | pose_cams={pose_health['pose_selected_cam_count']}"
+                    f" | joints={pose_health['pose_triangulated_joint_count']}"
+                    f" | visible={pose_health['pose_visible_joint_count']}"
+                )
+                if pose_error:
+                    line += f" | pose_error={pose_error}"
                 if perf_fh is not None:
                     perf_fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
                     perf_fh.flush()
+                print(line)
 
     finally:
         if rec_writer is not None:

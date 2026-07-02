@@ -15,9 +15,9 @@
 #                               prediction ~capture+inference delay ahead. UDP
 #                               and joints_state unchanged.
 #   --pose-every 1              TRT pose is cheap; no reason to skip frames.
-#   --pose-imgsz 640            infer pose at 640 instead of the engine default
-#                               1280 — 640x360 frames gain nothing from 1280
-#                               letterboxing, and 640 is ~3-4x less compute.
+#   --pose-imgsz (auto)         pose inference size follows the capture width
+#                               (960 at 1280x720, 640 at 640x360) — never
+#                               upsample small frames, never waste big ones.
 #   --parallel-inference        ball inference runs in a worker thread
 #                               overlapped with the pose stage (see 'ballwait'
 #                               in the perf log) — saves ~min(ball, pose) ms.
@@ -26,10 +26,15 @@
 #                               during push-up leg raises (front/back cameras
 #                               mirror YOLO's left/right on prone poses).
 #
+# Lightweight live avatar is ENABLED by default when SMPL_MODEL_PATH is not
+# set. AVATAR_BODY=0 disables it; AVATAR_MARKERS=1 adds joint/body markers.
+#
 # Ball tracking is ENABLED here (the stock usb6 scripts pass --no-track-ball).
 #   TRACK_BALL=0  to disable it for a pose-only session.
 #   --ball-conf 0.25 is safe because the KF reprojection gate filters noise;
 #   --ball-single-cam-fallback covers moments only one camera sees the ball.
+#   --ball-ballistic-fallback uses gravity-aware single-cam depth during
+#   airborne/bounce frames; BALL_BALLISTIC_FALLBACK=0 restores KF-Z fallback.
 #   ball-imgsz is auto: 672 at the USB2-safe 640x360, 960 when you override
 #   PROJECT_CAM_WIDTH=1280 (upsampling 360p frames to 960 buys nothing).
 #
@@ -47,41 +52,76 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p Parallel_working/output
 
-# 640x360 keeps six cameras inside the USB2 budget; 1280x720 only after the
-# cameras move to powered USB3 hubs.
+# Capture default 1280x720 (2026-07-02): this is the rig's NATIVE calibration
+# resolution (garage_lab_combined/cal/intrinsics_usb6_1280x720 — the intrinsics
+# scaling becomes a no-op) and doubles the pixels on a prone/floor body, the
+# weakest pose case at 640x360. FPS drops to 15 at this size to stay inside
+# the shared USB2 bandwidth (6x 1280x720 MJPG @25 oversubscribes the hub and
+# starves cameras at startup).
 #
-# FPS 25 (was 5): the stock usb6 scripts pinned 5 to ride out concurrent-
-# startup starvation on the deep hub, but the generic 1080P cams ignore 5 and
-# stream 25 anyway, so steady-state bandwidth already carries ~25 fps. Higher
-# capture rate = fresher frames (max_age ~200 ms -> ~40 ms) even when the
-# processing loop runs slower. If cameras fail to open after the retries,
-# fall back: PROJECT_CAM_FPS=5 ./Parallel_working/run_live_lowlag.sh
-WIDTH="${PROJECT_CAM_WIDTH:-640}"
-HEIGHT="${PROJECT_CAM_HEIGHT:-360}"
-FPS="${PROJECT_CAM_FPS:-25}"
+# If cameras fail to open / stall at 1280x720, roll back to the fast-small
+# mode:   PROJECT_CAM_WIDTH=640 PROJECT_CAM_HEIGHT=360 PROJECT_CAM_FPS=25 \
+#         ./Parallel_working/run_live_lowlag.sh
+WIDTH="${PROJECT_CAM_WIDTH:-1280}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-720}"
+if [ -n "${PROJECT_CAM_FPS:-}" ]; then
+  FPS="$PROJECT_CAM_FPS"
+elif [ "$WIDTH" -ge 960 ]; then
+  FPS=15
+else
+  FPS=25
+fi
 
 POSE_MODEL="yolo11m-pose.engine"
 [ -f "$POSE_MODEL" ] || POSE_MODEL="yolo11m-pose.pt"
 
-# Current engines carry a batch<=4 TRT optimization profile, so 6 cameras run
-# chunked 4+2 per model (correct, ~15 ms slower than one call). After
-# re-exporting BOTH engines with `export_models_tensorrt.py --yolo-batch 6`
-# (do it while the viewer is NOT running — the build needs the GPU), set
-# MAX_BATCH=6 here or in the environment for single-call inference.
-MAX_BATCH="${MAX_BATCH:-4}"
-
-# Pixel gates scaled to the 640x360 capture (defaults were tuned at 1280+;
-# same angular error = half the pixels here, so unscaled gates are 2x looser
-# than intended — that is what let arm fliers and crouch tangles through).
-BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback
-           --ball-max-reproj-px 15 --ball-kf-gate-px 75 --ball-max-box-side-px 110)
-if [ "$WIDTH" -ge 960 ]; then
-  BALL_ARGS+=(--ball-imgsz 960)
+# Pose inference size follows the capture: at 640-wide capture anything above
+# 640 is upsampling noise; at 1280-wide capture 960 actually feeds the model
+# more person pixels (engine profile max is 1280). Override: POSE_IMGSZ=...
+if [ -n "${POSE_IMGSZ:-}" ]; then
+  :
+elif [ "$WIDTH" -ge 960 ]; then
+  POSE_IMGSZ=960
 else
-  BALL_ARGS+=(--ball-imgsz 672)
+  POSE_IMGSZ=640
+fi
+
+# Both engines were re-exported 2026-07-02 with a batch<=6 TRT optimization
+# profile (tight shapes: ball imgsz 672/max 1344, pose imgsz 640/max 1280 —
+# verified coexisting in one process), so all six cameras run in ONE call per
+# model. If you ever roll back to the *.batch4.engine files, set MAX_BATCH=4
+# (chunked 4+2, correct but ~15 ms slower). Re-export while the viewer is NOT
+# running — the TRT builder needs free GPU.
+MAX_BATCH="${MAX_BATCH:-6}"
+
+# Pixel gates scale with capture width (tuned values are for 1280-wide; the
+# same angular error covers half the pixels at 640-wide, so gates halve there
+# — unscaled loose gates are what let arm fliers and crouch tangles through).
+if [ "$WIDTH" -ge 960 ]; then
+  POSE_REPROJ=40; BALL_REPROJ=25; BALL_KF_GATE=150; BALL_MAXBOX=220; BALL_IMGSZ=960
+else
+  POSE_REPROJ=20; BALL_REPROJ=15; BALL_KF_GATE=75; BALL_MAXBOX=110; BALL_IMGSZ=672
+fi
+BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback
+           --ball-max-reproj-px "$BALL_REPROJ" --ball-kf-gate-px "$BALL_KF_GATE"
+           --ball-max-box-side-px "$BALL_MAXBOX" --ball-imgsz "$BALL_IMGSZ")
+if [ "${BALL_BALLISTIC_FALLBACK:-1}" != "0" ]; then
+  BALL_ARGS+=(--ball-ballistic-fallback)
 fi
 if [ "${TRACK_BALL:-1}" = "0" ]; then
   BALL_ARGS=(--no-track-ball)
+fi
+
+DEFAULT_AVATAR_BODY=1
+if [[ -n "${SMPL_MODEL_PATH:-}" ]]; then
+  DEFAULT_AVATAR_BODY=0
+fi
+AVATAR_ARGS=()
+if [ "${AVATAR_BODY:-$DEFAULT_AVATAR_BODY}" != "0" ]; then
+  AVATAR_ARGS+=(--avatar-body --avatar-alpha "${AVATAR_ALPHA:-0.74}")
+  if [ "${AVATAR_MARKERS:-0}" = "1" ]; then
+    AVATAR_ARGS+=(--avatar-markers)
+  fi
 fi
 
 SMPL_ARGS=()
@@ -107,7 +147,7 @@ fi
   --pose-device cuda:0 --pose-backend yolopose --yolopose-model "$POSE_MODEL" \
   --pose-max-batch "$MAX_BATCH" \
   --ball-max-batch "$MAX_BATCH" \
-  --pose-imgsz 640 \
+  --pose-imgsz "$POSE_IMGSZ" \
   --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" --fourcc MJPG \
   --pose-every 1 --viz-every 1 --mosaic-every 4 \
   --no-show-2d --show-3d --viz-backend cv2 --viz-width 1600 --viz-height 900 \
@@ -124,7 +164,7 @@ fi
   --no-show-ghost-skeleton \
   --kalman-process-noise 500 \
   --kalman-measurement-noise 10 \
-  --pose-max-reproj-px 20 \
+  --pose-max-reproj-px "$POSE_REPROJ" \
   --pose-min-cams 2 \
   --parallel-inference \
   "${BALL_ARGS[@]}" \
@@ -133,5 +173,6 @@ fi
   --udp-target-host 127.0.0.1 --udp-target-port 5005 \
   --udp-target-joints nose,left_shoulder,right_shoulder,left_elbow,right_elbow,left_wrist,right_wrist,left_hip,right_hip,left_knee,right_knee,left_ankle,right_ankle \
   --udp-target-conf-min 0.45 --udp-target-cams-min 2 \
+  "${AVATAR_ARGS[@]}" \
   "${SMPL_ARGS[@]}" \
   "$@"
