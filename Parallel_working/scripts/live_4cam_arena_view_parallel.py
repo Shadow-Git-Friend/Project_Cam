@@ -1892,6 +1892,10 @@ def main():
     ap.add_argument("--pose-imgsz", type=int, default=0,
                     help="Inference size for YOLO-Pose (0 = engine/model default). Set to 640 on the "
                          "640x360 USB rig: the default 1280 letterboxes small frames up 4x for nothing.")
+    ap.add_argument("--pose-min-cams", type=int, default=2,
+                    help="Minimum agreeing camera rays per 3D joint. With 6 cameras, 3 rejects the "
+                         "2-cam wrong-association tangles that appear on crouched/floor poses; a joint "
+                         "seen by fewer cams is dropped (holds last value) instead of flung.")
     ap.add_argument("--pose-conf", type=float, default=0.45)
     ap.add_argument("--pose-max-reproj-px", type=float, default=40.0,
                     help="Per-joint robust triangulation: reject camera rays whose "
@@ -3256,7 +3260,8 @@ def main():
                     if len(obs) >= 2:
                         pt, used = robust_triangulate_joint(
                             obs, obs_px, proj, extr, intr,
-                            min_cams=2, max_reproj_px=args.pose_max_reproj_px)
+                            min_cams=max(2, int(args.pose_min_cams)),
+                            max_reproj_px=args.pose_max_reproj_px)
                         if pt is not None:
                             joints_3d_now[j] = pt
                             joint_last_seen_frame[j] = frame_idx

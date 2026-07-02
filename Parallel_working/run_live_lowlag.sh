@@ -63,7 +63,11 @@ POSE_MODEL="yolo11m-pose.engine"
 # MAX_BATCH=6 here or in the environment for single-call inference.
 MAX_BATCH="${MAX_BATCH:-4}"
 
-BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback)
+# Pixel gates scaled to the 640x360 capture (defaults were tuned at 1280+;
+# same angular error = half the pixels here, so unscaled gates are 2x looser
+# than intended — that is what let arm fliers and crouch tangles through).
+BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback
+           --ball-max-reproj-px 15 --ball-kf-gate-px 75 --ball-max-box-side-px 110)
 if [ "$WIDTH" -ge 960 ]; then
   BALL_ARGS+=(--ball-imgsz 960)
 else
@@ -105,7 +109,7 @@ fi
   --display-filter oneeuro \
   --ema-alpha 0.55 \
   --ema-snap-thresh-mm 80 \
-  --joint-stale-frames 8 \
+  --joint-stale-frames 5 \
   --max-frame-age-ms 350 \
   --kalman-measured-dt \
   --pose-latency-comp-ms 100 \
@@ -113,7 +117,8 @@ fi
   --no-show-ghost-skeleton \
   --kalman-process-noise 500 \
   --kalman-measurement-noise 10 \
-  --pose-max-reproj-px 40 \
+  --pose-max-reproj-px 20 \
+  --pose-min-cams 3 \
   "${BALL_ARGS[@]}" \
   --perf-log-every 60 \
   --perf-jsonl "Parallel_working/output/perf_lowlag_${TS}.jsonl" \
