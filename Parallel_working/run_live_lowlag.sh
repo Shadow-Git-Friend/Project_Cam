@@ -1,27 +1,33 @@
 #!/usr/bin/env bash
-# lowlag: minimum perceived pose latency + best-validated ball detection flags.
+# lowlag (6-USB rig): minimum perceived pose latency + ball tracking on the
+# CURRENT six-webcam mirrored-Y setup (cameras_6usb_test.yaml, intrinsics
+# calibrated at 1280x720, extrinsics_usb6, world-y-mirror).
 #
-# What this profile changes vs run_live_parallel_yolopose.sh and why:
-#   --yolopose-model yolo11m-pose.engine  TRT FP16, 6.2 ms (vs 8.9 ms .pt)
-#   --kalman-measured-dt                  propagate joint KFs by real elapsed
-#                                         time; fixes velocity over-estimation
-#                                         when the USB rig runs at 15-18 FPS
-#                                         while --fps says 30
-#   --pose-latency-comp-ms 130            display-only: render joints from the
-#                                         KF prediction ~2 capture intervals
-#                                         ahead, cancelling capture+inference+
-#                                         smoothing delay. UDP unchanged.
-#   --ball-imgsz 960                      bounce detection camNorth 58%->98%
-#                                         (offline sweep 2026-04-20), +8 ms
-#   --ball-conf 0.25                      safe with the KF gate (2026-04-21)
-#   --ball-single-cam-fallback            ray->Z-plane when only 1 cam sees it
+# Keep `scripts/uvc_keeper.py --watch` running in another terminal for the C920s.
 #
-# Optional live SMPL avatar (async worker thread; never blocks the loop):
-#   SMPL_MODEL_PATH=/path/to/smpl ./Parallel_working/run_live_lowlag.sh
-#   SMPL_DEVICE=cuda:0 to fit on GPU (default cpu; async makes cpu fine).
+# Lag levers (vs the stock usb6 scripts):
+#   --kalman-measured-dt        propagate joint KFs by real elapsed time. On
+#                               this rig the effective skeleton update rate is
+#                               "any camera refreshed" (~aggregate fps), not
+#                               --fps, so the fixed 1/fps step badly skews KF
+#                               velocities and predict-ahead.
+#   --pose-latency-comp-ms 150  display-only: render joints from the KF
+#                               prediction ~1 capture interval ahead. UDP and
+#                               joints_state unchanged.
+#   --pose-every 1              TRT pose is 6.2 ms; no reason to skip frames.
 #
-# A/B: append --no-kalman-measured-dt --pose-latency-comp-ms 0 to reproduce
-# the old display behaviour exactly.
+# Ball tracking is ENABLED here (the stock usb6 scripts pass --no-track-ball).
+#   TRACK_BALL=0  to disable it for a pose-only session.
+#   --ball-conf 0.25 is safe because the KF reprojection gate filters noise;
+#   --ball-single-cam-fallback covers moments only one camera sees the ball.
+#   ball-imgsz is auto: 672 at the USB2-safe 640x360, 960 when you override
+#   PROJECT_CAM_WIDTH=1280 (upsampling 360p frames to 960 buys nothing).
+#
+# Optional live SMPL avatar (async worker; never blocks the loop):
+#   SMPL_MODEL_PATH=/path/to/smpl [SMPL_DEVICE=cuda:0] ./Parallel_working/run_live_lowlag.sh
+#
+# A/B against old display behaviour:
+#   ./Parallel_working/run_live_lowlag.sh --no-kalman-measured-dt --pose-latency-comp-ms 0
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,9 +36,25 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p Parallel_working/output
-WIDTH="${PROJECT_CAM_WIDTH:-1920}"
-HEIGHT="${PROJECT_CAM_HEIGHT:-1080}"
-FPS="${PROJECT_CAM_FPS:-30}"
+
+# USB2-safe defaults for the six-webcam rig (see run_live_usb6_blm.sh notes).
+# Override to 1280x720 only after the cameras move to powered USB3 hubs.
+WIDTH="${PROJECT_CAM_WIDTH:-640}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-360}"
+FPS="${PROJECT_CAM_FPS:-5}"
+
+POSE_MODEL="yolo11m-pose.engine"
+[ -f "$POSE_MODEL" ] || POSE_MODEL="yolo11m-pose.pt"
+
+BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback)
+if [ "$WIDTH" -ge 960 ]; then
+  BALL_ARGS+=(--ball-imgsz 960)
+else
+  BALL_ARGS+=(--ball-imgsz 672)
+fi
+if [ "${TRACK_BALL:-1}" = "0" ]; then
+  BALL_ARGS=(--no-track-ball)
+fi
 
 SMPL_ARGS=()
 if [[ -n "${SMPL_MODEL_PATH:-}" ]]; then
@@ -46,46 +68,38 @@ if [[ -n "${SMPL_MODEL_PATH:-}" ]]; then
 fi
 
 ./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_parallel.py \
-  --config garage_lab_combined/config/cameras.yaml \
-  --intrinsics-dir garage_lab_combined/cal/intrinsics \
-  --extrinsics arena_fixed/cal/extrinsics/extrinsics_fixed.json \
-  --dimensions arena_fixed/cal/extrinsics/Dimensions_fixed.txt \
-  --no-world-y-mirror \
-  --invert-y-axis-display \
-  --draw-global-axes \
-  --global-axis-len-mm 900 \
-  --ball-device cuda:0 \
-  --pose-device cuda:0 \
-  --pose-backend yolopose \
-  --yolopose-model yolo11m-pose.engine \
-  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
-  --pose-every 1 \
-  --ball-every 1 \
-  --viz-every 1 \
-  --mosaic-every 2 \
-  --show-2d --show-3d \
-  --viz-backend cv2 \
-  --viz-width 960 --viz-height 720 \
-  --ema-alpha 0.45 \
+  --config garage_lab_combined/config/cameras_6usb_test.yaml \
+  --intrinsics-dir garage_lab_combined/cal/intrinsics_usb6_1280x720 \
+  --extrinsics garage_lab_combined/cal/extrinsics_usb6/extrinsics_usb6.json \
+  --dimensions garage_lab_combined/cal/extrinsics_usb6/Dimensions_mirrored_y.txt \
+  --no-uvc-controls \
+  --world-y-mirror \
+  --no-invert-y-axis-display \
+  --draw-global-axes --global-axis-len-mm 900 \
+  --pose-device cuda:0 --pose-backend yolopose --yolopose-model "$POSE_MODEL" \
+  --pose-max-batch 4 \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" --fourcc MJPG \
+  --pose-every 1 --viz-every 1 --mosaic-every 4 \
+  --no-show-2d --show-3d --viz-backend cv2 --viz-width 1600 --viz-height 900 \
+  --render-theme cinematic --show-thumbnails \
+  --camera-open-retries 20 --camera-open-retry-delay 5 \
+  --display-filter oneeuro \
+  --ema-alpha 0.55 \
   --ema-snap-thresh-mm 80 \
-  --display-smooth-alpha 0.45 \
   --joint-stale-frames 8 \
-  --max-frame-age-ms 150 \
+  --max-frame-age-ms 350 \
   --kalman-measured-dt \
-  --pose-latency-comp-ms 130 \
-  --predict-ahead-ms 400 \
+  --pose-latency-comp-ms 150 \
+  --predict-ahead-ms 300 \
   --no-show-ghost-skeleton \
   --kalman-process-noise 500 \
   --kalman-measurement-noise 10 \
-  --ball-imgsz 960 \
-  --ball-conf 0.25 \
-  --ball-single-cam-fallback \
+  --pose-max-reproj-px 40 \
+  "${BALL_ARGS[@]}" \
   --perf-log-every 60 \
   --perf-jsonl "Parallel_working/output/perf_lowlag_${TS}.jsonl" \
-  --udp-target-host 127.0.0.1 \
-  --udp-target-port 5005 \
-  --udp-target-joints right_knee,nose,body_center \
-  --udp-target-conf-min 0.45 \
-  --udp-target-cams-min 3 \
+  --udp-target-host 127.0.0.1 --udp-target-port 5005 \
+  --udp-target-joints nose,left_shoulder,right_shoulder,left_elbow,right_elbow,left_wrist,right_wrist,left_hip,right_hip,left_knee,right_knee,left_ankle,right_ankle \
+  --udp-target-conf-min 0.45 --udp-target-cams-min 2 \
   "${SMPL_ARGS[@]}" \
   "$@"

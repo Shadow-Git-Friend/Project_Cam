@@ -2517,6 +2517,26 @@ def main():
     if len(active_cams) < 2:
         raise RuntimeError("Need at least 2 cameras in config.")
 
+    # Early camera preflight: verify V4L2 devices BEFORE loading CUDA/TensorRT
+    # models. A dead rig (config pointing at the wrong camera setup, unplugged
+    # hub) must fail in seconds with a clear message — not after a ~10 s engine
+    # load that then segfaults in CUDA teardown on exit.
+    preflight_ok = {}
+    for cam, dev in active_cams:
+        ready, ready_reason = v4l2_device_ready(
+            dev,
+            timeout_s=float(args.camera_preflight_timeout),
+        )
+        preflight_ok[cam] = ready
+        if not ready:
+            print(f"[WARN] {cam} preflight failed: {dev} -- {ready_reason}; skipping.")
+    ready_cams = [c for c, _ in active_cams if preflight_ok[c]]
+    if len(ready_cams) < 2:
+        raise RuntimeError(
+            f"Only {len(ready_cams)}/{len(active_cams)} camera device(s) passed preflight; "
+            f"need >=2 for 3D. Is --config ({args.config}) the right file for the "
+            f"cameras currently plugged in?")
+
     intr = {}
     for cam, _ in active_cams:
         k, d, iw, ih = load_intrinsics(Path(args.intrinsics_dir) / f"{cam}_intrinsics.json")
@@ -2574,12 +2594,8 @@ def main():
     open_retries = int(args.camera_open_retries)
     open_delay = float(args.camera_open_retry_delay)
     for cam, dev in active_cams:
-        ready, ready_reason = v4l2_device_ready(
-            dev,
-            timeout_s=float(args.camera_preflight_timeout),
-        )
-        if not ready:
-            print(f"[WARN] {cam} preflight failed: {dev} -- {ready_reason}; skipping.")
+        if not preflight_ok.get(cam, False):
+            # Already reported by the early preflight above.
             continue
         cap = None
         for attempt in range(open_retries + 1):
