@@ -1984,8 +1984,10 @@ def main():
                          "triangulation (fixes 'both legs rise' when cameras facing the person "
                          "mirror YOLO's left/right, worst on prone/supine poses).")
     ap.add_argument("--parallel-inference", action=argparse.BooleanOptionalAction, default=False,
-                    help="Run ball inference in a worker thread overlapped with the pose stage. "
-                         "Saves ~min(ball_ms, pose_ms) per frame; see 'ballwait' in the perf log.")
+                    help="EXPERIMENTAL — known unsafe on torch 2.1 + TensorRT 10.16: concurrent "
+                         "ball+pose inference from two threads races on the CUDA stream and kills "
+                         "pose with 'illegal memory access' (observed live 2026-07-02). Keep off "
+                         "until the ball worker gets a dedicated CUDA stream or process.")
     ap.add_argument("--pose-conf", type=float, default=0.45)
     ap.add_argument("--pose-max-reproj-px", type=float, default=40.0,
                     help="Per-joint robust triangulation: reject camera rays whose "
@@ -2787,6 +2789,8 @@ def main():
     per_cam_pose_state = {}
     pose_lock_active = False
     pose_reacquire_every = max(1, min(args.pose_every, 2))
+    pose_last_error_printed = None
+    pose_last_error_print_t = 0.0
     pose_select_conf = max(0.2, args.pose_conf - 0.10)
     ball_boxes_state = {}
     ball_state = None
@@ -3024,6 +3028,16 @@ def main():
                 except Exception as exc:
                     pose_error = repr(exc)
                     yp_results = [None] * len(frame_batch)
+                    # A permanently-failing pose stage must be loud in the
+                    # terminal, not only a field in the perf JSONL — a CUDA
+                    # error here previously rendered an empty arena with no
+                    # visible hint. Rate-limited to one line per 5 s.
+                    t_perr = time.monotonic()
+                    if (pose_error != pose_last_error_printed
+                            or t_perr - pose_last_error_print_t > 5.0):
+                        print(f"[WARN] pose inference failing: {pose_error}")
+                        pose_last_error_printed = pose_error
+                        pose_last_error_print_t = t_perr
                 for cam, yp_res in zip(batch_order, yp_results):
                     if yp_res is None or not hasattr(yp_res, "keypoints") or yp_res.keypoints is None:
                         pose_raw_counts[cam] = 0

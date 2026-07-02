@@ -18,9 +18,10 @@
 #   --pose-imgsz (auto)         pose inference size follows the capture width
 #                               (960 at 1280x720, 640 at 640x360) — never
 #                               upsample small frames, never waste big ones.
-#   --parallel-inference        ball inference runs in a worker thread
-#                               overlapped with the pose stage (see 'ballwait'
-#                               in the perf log) — saves ~min(ball, pose) ms.
+#   (parallel-inference REMOVED 2026-07-02: concurrent ball+pose TRT calls
+#    from two threads race on the CUDA stream — pose died every frame with
+#    'illegal memory access' on torch 2.1 + TensorRT 10.16. Sequential until
+#    the ball worker gets its own CUDA stream/process.)
 #   --pose-lr-fix (default on)  relabels per-camera left/right keypoints
 #                               against the 3D state; fixes "both legs rise"
 #                               during push-up leg raises (front/back cameras
@@ -166,7 +167,6 @@ fi
   --kalman-measurement-noise 10 \
   --pose-max-reproj-px "$POSE_REPROJ" \
   --pose-min-cams 2 \
-  --parallel-inference \
   "${BALL_ARGS[@]}" \
   --perf-log-every 60 \
   --perf-jsonl "Parallel_working/output/perf_lowlag_${TS}.jsonl" \
