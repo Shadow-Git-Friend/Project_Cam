@@ -1803,6 +1803,10 @@ def main():
     ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
     ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
     ap.add_argument("--ball-model", default="models/ball/yolo26m-672.engine")
+    ap.add_argument("--ball-max-batch", type=int, default=4,
+                    help="Max frames per ball-inference call. The TRT ball engine is exported "
+                         "with a batch<=4 optimization profile, so a >4-camera rig must chunk "
+                         "(mirrors --pose-max-batch). Raise only after re-exporting the engine.")
     ap.add_argument("--ball-imgsz", type=int, default=672,
                     help="Ball detector input size. 672 = default (engine was exported at this). "
                          "Try 960 for small/distant/bounce balls — dynamic-batch engine handles it, "
@@ -2860,8 +2864,12 @@ def main():
             timer.start("ball")
             if run_ball:
                 ball_boxes = {}
-                ball_results = ball_model(
+                # Chunked like the pose path: the TRT engine profile caps at
+                # batch 4, so 6 cameras would fail setInputShape otherwise.
+                ball_results = run_yolopose_batched(
+                    ball_model,
                     frame_batch,
+                    args.ball_max_batch,
                     conf=args.ball_conf,
                     imgsz=args.ball_imgsz,
                     verbose=False,
@@ -2876,7 +2884,7 @@ def main():
                     kf_pred_3d = ball_kf.predict_ahead(dt_ahead)
 
                 for cam, res in zip(batch_order, ball_results):
-                    if res.boxes is None or len(res.boxes) == 0:
+                    if res is None or res.boxes is None or len(res.boxes) == 0:
                         continue
                     xyxy_arr = res.boxes.xyxy.cpu().numpy()
                     conf_arr = res.boxes.conf.cpu().numpy()

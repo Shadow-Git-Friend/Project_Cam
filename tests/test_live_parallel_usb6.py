@@ -113,6 +113,17 @@ def test_yolopose_batches_stay_within_tensor_rt_profile_limit():
     assert len(results) == 6
 
 
+def test_ball_inference_is_batch_chunked_for_six_cameras():
+    # The TRT ball engine is exported with a batch<=4 optimization profile; a
+    # direct ball_model(frame_batch) call on the 6-USB rig fails setInputShape
+    # ([6,3,H,W]) and crashes ultralytics. The call site must chunk through
+    # run_yolopose_batched, capped by --ball-max-batch.
+    src = Path("Parallel_working/scripts/live_4cam_arena_view_parallel.py").read_text()
+    ball_call = src.split("ball_results = ", 1)[1][:200]
+    assert ball_call.lstrip().startswith("run_yolopose_batched(")
+    assert "--ball-max-batch" in src
+
+
 def test_v4l2_preflight_rejects_timed_out_device():
     live = load_live_module()
 
