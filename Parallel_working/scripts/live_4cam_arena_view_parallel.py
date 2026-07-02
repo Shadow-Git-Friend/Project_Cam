@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import json
 import math
@@ -288,7 +289,7 @@ class StageTimer:
     def report(self, frame_idx, every):
         if every <= 0 or frame_idx == 0 or frame_idx % every != 0:
             return None
-        order = ["capture", "ball", "pose", "triang", "coach", "udp", "viz3d", "mosaic", "total"]
+        order = ["capture", "ball", "ballwait", "pose", "triang", "coach", "udp", "viz3d", "mosaic", "total"]
         parts = []
         payload = {"frame": int(frame_idx)}
         for stage in order:
@@ -1723,6 +1724,50 @@ class JointKalmanFilter:
         return self._initialized
 
 
+# COCO L/R keypoint pairs: eyes, ears, shoulders, elbows, wrists, hips,
+# knees, ankles.
+COCO_LR_PAIRS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
+
+
+def fix_lr_swaps_for_cam(kpts, scores, joints_state, R, tvec, K, D,
+                         min_conf=0.2, margin=0.75):
+    """Correct one camera's left/right keypoint swaps against the 3D state.
+
+    YOLO-Pose labels left/right per view, so cameras that face the person
+    (worst when prone/supine) mirror the labels. Triangulating a mixed label
+    set (cam A's left ankle paired with cam B's right ankle) collapses both
+    3D limbs onto their average — the "both legs rise" artifact. For each
+    L/R pair with a finite previous 3D estimate, reproject 3D-left/right
+    into this camera and keep the assignment (direct vs swapped) with the
+    smaller total pixel error. Swaps only when clearly better (margin) so a
+    noisy frame cannot dither the labels. kpts/scores are modified in place;
+    returns the number of swapped pairs.
+    """
+    swapped = 0
+    for lj, rj in COCO_LR_PAIRS:
+        pl, pr = joints_state[lj], joints_state[rj]
+        if not (np.isfinite(pl).all() and np.isfinite(pr).all()):
+            continue
+        if scores[lj] < min_conf or scores[rj] < min_conf:
+            continue
+        try:
+            ul = np.asarray(project_world_to_pixel(pl, R, tvec, K, D), dtype=np.float64)
+            ur = np.asarray(project_world_to_pixel(pr, R, tvec, K, D), dtype=np.float64)
+        except Exception:
+            continue
+        if not (np.isfinite(ul).all() and np.isfinite(ur).all()):
+            continue
+        kl = np.asarray(kpts[lj, :2], dtype=np.float64)
+        kr = np.asarray(kpts[rj, :2], dtype=np.float64)
+        direct = np.linalg.norm(kl - ul) + np.linalg.norm(kr - ur)
+        cross = np.linalg.norm(kl - ur) + np.linalg.norm(kr - ul)
+        if cross < direct * margin:
+            kpts[[lj, rj], :2] = kpts[[rj, lj], :2]
+            scores[lj], scores[rj] = float(scores[rj]), float(scores[lj])
+            swapped += 1
+    return swapped
+
+
 def latency_compensated_point(kf, state_pt, t_ahead_sec, max_uncertainty_mm):
     """Display-only latency compensation for one joint.
 
@@ -1896,6 +1941,13 @@ def main():
                     help="Minimum agreeing camera rays per 3D joint. With 6 cameras, 3 rejects the "
                          "2-cam wrong-association tangles that appear on crouched/floor poses; a joint "
                          "seen by fewer cams is dropped (holds last value) instead of flung.")
+    ap.add_argument("--pose-lr-fix", action=argparse.BooleanOptionalAction, default=True,
+                    help="Relabel per-camera left/right keypoints against the 3D state before "
+                         "triangulation (fixes 'both legs rise' when cameras facing the person "
+                         "mirror YOLO's left/right, worst on prone/supine poses).")
+    ap.add_argument("--parallel-inference", action=argparse.BooleanOptionalAction, default=False,
+                    help="Run ball inference in a worker thread overlapped with the pose stage. "
+                         "Saves ~min(ball_ms, pose_ms) per frame; see 'ballwait' in the perf log.")
     ap.add_argument("--pose-conf", type=float, default=0.45)
     ap.add_argument("--pose-max-reproj-px", type=float, default=40.0,
                     help="Per-joint robust triangulation: reject camera rays whose "
@@ -2571,6 +2623,14 @@ def main():
         print("[INFO] Ball detector disabled (no active visualization output).")
     print(f"[INFO] Ball device: {args.ball_device} | Pose device: {args.pose_device}")
 
+    ball_executor = None
+    if args.parallel_inference and ball_model is not None:
+        # Single worker: one in-flight ball batch, overlapped with the pose
+        # stage. Two YOLO objects never share a predictor, so cross-thread
+        # calls are safe; the GPU serializes kernels, the CPU pre/post overlap.
+        ball_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ball-infer")
+        print("[INFO] Parallel inference: ball runs in a worker thread overlapped with pose.")
+
     pose_infer = None
     yolopose_model = None
     use_yolopose = args.pose_backend == "yolopose"
@@ -2868,68 +2928,30 @@ def main():
             ball_obs = {}
             ball_obs_px = {}
             run_ball = ball_model is not None and (frame_idx % args.ball_every == 0)
+            ball_future = None
+            ball_results = None
             timer.start("ball")
             if run_ball:
-                ball_boxes = {}
-                # Chunked like the pose path: the TRT engine profile caps at
-                # batch 4, so 6 cameras would fail setInputShape otherwise.
-                ball_results = run_yolopose_batched(
-                    ball_model,
-                    frame_batch,
-                    args.ball_max_batch,
+                # Chunked like the pose path: the TRT engine profile caps the
+                # batch, so an over-large camera count must split calls.
+                ball_infer_kwargs = dict(
                     conf=args.ball_conf,
                     imgsz=args.ball_imgsz,
                     verbose=False,
                     stream=False,
                     device=args.ball_device,
                 )
-
-                kf_pred_3d = None
-                if (args.ball_kf_gate_px > 0.0
-                        and ball_kf is not None and ball_kf.initialized):
-                    dt_ahead = 1.0 / max(1, args.fps)
-                    kf_pred_3d = ball_kf.predict_ahead(dt_ahead)
-
-                for cam, res in zip(batch_order, ball_results):
-                    if res is None or res.boxes is None or len(res.boxes) == 0:
-                        continue
-                    xyxy_arr = res.boxes.xyxy.cpu().numpy()
-                    conf_arr = res.boxes.conf.cpu().numpy()
-                    candidates = [
-                        (float(xyxy_arr[i, 0]), float(xyxy_arr[i, 1]),
-                         float(xyxy_arr[i, 2]), float(xyxy_arr[i, 3]),
-                         float(conf_arr[i]))
-                        for i in range(len(conf_arr))
-                    ]
-
-                    kf_pred_uv = None
-                    if kf_pred_3d is not None and cam in extr and cam in intr:
-                        try:
-                            kf_pred_uv = project_world_to_pixel(
-                                kf_pred_3d,
-                                extr[cam]["R"], extr[cam]["tvec"],
-                                intr[cam]["K"], intr[cam]["D"],
-                            )
-                        except Exception:
-                            kf_pred_uv = None
-
-                    chosen = select_ball_box_for_cam(
-                        candidates,
-                        kf_pred_uv,
-                        args.ball_kf_gate_px,
-                        args.ball_min_box_side_px,
-                        args.ball_max_box_side_px,
-                    )
-                    if chosen is None:
-                        continue
-                    x1, y1, x2, y2, conf = chosen
-                    cx = 0.5 * (x1 + x2)
-                    cy = 0.5 * (y1 + y2)
-                    und = undistort_points((cx, cy), intr[cam]["K"], intr[cam]["D"])
-                    ball_obs[cam] = und
-                    ball_obs_px[cam] = np.array([cx, cy], dtype=np.float64)
-                    ball_boxes[cam] = (int(x1), int(y1), int(x2), int(y2), conf)
-                ball_boxes_state = ball_boxes
+                if ball_executor is not None:
+                    # Overlap ball inference with the pose stage below; results
+                    # are collected in the "ballwait" segment before ball
+                    # triangulation. Saves ~min(ball_ms, pose_ms) per frame.
+                    ball_future = ball_executor.submit(
+                        run_yolopose_batched, ball_model, frame_batch,
+                        args.ball_max_batch, **ball_infer_kwargs)
+                else:
+                    ball_results = run_yolopose_batched(
+                        ball_model, frame_batch, args.ball_max_batch,
+                        **ball_infer_kwargs)
             timer.stop("ball")
 
             per_cam_pose = per_cam_pose_state.copy()
@@ -3036,6 +3058,20 @@ def main():
                 force_pose_snap = has_pose_lock and not pose_lock_active
                 pose_lock_active = has_pose_lock
 
+                if args.pose_lr_fix:
+                    # Per-camera left/right relabeling against the 3D state.
+                    # Cameras facing the person (worst when lying/prone) mirror
+                    # YOLO's left/right; triangulating mixed labels collapses
+                    # both 3D limbs together ("both legs rise" artifact).
+                    for cam, kdat in per_cam_pose_curr.items():
+                        if cam not in extr or cam not in intr:
+                            continue
+                        fix_lr_swaps_for_cam(
+                            kdat[0], kdat[1], joints_state,
+                            extr[cam]["R"], extr[cam]["tvec"],
+                            intr[cam]["K"], intr[cam]["D"],
+                            min_conf=args.pose_conf)
+
                 for cam, kdat in per_cam_pose_curr.items():
                     kpts, scores = kdat
                     j_ids = []
@@ -3049,6 +3085,65 @@ def main():
             else:
                 force_pose_snap = False
             timer.stop("pose")
+
+            # Collect ball detections (submitted before the pose stage when
+            # --parallel-inference is on) and pick per-camera candidates.
+            timer.start("ballwait")
+            if run_ball:
+                if ball_future is not None:
+                    try:
+                        ball_results = ball_future.result()
+                    except Exception as exc:
+                        print(f"[WARN] parallel ball inference failed this frame: {exc}")
+                        ball_results = []
+                ball_boxes = {}
+                kf_pred_3d = None
+                if (args.ball_kf_gate_px > 0.0
+                        and ball_kf is not None and ball_kf.initialized):
+                    dt_ahead = 1.0 / max(1, args.fps)
+                    kf_pred_3d = ball_kf.predict_ahead(dt_ahead)
+
+                for cam, res in zip(batch_order, ball_results or []):
+                    if res is None or res.boxes is None or len(res.boxes) == 0:
+                        continue
+                    xyxy_arr = res.boxes.xyxy.cpu().numpy()
+                    conf_arr = res.boxes.conf.cpu().numpy()
+                    candidates = [
+                        (float(xyxy_arr[i, 0]), float(xyxy_arr[i, 1]),
+                         float(xyxy_arr[i, 2]), float(xyxy_arr[i, 3]),
+                         float(conf_arr[i]))
+                        for i in range(len(conf_arr))
+                    ]
+
+                    kf_pred_uv = None
+                    if kf_pred_3d is not None and cam in extr and cam in intr:
+                        try:
+                            kf_pred_uv = project_world_to_pixel(
+                                kf_pred_3d,
+                                extr[cam]["R"], extr[cam]["tvec"],
+                                intr[cam]["K"], intr[cam]["D"],
+                            )
+                        except Exception:
+                            kf_pred_uv = None
+
+                    chosen = select_ball_box_for_cam(
+                        candidates,
+                        kf_pred_uv,
+                        args.ball_kf_gate_px,
+                        args.ball_min_box_side_px,
+                        args.ball_max_box_side_px,
+                    )
+                    if chosen is None:
+                        continue
+                    x1, y1, x2, y2, conf = chosen
+                    cx = 0.5 * (x1 + x2)
+                    cy = 0.5 * (y1 + y2)
+                    und = undistort_points((cx, cy), intr[cam]["K"], intr[cam]["D"])
+                    ball_obs[cam] = und
+                    ball_obs_px[cam] = np.array([cx, cy], dtype=np.float64)
+                    ball_boxes[cam] = (int(x1), int(y1), int(x2), int(y2), conf)
+                ball_boxes_state = ball_boxes
+            timer.stop("ballwait")
 
             timer.start("triang")
             ball_3d = None
@@ -4130,6 +4225,8 @@ def main():
             cap.release()
         if smpl_fitter is not None and smpl_async_active:
             smpl_fitter.close()
+        if ball_executor is not None:
+            ball_executor.shutdown(wait=False, cancel_futures=True)
         if udp_sock is not None:
             udp_sock.close()
         if event_logger is not None:

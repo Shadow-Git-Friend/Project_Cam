@@ -18,6 +18,13 @@
 #   --pose-imgsz 640            infer pose at 640 instead of the engine default
 #                               1280 — 640x360 frames gain nothing from 1280
 #                               letterboxing, and 640 is ~3-4x less compute.
+#   --parallel-inference        ball inference runs in a worker thread
+#                               overlapped with the pose stage (see 'ballwait'
+#                               in the perf log) — saves ~min(ball, pose) ms.
+#   --pose-lr-fix (default on)  relabels per-camera left/right keypoints
+#                               against the 3D state; fixes "both legs rise"
+#                               during push-up leg raises (front/back cameras
+#                               mirror YOLO's left/right on prone poses).
 #
 # Ball tracking is ENABLED here (the stock usb6 scripts pass --no-track-ball).
 #   TRACK_BALL=0  to disable it for a pose-only session.
@@ -118,7 +125,8 @@ fi
   --kalman-process-noise 500 \
   --kalman-measurement-noise 10 \
   --pose-max-reproj-px 20 \
-  --pose-min-cams 3 \
+  --pose-min-cams 2 \
+  --parallel-inference \
   "${BALL_ARGS[@]}" \
   --perf-log-every 60 \
   --perf-jsonl "Parallel_working/output/perf_lowlag_${TS}.jsonl" \
