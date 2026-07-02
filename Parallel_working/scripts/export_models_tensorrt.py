@@ -26,13 +26,22 @@ from pathlib import Path
 import numpy as np
 
 
-def export_yolo(model_path, fmt="engine", half=True, imgsz=1280, device="cuda:0"):
-    """Export YOLO model to TensorRT engine or ONNX."""
+def export_yolo(model_path, fmt="engine", half=True, imgsz=1280, device="cuda:0", batch=4):
+    """Export YOLO model to TensorRT engine or ONNX.
+
+    dynamic=True is mandatory (static engines segfault on batched multi-cam
+    inference, see .claude/rules/perf.md). `batch` sets the optimization
+    profile's max batch: 4 for the 4-cam rig, 6 for the 6-USB rig. Engines
+    reject batches above this at runtime (setInputShape error), so match it
+    to the camera count or chunk with --ball-max-batch/--pose-max-batch.
+    """
     from ultralytics import YOLO
 
     model = YOLO(model_path)
-    print(f"[YOLO] Exporting {model_path} to {fmt} (half={half}, imgsz={imgsz})")
-    export_path = model.export(format=fmt, half=half, imgsz=imgsz, device=device, dynamic=True, batch=4)
+    print(f"[YOLO] Exporting {model_path} to {fmt} (half={half}, imgsz={imgsz}, batch={batch})")
+    export_path = model.export(
+        format=fmt, half=half, imgsz=imgsz, device=device, dynamic=True, batch=int(batch)
+    )
     print(f"[YOLO] Exported to: {export_path}")
     return export_path
 
@@ -232,6 +241,8 @@ def main():
                     help="Export format for YOLO")
     ap.add_argument("--yolo-half", action="store_true", help="FP16 quantization for YOLO export")
     ap.add_argument("--yolo-imgsz", type=int, default=1280, help="Input image size for YOLO export")
+    ap.add_argument("--yolo-batch", type=int, default=4,
+                    help="Max batch in the TRT optimization profile (4 = 4-cam rig, 6 = 6-USB rig).")
 
     # RTMPose export
     ap.add_argument("--rtmpose-export", action="store_true", help="Export RTMPose to ONNX")
@@ -252,7 +263,7 @@ def main():
     # YOLO export
     if args.yolo_model and not args.benchmark:
         export_yolo(args.yolo_model, fmt=args.yolo_format, half=args.yolo_half,
-                    imgsz=args.yolo_imgsz, device=args.device)
+                    imgsz=args.yolo_imgsz, device=args.device, batch=args.yolo_batch)
 
     # RTMPose export
     if args.rtmpose_export:

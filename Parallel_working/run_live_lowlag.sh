@@ -46,6 +46,13 @@ FPS="${PROJECT_CAM_FPS:-5}"
 POSE_MODEL="yolo11m-pose.engine"
 [ -f "$POSE_MODEL" ] || POSE_MODEL="yolo11m-pose.pt"
 
+# Current engines carry a batch<=4 TRT optimization profile, so 6 cameras run
+# chunked 4+2 per model (correct, ~15 ms slower than one call). After
+# re-exporting BOTH engines with `export_models_tensorrt.py --yolo-batch 6`
+# (do it while the viewer is NOT running — the build needs the GPU), set
+# MAX_BATCH=6 here or in the environment for single-call inference.
+MAX_BATCH="${MAX_BATCH:-4}"
+
 BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback)
 if [ "$WIDTH" -ge 960 ]; then
   BALL_ARGS+=(--ball-imgsz 960)
@@ -77,7 +84,8 @@ fi
   --no-invert-y-axis-display \
   --draw-global-axes --global-axis-len-mm 900 \
   --pose-device cuda:0 --pose-backend yolopose --yolopose-model "$POSE_MODEL" \
-  --pose-max-batch 4 \
+  --pose-max-batch "$MAX_BATCH" \
+  --ball-max-batch "$MAX_BATCH" \
   --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" --fourcc MJPG \
   --pose-every 1 --viz-every 1 --mosaic-every 4 \
   --no-show-2d --show-3d --viz-backend cv2 --viz-width 1600 --viz-height 900 \
