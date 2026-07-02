@@ -41,6 +41,7 @@ jobs:
         run: |
           ruff check \
             src/project_cam/api src/project_cam/evaluation src/project_cam/models \
+            src/project_cam/metrics \
             src/project_cam/monitoring src/project_cam/quality src/project_cam/streaming \
             src/project_cam/assessment/live_trainer/leg_raise_mode.py \
             src/project_cam/assessment/live_trainer/limb_identity.py \
@@ -62,7 +63,8 @@ jobs:
             tests/test_api_mlops.py \
             tests/test_api_triangulate.py tests/test_leg_raise_mode.py \
             tests/test_limb_identity.py tests/test_limb_constraints.py \
-            tests/test_rtsp_source_config.py tests/test_benchmark_dry_run.py
+            tests/test_rtsp_source_config.py tests/test_benchmark_dry_run.py \
+            tests/test_academy_metrics.py
 
       - name: 3D accuracy regression gate
         run: |
