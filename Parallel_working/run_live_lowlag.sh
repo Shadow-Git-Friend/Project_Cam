@@ -101,7 +101,10 @@ else
   POSE_REPROJ=20; BALL_REPROJ=15; BALL_KF_GATE=75; BALL_MAXBOX=110
 fi
 BALL_IMGSZ="${BALL_IMGSZ:-672}"  # locked to the ball engine's export size
-BALL_ARGS=(--ball-device cuda:0 --ball-every 1 --ball-conf 0.25 --ball-single-cam-fallback
+# Ball every 2nd loop by default: at ~9 Hz loop the KF rides the gap and the
+# ~35 ms ball stage halves, buying pose/render rate. BALL_EVERY=1 for
+# ball-critical sessions (launcher work, bounce recording).
+BALL_ARGS=(--ball-device cuda:0 --ball-every "${BALL_EVERY:-2}" --ball-conf 0.25 --ball-single-cam-fallback
            --ball-max-reproj-px "$BALL_REPROJ" --ball-kf-gate-px "$BALL_KF_GATE"
            --ball-max-box-side-px "$BALL_MAXBOX" --ball-imgsz "$BALL_IMGSZ")
 if [ "${BALL_BALLISTIC_FALLBACK:-1}" != "0" ]; then
@@ -111,7 +114,10 @@ if [ "${TRACK_BALL:-1}" = "0" ]; then
   BALL_ARGS=(--no-track-ball)
 fi
 
-DEFAULT_AVATAR_BODY=1
+# Capsule avatar body is OPT-IN (AVATAR_BODY=1): it REPLACES the cinematic
+# skeleton in the renderer and looks mangled on floor/prone poses — the
+# skeleton is the primary evaluation view for this profile.
+DEFAULT_AVATAR_BODY=0
 if [[ -n "${SMPL_MODEL_PATH:-}" ]]; then
   DEFAULT_AVATAR_BODY=0
 fi
@@ -159,6 +165,7 @@ fi
   --max-frame-age-ms 350 \
   --kalman-measured-dt \
   --pose-latency-comp-ms 100 \
+  --predict-max-uncertainty-mm 250 \
   --predict-ahead-ms 300 \
   --no-show-ghost-skeleton \
   --kalman-process-noise 500 \
