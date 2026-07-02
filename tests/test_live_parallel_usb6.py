@@ -114,14 +114,25 @@ def test_yolopose_batches_stay_within_tensor_rt_profile_limit():
 
 
 def test_ball_inference_is_batch_chunked_for_six_cameras():
-    # The TRT ball engine is exported with a batch<=4 optimization profile; a
-    # direct ball_model(frame_batch) call on the 6-USB rig fails setInputShape
-    # ([6,3,H,W]) and crashes ultralytics. The call site must chunk through
-    # run_yolopose_batched, capped by --ball-max-batch.
+    # A ball engine's optimization profile caps the batch (e.g. 4 or 6); a
+    # direct ball_model(frame_batch) call above the cap fails setInputShape
+    # and crashes ultralytics. Every ball inference (inline or the
+    # --parallel-inference worker submit) must go through run_yolopose_batched
+    # capped by --ball-max-batch.
+    import re
+
     src = Path("Parallel_working/scripts/live_4cam_arena_view_parallel.py").read_text()
-    ball_call = src.split("ball_results = ", 1)[1][:200]
-    assert ball_call.lstrip().startswith("run_yolopose_batched(")
     assert "--ball-max-batch" in src
+    # Inline path: run_yolopose_batched(\n ball_model, frame_batch, args.ball_max_batch
+    assert re.search(
+        r"run_yolopose_batched\(\s*ball_model,\s*frame_batch,\s*args\.ball_max_batch", src
+    )
+    # Worker path: executor.submit(run_yolopose_batched, ball_model, frame_batch, args.ball_max_batch
+    assert re.search(
+        r"submit\(\s*run_yolopose_batched,\s*ball_model,\s*frame_batch,\s*args\.ball_max_batch", src
+    )
+    # No direct un-chunked call on the ball model remains.
+    assert re.search(r"\bball_model\(\s*frame_batch", src) is None
 
 
 def test_v4l2_preflight_rejects_timed_out_device():
