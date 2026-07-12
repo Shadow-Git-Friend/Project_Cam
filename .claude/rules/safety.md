@@ -70,3 +70,4 @@ All scripts that read serial MUST filter:
 - `set` beyond ±30 → ESP32 reboot (mitigated by Python-side clamp)
 - Horizontal stepper backlash on small `set→0→set` sequences (no movement until threshold exceeded)
 - Ball exit velocity at 800 RPM uncalibrated — pitch accuracy degrades at higher RPMs (ballistic solver assumes fixed 10 m/s)
+- **Multi-person + firing (2026-07-12): NO trajectory-clearance gate yet.** `--multi-person N>1` tracks several people but the launcher has no software inhibit when a NON-primary person crosses the launcher→target line. Until such a gate exists, `--shoot-enabled` with more than one person in the arena requires the operator to verify a clear firing line before every shot. Face ID labels are identification hints only — never a fire-authorization signal.
