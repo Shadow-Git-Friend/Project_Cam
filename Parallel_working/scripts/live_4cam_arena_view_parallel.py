@@ -1,21 +1,20 @@
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 import json
 import math
 import multiprocessing as mp
+import os
 import re
 import shutil
-import os
 import socket
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
-from queue import Full
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from queue import Full
 
 import cv2
 import matplotlib.pyplot as plt
@@ -51,6 +50,13 @@ COL_RIGHT = (255, 200, 40)   # cyan         (right side)
 COL_SPINE = (240, 240, 240)  # near-white   (torso/head links)
 COL_HEAD = (150, 255, 170)   # mint         (face)
 TRAIL_JOINTS = (9, 10, 15, 16)  # wrists + ankles get motion trails
+MP_PALETTE = (
+    (90, 200, 255),   # amber
+    (255, 120, 200),  # violet
+    (140, 255, 160),  # mint
+    (255, 210, 90),   # sky
+    (120, 140, 255),  # coral
+)
 
 
 def _bone_color(s, e):
@@ -862,6 +868,306 @@ def select_target_person(candidates, prev_state, conf_thresh, switch_area_ratio)
     return tracked
 
 
+def choose_primary_track_id(tracks, current_tid, requested_name="", viable_track_ids=None):
+    """Choose a stable primary without blending two people's filter state.
+
+    ``viable_track_ids`` gates only a *new* selection.  A current track stays
+    primary through short camera occlusions while the tracker still owns it.
+    This prevents a one-frame visibility drop from moving UDP/coach state to a
+    different person.
+    """
+    viable = set(tracks) if viable_track_ids is None else set(viable_track_ids)
+    viable.intersection_update(tracks)
+    wanted = str(requested_name or "").strip().casefold()
+    if wanted:
+        named = [
+            tid for tid in viable
+            if str(getattr(tracks[tid], "name", "") or "").casefold() == wanted
+        ]
+        if named:
+            return min(
+                named,
+                key=lambda tid: (
+                    -float(getattr(tracks[tid], "name_score", 0.0)),
+                    -int(getattr(tracks[tid], "hits", 0)),
+                    tid,
+                ),
+            )
+    if current_tid in tracks:
+        return current_tid
+    if not viable:
+        return None
+    return min(viable, key=lambda tid: (-int(getattr(tracks[tid], "hits", 0)), tid))
+
+
+def person_head_point(joints, pelvis_mm=None):
+    """Best available 3D head anchor for projecting a Face-ID association gate."""
+    arr = np.asarray(joints, dtype=np.float64) if joints is not None else None
+    if arr is not None and arr.shape == (17, 3):
+        face = arr[:5]
+        finite = np.isfinite(face).all(axis=1)
+        if finite.any():
+            return np.mean(face[finite], axis=0)
+        shoulders = arr[[5, 6]]
+        if np.isfinite(shoulders).all():
+            point = np.mean(shoulders, axis=0)
+            point[2] += 350.0
+            return point
+    if pelvis_mm is not None:
+        pelvis = np.asarray(pelvis_mm, dtype=np.float64).reshape(3)
+        if np.isfinite(pelvis).all():
+            return pelvis + np.array([0.0, 0.0, 650.0])
+    return None
+
+
+def person_pelvis_point(joint_points):
+    """Stable pelvis anchor from hips, or from at least two torso joints."""
+    if isinstance(joint_points, dict):
+        def get_point(joint):
+            return joint_points.get(joint)
+    else:
+        array = np.asarray(joint_points, dtype=np.float64)
+        if array.shape != (17, 3):
+            return None
+
+        def get_point(joint):
+            return array[joint]
+
+    def finite_point(joint):
+        value = get_point(joint)
+        if value is None:
+            return None
+        point = np.asarray(value, dtype=np.float64).reshape(-1)
+        if len(point) < 3 or not np.isfinite(point[:3]).all():
+            return None
+        return point[:3]
+
+    left_hip = finite_point(11)
+    right_hip = finite_point(12)
+    if left_hip is not None and right_hip is not None:
+        return 0.5 * (left_hip + right_hip)
+    torso = [
+        point
+        for joint in (5, 6, 11, 12)
+        if (point := finite_point(joint)) is not None
+    ]
+    if len(torso) >= 2:
+        return np.mean(np.asarray(torso), axis=0)
+    return None
+
+
+def make_secondary_pose_state():
+    """Allocate display state for a non-primary track."""
+    return {
+        "joints": np.full((17, 3), np.nan, dtype=np.float32),
+        "display": np.full((17, 3), np.nan, dtype=np.float32),
+        "conf": np.zeros(17, dtype=np.float32),
+        "cams": np.zeros(17, dtype=np.int32),
+        "last_seen": np.full(17, -10_000_000, dtype=np.int64),
+    }
+
+
+def update_secondary_pose_state(
+    state,
+    measurements,
+    *,
+    frame_idx,
+    stale_frames,
+    ema_alpha,
+    snap_thresh_mm,
+    display_alpha,
+):
+    """Update, smooth, and expire one secondary skeleton in place."""
+    for joint, measurement in measurements.items():
+        point = np.asarray(measurement["point"], dtype=np.float64).reshape(3)
+        if not np.isfinite(point).all():
+            continue
+        previous = state["joints"][joint]
+        previous = previous if np.isfinite(previous).all() else None
+        alpha = float(ema_alpha)
+        if previous is not None and float(snap_thresh_mm) > 0.0:
+            displacement = float(np.linalg.norm(point - previous))
+            if displacement > float(snap_thresh_mm):
+                alpha = min(
+                    1.0, alpha * displacement / float(snap_thresh_mm)
+                )
+        state["joints"][joint] = ema_update(previous, point, alpha=alpha)
+        state["conf"][joint] = float(measurement.get("conf", 0.0))
+        state["cams"][joint] = int(measurement.get("cams", 0))
+        state["last_seen"][joint] = int(frame_idx)
+
+    for joint in range(17):
+        if int(frame_idx) - int(state["last_seen"][joint]) > int(stale_frames):
+            state["joints"][joint] = np.nan
+            state["display"][joint] = np.nan
+            state["conf"][joint] = 0.0
+            state["cams"][joint] = 0
+            continue
+        source = state["joints"][joint]
+        if not np.isfinite(source).all():
+            state["display"][joint] = np.nan
+            continue
+        target = state["display"][joint]
+        if not np.isfinite(target).all():
+            state["display"][joint] = source
+        else:
+            state["display"][joint] = (
+                target + float(display_alpha) * (source - target)
+            )
+    return state
+
+
+def triangulate_person_assignment(
+    camera_selection,
+    per_cam_candidates,
+    *,
+    intr,
+    proj,
+    extr,
+    joint_indices,
+    pose_conf,
+    min_cams,
+    max_reproj_px,
+):
+    """Triangulate one track's selected 2D detections into joint measurements."""
+    normalized_by_cam = {}
+    pixels_by_cam = {}
+    scores_by_cam = {}
+    for cam, candidate_idx in camera_selection.items():
+        candidates = per_cam_candidates.get(cam) or []
+        if candidate_idx < 0 or candidate_idx >= len(candidates) or cam not in intr:
+            continue
+        candidate = candidates[candidate_idx]
+        keypoints = np.asarray(candidate["kpts"], dtype=np.float64)
+        scores = np.asarray(candidate["scores"], dtype=np.float64)
+        accepted_joints = [
+            joint for joint in joint_indices
+            if joint < len(scores)
+            and scores[joint] >= float(pose_conf)
+            and np.isfinite(keypoints[joint, :2]).all()
+        ]
+        pixels = [tuple(keypoints[joint, :2]) for joint in accepted_joints]
+        normalized = undistort_points_batch(
+            pixels, intr[cam]["K"], intr[cam]["D"]
+        )
+        normalized_by_cam[cam] = dict(zip(accepted_joints, normalized))
+        pixels_by_cam[cam] = keypoints
+        scores_by_cam[cam] = scores
+
+    measurements = {}
+    for joint in joint_indices:
+        observations = {}
+        pixel_observations = {}
+        for cam, normalized in normalized_by_cam.items():
+            if joint not in normalized:
+                continue
+            observations[cam] = normalized[joint]
+            pixel_observations[cam] = pixels_by_cam[cam][joint, :2]
+        if len(observations) < int(min_cams):
+            continue
+        point, used = robust_triangulate_joint(
+            observations,
+            pixel_observations,
+            proj,
+            extr,
+            intr,
+            min_cams=int(min_cams),
+            max_reproj_px=float(max_reproj_px),
+        )
+        if point is None:
+            continue
+        used_cams = [cam for cam in used if cam in scores_by_cam]
+        confidence = (
+            float(np.mean([scores_by_cam[cam][joint] for cam in used_cams]))
+            if used_cams else 0.0
+        )
+        measurements[joint] = {
+            "point": np.asarray(point, dtype=np.float64),
+            "conf": confidence,
+            "cams": len(used_cams),
+        }
+    return measurements
+
+
+def apply_face_identity_tick(
+    *,
+    identifier,
+    gallery,
+    voters,
+    tracks,
+    track_joints,
+    frame_bgr,
+    camera_name,
+    project_fn,
+    gate_px,
+    min_score,
+    voter_factory,
+):
+    """Detect faces once and apply gated, one-to-one identity votes."""
+    ensure_project_src_on_path()
+    from project_cam.tracking import associate_faces_to_tracks  # noqa: E402
+
+    faces = identifier.detect_and_encode(frame_bgr)
+    projected_heads = {}
+    for track_id, track in tracks.items():
+        head = person_head_point(
+            track_joints.get(track_id), getattr(track, "pelvis_mm", None)
+        )
+        if head is None:
+            continue
+        projected = project_fn(head, camera_name)
+        if projected is not None:
+            projected_heads[track_id] = projected
+    assignments = associate_faces_to_tracks(faces, projected_heads, gate_px)
+
+    for track_id, track in tracks.items():
+        voter = voters.setdefault(track_id, voter_factory())
+        face_index = assignments.get(track_id)
+        if face_index is None:
+            voter.add_vote(None)
+        else:
+            name, score = gallery.match(
+                faces[face_index]["embedding"], min_score=float(min_score)
+            )
+            voter.add_vote(name, score)
+        locked_name, strength = voter.current()
+        track.name = locked_name
+        track.name_score = strength
+
+    # An enrolled identity represents one person.  If noisy tracks both lock
+    # the same name, display it only on the stronger owner until evidence
+    # separates them.
+    owners = {}
+    for track_id, track in tracks.items():
+        if track.name:
+            owners.setdefault(track.name, []).append(track_id)
+    for track_ids in owners.values():
+        winner = min(
+            track_ids,
+            key=lambda track_id: (-float(tracks[track_id].name_score), track_id),
+        )
+        for track_id in track_ids:
+            if track_id != winner:
+                tracks[track_id].name = None
+                tracks[track_id].name_score = 0.0
+    return assignments
+
+
+def single_person_identity_context(track, joints_state, joints_display, frame_idx):
+    """Expose a single-person Face-ID target only while 3D pose is current."""
+    if track is None:
+        return {}, {}
+    state = np.asarray(joints_state, dtype=np.float64)
+    if state.shape != (17, 3):
+        return {}, {}
+    pelvis = person_pelvis_point(state)
+    if pelvis is None:
+        return {}, {}
+    track.pelvis_mm = pelvis
+    track.last_seen_frame = int(frame_idx)
+    return {track.tid: track}, {track.tid: joints_display}
+
+
 def pose_health_payload(
     *,
     run_pose,
@@ -1097,6 +1403,37 @@ def _cv2_project(pts_3d, view_34, fx, fy, cx, cy):
     return scr, ok
 
 
+def _draw_person_label(img, text, anchor_xy, color, identified=False):
+    """Draw a compact identity pill above one rendered skeleton."""
+    if not text:
+        return
+    x, y = int(anchor_xy[0]), int(anchor_xy[1])
+    text = str(text)[:24]
+    (text_w, text_h), _ = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1
+    )
+    padding = 7
+    check_width = 16 if identified else 0
+    x0 = x - (text_w + check_width) // 2 - padding
+    x1 = x + (text_w + check_width) // 2 + padding
+    y0, y1 = y - text_h - padding, y + padding - 2
+    cv2.rectangle(img, (x0, y0), (x1, y1), (18, 14, 13), -1)
+    cv2.rectangle(img, (x0, y0), (x1, y1), _shade(color, 0.55), 1, cv2.LINE_AA)
+    cv2.putText(
+        img, text, (x0 + padding, y - 2), cv2.FONT_HERSHEY_SIMPLEX,
+        0.52, (240, 240, 240), 1, cv2.LINE_AA,
+    )
+    if identified:
+        check_x = x1 - padding - 10
+        check_y = y - text_h // 2
+        points = np.array(
+            [[check_x, check_y + 2], [check_x + 4, check_y + 6],
+             [check_x + 11, check_y - 4]],
+            np.int32,
+        )
+        cv2.polylines(img, [points], False, (120, 255, 150), 2, cv2.LINE_AA)
+
+
 def draw_live_scene_cv2(
     img_w, img_h, dims, tags, extr,
     ball_pt, ball_traj, joints,
@@ -1123,6 +1460,9 @@ def draw_live_scene_cv2(
     smpl_mesh_faces=None,
     smpl_mesh_alpha=0.45,
     smpl_mesh_max_faces=1500,
+    extra_people=None,
+    primary_label=None,
+    face_roster=None,
 ):
     """Render the 3D arena scene onto a cv2 BGR image (~1-3 ms)."""
     cine = (theme == "cinematic")
@@ -1353,6 +1693,73 @@ def draw_live_scene_cv2(
                 draw_markers=True,
             )
 
+        if primary_label:
+            finite = np.isfinite(np.asarray(joints)).all(axis=1)
+            head_indices = [
+                joint for joint in (0, 1, 2, 3, 4, 5, 6)
+                if joint < len(sok) and finite[joint] and sok[joint]
+            ]
+            if head_indices:
+                head_joint = min(head_indices, key=lambda joint: sp[joint, 1])
+                _draw_person_label(
+                    img,
+                    primary_label.get("text", ""),
+                    (int(sp[head_joint, 0]), int(sp[head_joint, 1]) - 20),
+                    tuple(primary_label.get("color", (255, 255, 255))),
+                    identified=bool(primary_label.get("identified")),
+                )
+
+    # Secondary tracks are display-only; the primary alone keeps the legacy
+    # coach/UDP/BLM/SMPL path above.
+    for person in extra_people or ():
+        person_joints = np.asarray(person.get("joints"), dtype=np.float64)
+        if person_joints.shape != (17, 3):
+            continue
+        finite = np.isfinite(person_joints).all(axis=1)
+        if not finite.any():
+            continue
+        color = tuple(person.get("color", MP_PALETTE[0]))
+        transformed = transform_world_point_y(
+            person_joints, y_max, enabled=world_y_mirror
+        )
+        person_screen, person_ok = proj(transformed)
+        if cine:
+            floor = transformed.copy()
+            floor[:, 2] = 0.0
+            floor_screen, floor_ok = proj(floor)
+            for start, end in CONNECTIONS:
+                if finite[start] and finite[end] and floor_ok[start] and floor_ok[end]:
+                    line(floor_screen[start], floor_screen[end], (26, 22, 20), 5)
+        for start, end in CONNECTIONS:
+            if finite[start] and finite[end] and person_ok[start] and person_ok[end]:
+                if cine:
+                    line(person_screen[start], person_screen[end], _shade(color, 0.30), 6)
+                line(person_screen[start], person_screen[end], color, 2)
+        for joint in range(17):
+            if not finite[joint] or not person_ok[joint]:
+                continue
+            point = (int(person_screen[joint, 0]), int(person_screen[joint, 1]))
+            cv2.circle(img, point, 6, _shade(color, 0.30), -1, cv2.LINE_AA)
+            cv2.circle(img, point, 3, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(img, point, 3, color, 1, cv2.LINE_AA)
+        if person.get("label"):
+            head_indices = [
+                joint for joint in (0, 1, 2, 3, 4, 5, 6)
+                if finite[joint] and person_ok[joint]
+            ]
+            if head_indices:
+                head_joint = min(
+                    head_indices, key=lambda joint: person_screen[joint, 1]
+                )
+                _draw_person_label(
+                    img,
+                    person["label"],
+                    (int(person_screen[head_joint, 0]),
+                     int(person_screen[head_joint, 1]) - 20),
+                    color,
+                    identified=bool(person.get("identified")),
+                )
+
     # --- ghost skeleton (predicted position) ---
     if ghost_joints is not None:
         gj = np.asarray(ghost_joints, dtype=np.float64)
@@ -1527,6 +1934,40 @@ def draw_live_scene_cv2(
             cv2.circle(img, (img_w - 300, 17), 7, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.putText(img, "REC", (img_w - 288, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (0, 0, 255), 2, cv2.LINE_AA)
+
+        if face_roster:
+            panel_x = 14
+            panel_y = 84 if limb_heat else 50
+            panel_w = 230
+            panel_h = 26 + 24 * len(face_roster)
+            cv2.rectangle(
+                img,
+                (panel_x - 8, panel_y - 6),
+                (panel_x + panel_w, panel_y + panel_h),
+                (18, 14, 13),
+                -1,
+            )
+            cv2.putText(
+                img, "LOCAL FACE LABELS", (panel_x, panel_y + 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (150, 255, 170), 1, cv2.LINE_AA,
+            )
+            row_y = panel_y + 36
+            for entry in face_roster:
+                color = tuple(entry.get("color", (200, 200, 200)))
+                cv2.circle(img, (panel_x + 5, row_y - 5), 4, color, -1, cv2.LINE_AA)
+                cv2.putText(
+                    img, str(entry.get("label", "UNKNOWN"))[:18],
+                    (panel_x + 17, row_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+                    (228, 228, 228), 1, cv2.LINE_AA,
+                )
+                status = "ID" if entry.get("identified") else "?"
+                cv2.putText(
+                    img, status, (panel_x + panel_w - 35, row_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (120, 255, 150) if entry.get("identified") else (120, 120, 120),
+                    1, cv2.LINE_AA,
+                )
+                row_y += 24
 
         # athlete metrics panel (bottom-left, dynamic height for rep counters)
         if metrics:
@@ -2003,6 +2444,42 @@ def main():
         help="Hide triangulated joints if not updated for this many frames (default: pose_every*3).",
     )
     ap.add_argument("--switch-area-ratio", type=float, default=1.6)
+    ap.add_argument(
+        "--multi-person", type=int, default=1, metavar="N",
+        help="Track up to N people across cameras (1-8; 1 keeps the legacy path). "
+             "Only the stable primary feeds coach/UDP/BLM; secondary tracks are display-only.",
+    )
+    ap.add_argument("--mp-gate-px", type=float, default=150.0,
+                    help="Maximum projected-pelvis association distance in pixels.")
+    ap.add_argument("--mp-spawn-reproj-px", type=float, default=60.0,
+                    help="Maximum pair reprojection error for a new multi-camera track.")
+    ap.add_argument("--mp-min-separation-mm", type=float, default=400.0,
+                    help="Minimum 3D pelvis separation between distinct tracks.")
+    ap.add_argument("--mp-max-missed-frames", type=int, default=30,
+                    help="Frames a track may coast before its stable ID expires.")
+    ap.add_argument(
+        "--face-id", action=argparse.BooleanOptionalAction, default=False,
+        help="Enable local YuNet/SFace labels. This is identification convenience, not "
+             "liveness-tested authentication; no images or embeddings leave this computer.",
+    )
+    ap.add_argument("--face-models-dir", default="",
+                    help="YuNet/SFace ONNX directory (default: <repo>/models/face).")
+    ap.add_argument("--face-gallery", default="",
+                    help="Private face gallery .npz (default: XDG data/project-cam/face_gallery.npz).")
+    ap.add_argument("--face-id-every", type=int, default=10,
+                    help="Run Face ID every N frames on one round-robin camera.")
+    ap.add_argument("--face-id-min-score", type=float, default=0.363,
+                    help="Minimum SFace cosine similarity for a gallery vote.")
+    ap.add_argument("--face-id-min-votes", type=int, default=3,
+                    help="Consistent accepted observations required before showing a name.")
+    ap.add_argument("--face-id-max-misses", type=int, default=30,
+                    help="Unmatched Face-ID ticks before a locked name expires.")
+    ap.add_argument("--face-gate-px", type=float, default=140.0,
+                    help="Maximum face-center distance from a projected 3D head.")
+    ap.add_argument("--face-det-width", type=int, default=640,
+                    help="YuNet detection width; SFace crops still use the full frame.")
+    ap.add_argument("--primary-person", default="",
+                    help="Prefer this locked local Face-ID name as coach/UDP/BLM primary.")
     ap.add_argument("--ema-alpha", type=float, default=0.35, help="Smoothing factor for 3D points")
     ap.add_argument(
         "--display-smooth-alpha",
@@ -2270,6 +2747,19 @@ def main():
     args.pose_max_batch = max(1, int(args.pose_max_batch))
     args.viz_every = max(1, int(args.viz_every))
     args.mosaic_every = max(1, int(args.mosaic_every))
+    args.multi_person = int(args.multi_person)
+    if not 1 <= args.multi_person <= 8:
+        ap.error("--multi-person must be between 1 and 8")
+    args.face_id_every = max(1, int(args.face_id_every))
+    args.face_id_min_votes = max(1, int(args.face_id_min_votes))
+    args.face_id_max_misses = max(0, int(args.face_id_max_misses))
+    args.face_det_width = max(1, int(args.face_det_width))
+    args.mp_gate_px = max(0.0, float(args.mp_gate_px))
+    args.mp_spawn_reproj_px = max(0.0, float(args.mp_spawn_reproj_px))
+    args.mp_min_separation_mm = max(1.0, float(args.mp_min_separation_mm))
+    args.mp_max_missed_frames = max(0, int(args.mp_max_missed_frames))
+    args.face_gate_px = max(0.0, float(args.face_gate_px))
+    args.face_id_min_score = float(np.clip(args.face_id_min_score, -1.0, 1.0))
     if args.joint_stale_frames is None:
         args.joint_stale_frames = max(3, args.pose_every * 3)
     else:
@@ -2793,6 +3283,117 @@ def main():
     pose_last_error_printed = None
     pose_last_error_print_t = 0.0
     pose_select_conf = max(0.2, args.pose_conf - 0.10)
+
+    # Optional cross-view people association and local face labels.  The
+    # legacy path remains untouched when --multi-person=1 and --no-face-id.
+    per_cam_all_cands = {}
+    mp_assignments = {}
+    mp_tracker = None
+    mp_states = {}
+    mp_primary_tid = None
+    face_identifier = None
+    face_gallery = None
+    face_voters = {}
+    face_voter_factory = None
+    face_single_track = None
+    face_rr_offset = 0
+    face_last_error_t = 0.0
+    extra_people_render = []
+    primary_label_render = None
+    face_roster_render = []
+
+    def _mp_project_fn(point_mm, cam):
+        if cam not in extr or cam not in intr:
+            return None
+        camera_point = (
+            extr[cam]["R"] @ np.asarray(point_mm, dtype=np.float64).reshape(3, 1)
+            + extr[cam]["tvec"]
+        )
+        if camera_point[2, 0] <= 1.0:
+            return None
+        projected = project_world_to_pixel(
+            point_mm,
+            extr[cam]["R"],
+            extr[cam]["tvec"],
+            intr[cam]["K"],
+            intr[cam]["D"],
+        )
+        return projected if np.isfinite(projected).all() else None
+
+    def _mp_triangulate_fn(cam_a, uv_a, cam_b, uv_b):
+        if cam_a not in intr or cam_b not in intr or cam_a not in proj or cam_b not in proj:
+            return None
+        und_a = undistort_points(tuple(uv_a), intr[cam_a]["K"], intr[cam_a]["D"])
+        und_b = undistort_points(tuple(uv_b), intr[cam_b]["K"], intr[cam_b]["D"])
+        point = triangulate_multi({cam_a: und_a, cam_b: und_b}, proj)
+        if point is None or not np.isfinite(point).all() or not -500.0 <= point[2] <= 4000.0:
+            return None
+        errors = []
+        for cam, observed in ((cam_a, uv_a), (cam_b, uv_b)):
+            projected = project_world_to_pixel(
+                point,
+                extr[cam]["R"],
+                extr[cam]["tvec"],
+                intr[cam]["K"],
+                intr[cam]["D"],
+            )
+            errors.append(float(np.linalg.norm(projected - np.asarray(observed))))
+        error = max(errors)
+        return (point, error) if np.isfinite(error) else None
+
+    if args.multi_person > 1 or args.face_id:
+        ensure_project_src_on_path()
+        from project_cam.tracking import (  # noqa: E402
+            FaceGallery,
+            FaceIdentifier,
+            MultiPersonTracker,
+            NameVoter,
+            PersonTrack,
+            default_face_gallery_path,
+        )
+
+        if args.multi_person > 1:
+            mp_tracker = MultiPersonTracker(
+                max_people=args.multi_person,
+                gate_px=args.mp_gate_px,
+                min_cams_spawn=2,
+                spawn_reproj_px=args.mp_spawn_reproj_px,
+                min_separation_mm=args.mp_min_separation_mm,
+                max_missed_frames=args.mp_max_missed_frames,
+                anchor_min_conf=max(0.2, args.pose_conf - 0.15),
+            )
+            print(f"[INFO] Multi-person association enabled (max={args.multi_person})")
+            if args.viz_backend != "cv2":
+                print("[WARN] Secondary skeletons render only with --viz-backend cv2")
+
+        face_voter_factory = lambda: NameVoter(  # noqa: E731
+            min_votes=args.face_id_min_votes,
+            max_misses=args.face_id_max_misses,
+        )
+        if args.face_id:
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            models_dir = Path(args.face_models_dir) if args.face_models_dir else repo_root / "models" / "face"
+            gallery_path = Path(args.face_gallery) if args.face_gallery else default_face_gallery_path()
+            try:
+                face_gallery = FaceGallery.load(gallery_path)
+                face_identifier = FaceIdentifier(
+                    models_dir, det_width=args.face_det_width
+                )
+                enrolled = face_gallery.people()
+                print(
+                    f"[INFO] Local Face ID enabled; gallery={gallery_path}; "
+                    f"enrolled={', '.join(sorted(enrolled)) if enrolled else 'none'}"
+                )
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                print(f"[WARN] Local Face ID disabled: {exc}")
+                face_identifier = None
+                face_gallery = None
+            if mp_tracker is None and face_identifier is not None:
+                face_single_track = PersonTrack(
+                    tid=0,
+                    pelvis_mm=np.zeros(3, dtype=np.float64),
+                    last_seen_frame=-10_000_000,
+                )
     ball_boxes_state = {}
     ball_state = None
     ball_kf = JointKalmanFilter(
@@ -2999,10 +3600,12 @@ def main():
 
             per_cam_pose = per_cam_pose_state.copy()
             joints_3d_now = {}
+            mp_measurements_by_tid = {}
             pose_every_eff = args.pose_every if pose_lock_active else pose_reacquire_every
             run_pose = (pose_infer is not None or yolopose_model is not None) and (frame_idx % pose_every_eff == 0)
             per_cam_pose_curr = {}
             pose_und_by_cam = {}
+            per_cam_all_cands = {}
             pose_raw_counts = {}
             pose_error = ""
             timer.start("pose")
@@ -3063,6 +3666,9 @@ def main():
                         pose_state[cam] = None
                         per_cam_pose_state.pop(cam, None)
                         continue
+                    per_cam_all_cands[cam] = cands
+                    if mp_tracker is not None:
+                        continue
                     selected = select_target_person(
                         candidates=cands,
                         prev_state=pose_state[cam],
@@ -3097,6 +3703,9 @@ def main():
                         pose_state[cam] = None
                         per_cam_pose_state.pop(cam, None)
                         continue
+                    per_cam_all_cands[cam] = cands
+                    if mp_tracker is not None:
+                        continue
                     selected = select_target_person(
                         candidates=cands,
                         prev_state=pose_state[cam],
@@ -3110,6 +3719,135 @@ def main():
                         per_cam_pose_state[cam] = pose_pair
                     else:
                         per_cam_pose_state.pop(cam, None)
+
+            if run_pose and mp_tracker is not None:
+                mp_assignments = mp_tracker.step(
+                    frame_idx,
+                    per_cam_all_cands,
+                    project_fn=_mp_project_fn,
+                    triangulate_fn=_mp_triangulate_fn,
+                )
+                for removed_tid in mp_tracker.last_pruned_ids:
+                    mp_states.pop(removed_tid, None)
+                    face_voters.pop(removed_tid, None)
+
+                viable_primary_tracks = {
+                    track_id
+                    for track_id, camera_selection in mp_assignments.items()
+                    if len(camera_selection) >= 2
+                }
+                next_primary_tid = choose_primary_track_id(
+                    mp_tracker.tracks,
+                    mp_primary_tid,
+                    args.primary_person,
+                    viable_primary_tracks,
+                )
+                if next_primary_tid != mp_primary_tid:
+                    if mp_primary_tid is not None:
+                        old_state = mp_states.setdefault(
+                            mp_primary_tid, make_secondary_pose_state()
+                        )
+                        old_state["joints"][:] = joints_state
+                        old_state["display"][:] = joints_display
+                        old_state["conf"][:] = joints_conf_state
+                        old_state["cams"][:] = joints_cam_state
+                        old_state["last_seen"][:] = joint_last_seen_frame
+
+                    target_state = mp_states.get(next_primary_tid)
+                    if target_state is None:
+                        joints_state.fill(np.nan)
+                        joints_display.fill(np.nan)
+                        joints_conf_state.fill(0.0)
+                        joints_cam_state.fill(0)
+                        joint_last_seen_frame.fill(-10_000_000)
+                    else:
+                        joints_state[:] = target_state["joints"]
+                        joints_display[:] = target_state["display"]
+                        joints_conf_state[:] = target_state["conf"]
+                        joints_cam_state[:] = target_state["cams"]
+                        joint_last_seen_frame[:] = target_state["last_seen"]
+                    joints_predicted.fill(np.nan)
+                    oneeuro_filters = [
+                        OneEuroVec(args.oneeuro_mincutoff, args.oneeuro_beta)
+                        for _ in range(17)
+                    ]
+                    joint_kfs = [
+                        JointKalmanFilter(
+                            process_noise=args.kalman_process_noise,
+                            measurement_noise=args.kalman_measurement_noise,
+                            dt=kalman_dt,
+                        )
+                        for _ in range(17)
+                    ]
+                    joint_kf_last_update_t = [None] * 17
+                    joint_speeds.fill(0.0)
+                    prev_speed_pos.fill(np.nan)
+                    prev_speed_t = None
+                    for trail in joint_trails.values():
+                        trail.clear()
+                    pose_lock_active = False
+                    _prev_aim_status = None
+                    _prev_aim_joint = None
+
+                    # Every object below learns history for one athlete.  A
+                    # primary-track switch must start a fresh session so reps,
+                    # limb identity, body proportions, and avatar shape cannot
+                    # leak from the previous person.
+                    if coach_counter is not None:
+                        coach_counter = _coach_make_counter(
+                            args.coach_exercise, coach_rules
+                        )
+                        coach_state = coach_counter.state
+                        coach_metrics = {}
+                        coach_was_acquired = False
+                        coach_prev_camera = None
+                        coach_lock_hold = 0
+                        coach_rois.clear()
+                        coach_keypoint_stabilizer = _CoachKeypointStabilizer()
+                        if coach_pushup_floor_anchor is not None:
+                            coach_pushup_floor_anchor = _PushupFloorAnchor()
+                    coach_leg_priors = None
+                    if coach_leg_prior_acc is not None:
+                        coach_leg_prior_acc.reset()
+                    coach_ankle_fallback_streak = {15: 0, 16: 0}
+
+                    if leg_raise_tracker is not None:
+                        leg_raise_tracker = type(leg_raise_tracker)(leg_raise_tracker.config)
+                        leg_raise_state = None
+                    if leg_raise_identity_tracker is not None:
+                        leg_raise_identity_tracker.reset()
+                    if leg_raise_prior_acc is not None:
+                        leg_raise_prior_acc.reset()
+                    leg_raise_priors = None
+                    if leg_raise_contact_interpreter is not None:
+                        leg_raise_contact_interpreter.reset()
+
+                    if smpl_fitter is not None and hasattr(smpl_fitter, "reset"):
+                        smpl_fitter.reset()
+                    smpl_fit_result = None
+                    smpl_fit_pelvis = None
+
+                    if rep_counters:
+                        for exercise in list(rep_counters):
+                            rep_counters[exercise] = rep_make_fn(
+                                exercise, rep_rules_map[exercise]
+                            )
+                            rep_count_state[exercise] = 0
+                    mp_primary_tid = next_primary_tid
+
+                primary_selection = mp_assignments.get(mp_primary_tid, {})
+                for cam in batch_order:
+                    candidate_idx = primary_selection.get(cam)
+                    candidates = per_cam_all_cands.get(cam) or []
+                    if candidate_idx is None or candidate_idx >= len(candidates):
+                        pose_state[cam] = None
+                        per_cam_pose_state.pop(cam, None)
+                        continue
+                    selected = candidates[candidate_idx]
+                    pose_state[cam] = selected
+                    pose_pair = (selected["kpts"], selected["scores"])
+                    per_cam_pose_curr[cam] = pose_pair
+                    per_cam_pose_state[cam] = pose_pair
 
             # --- Shared post-processing for both YOLO-Pose and MMPose ---
             if run_pose:
@@ -3589,6 +4327,68 @@ def main():
                             alpha_eff = min(1.0, args.ema_alpha * (disp / args.ema_snap_thresh_mm))
                     joints_state[j] = ema_update(prev, pt, alpha=alpha_eff)
 
+                if mp_tracker is not None:
+                    if mp_primary_tid in mp_tracker.tracks:
+                        primary_measurements = {
+                            joint: {
+                                "point": point,
+                                "conf": joints_conf_state[joint],
+                                "cams": joints_cam_state[joint],
+                            }
+                            for joint, point in joints_3d_now.items()
+                        }
+                        pelvis = person_pelvis_point(
+                            {
+                                joint: value["point"]
+                                for joint, value in primary_measurements.items()
+                            }
+                        )
+                        if pelvis is not None:
+                            mp_tracker.update(mp_primary_tid, pelvis, frame_idx)
+
+                    for track_id, camera_selection in mp_assignments.items():
+                        if track_id == mp_primary_tid:
+                            continue
+                        measurements = triangulate_person_assignment(
+                            camera_selection,
+                            per_cam_all_cands,
+                            intr=intr,
+                            proj=proj,
+                            extr=extr,
+                            joint_indices=triangulated_joint_indices,
+                            pose_conf=args.pose_conf,
+                            min_cams=max(2, int(args.pose_min_cams)),
+                            max_reproj_px=args.pose_max_reproj_px,
+                        )
+                        mp_measurements_by_tid[track_id] = measurements
+                        pelvis = person_pelvis_point(
+                            {
+                                joint: value["point"]
+                                for joint, value in measurements.items()
+                            }
+                        )
+                        if pelvis is not None:
+                            mp_tracker.update(track_id, pelvis, frame_idx)
+
+            if mp_tracker is not None:
+                active_track_ids = set(mp_tracker.tracks)
+                for stale_tid in set(mp_states) - active_track_ids:
+                    mp_states.pop(stale_tid, None)
+                    face_voters.pop(stale_tid, None)
+                for track_id in active_track_ids:
+                    if track_id == mp_primary_tid:
+                        continue
+                    state = mp_states.setdefault(track_id, make_secondary_pose_state())
+                    update_secondary_pose_state(
+                        state,
+                        mp_measurements_by_tid.get(track_id, {}),
+                        frame_idx=frame_idx,
+                        stale_frames=args.joint_stale_frames,
+                        ema_alpha=args.ema_alpha,
+                        snap_thresh_mm=args.ema_snap_thresh_mm,
+                        display_alpha=args.display_smooth_alpha,
+                    )
+
             for j in triangulated_joint_indices:
                 if frame_idx - int(joint_last_seen_frame[j]) > args.joint_stale_frames:
                     joints_state[j] = np.nan
@@ -3668,6 +4468,105 @@ def main():
                                 d_alpha = min(1.0, d_alpha_base * (disp / snap_thresh))
                         joints_display[j] = dst + d_alpha * (src - dst)
             prev_speed_t = t_disp
+
+            if (
+                face_identifier is not None
+                and face_gallery is not None
+                and face_voter_factory is not None
+                and frame_idx % args.face_id_every == 0
+                and batch_order
+            ):
+                face_cam = batch_order[face_rr_offset % len(batch_order)]
+                face_rr_offset += 1
+                face_frame = cam_frames.get(face_cam)
+                if face_frame is not None:
+                    if mp_tracker is not None:
+                        identity_tracks = mp_tracker.tracks
+                        identity_joints = {
+                            track_id: (
+                                joints_display
+                                if track_id == mp_primary_tid
+                                else mp_states.get(track_id, {}).get("display")
+                            )
+                            for track_id in identity_tracks
+                        }
+                    else:
+                        identity_tracks, identity_joints = (
+                            single_person_identity_context(
+                                face_single_track,
+                                joints_state,
+                                joints_display,
+                                frame_idx,
+                            )
+                        )
+                    try:
+                        apply_face_identity_tick(
+                            identifier=face_identifier,
+                            gallery=face_gallery,
+                            voters=face_voters,
+                            tracks=identity_tracks,
+                            track_joints=identity_joints,
+                            frame_bgr=face_frame,
+                            camera_name=face_cam,
+                            project_fn=_mp_project_fn,
+                            gate_px=args.face_gate_px,
+                            min_score=args.face_id_min_score,
+                            voter_factory=face_voter_factory,
+                        )
+                    except Exception as exc:
+                        now = time.monotonic()
+                        if now - face_last_error_t > 5.0:
+                            print(f"[WARN] Face ID tick failed: {exc}")
+                            face_last_error_t = now
+
+            extra_people_render = []
+            primary_label_render = None
+            face_roster_render = []
+            if mp_tracker is not None:
+                for track_id, track in sorted(mp_tracker.tracks.items()):
+                    identified = bool(track.name)
+                    label = track.name or f"Person #{track_id}"
+                    color = MP_PALETTE[track.color_idx % len(MP_PALETTE)]
+                    if track_id == mp_primary_tid:
+                        primary_label_render = {
+                            "text": label,
+                            "identified": identified,
+                            "color": color,
+                        }
+                    else:
+                        state = mp_states.get(track_id)
+                        if state is not None:
+                            extra_people_render.append(
+                                {
+                                    "joints": state["display"].copy(),
+                                    "label": label,
+                                    "identified": identified,
+                                    "color": color,
+                                }
+                            )
+                    if args.face_id:
+                        face_roster_render.append(
+                            {
+                                "label": label,
+                                "identified": identified,
+                                "color": color,
+                            }
+                        )
+            elif face_single_track is not None:
+                identified = bool(face_single_track.name)
+                label = face_single_track.name or "UNKNOWN"
+                primary_label_render = {
+                    "text": label,
+                    "identified": identified,
+                    "color": COL_HEAD,
+                }
+                face_roster_render = [
+                    {
+                        "label": label,
+                        "identified": identified,
+                        "color": COL_HEAD,
+                    }
+                ]
             timer.stop("triang")
 
             timer.start("coach")
@@ -4012,6 +4911,9 @@ def main():
                         ),
                         smpl_mesh_alpha=args.smpl_mesh_alpha,
                         smpl_mesh_max_faces=args.smpl_mesh_max_faces,
+                        extra_people=extra_people_render,
+                        primary_label=primary_label_render,
+                        face_roster=face_roster_render,
                     )
                     cv2.imshow("Live 3D Arena", viz_img)
                     if video_writer_3d is not None:

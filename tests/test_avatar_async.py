@@ -26,6 +26,7 @@ class FakeFitter:
         self.delay_s = delay_s
         self.fail_with = fail_with
         self.calls = 0
+        self.reset_calls = 0
         self.last_joints = None
 
     def fit(self, joints_mm, confidences=None):
@@ -36,6 +37,9 @@ class FakeFitter:
         if self.fail_with is not None:
             raise self.fail_with
         return {"pelvis_x": float(np.asarray(joints_mm)[11, 0])}
+
+    def reset(self):
+        self.reset_calls += 1
 
 
 def wait_until(predicate, timeout_s=3.0):
@@ -99,6 +103,26 @@ def test_latest_only_queue_skips_intermediate_submissions():
         assert fitter.calls < n
         # ...but the newest snapshot processed must be the final submission.
         assert wrapper.latest().result["pelvis_x"] == pytest.approx(float(n - 1))
+    finally:
+        wrapper.close()
+
+
+def test_reset_discards_inflight_person_and_resets_before_next_fit():
+    fitter = FakeFitter(delay_s=0.05)
+    wrapper = AsyncSmplFitter(fitter)
+    try:
+        wrapper.submit(make_joints(pelvis=(1.0, 0.0, 0.0)))
+        assert wait_until(lambda: wrapper.busy)
+
+        wrapper.reset()
+        wrapper.submit(make_joints(pelvis=(9.0, 0.0, 0.0)))
+
+        assert wrapper.latest() is None
+        assert wait_until(
+            lambda: wrapper.latest() is not None
+            and wrapper.latest().result["pelvis_x"] == pytest.approx(9.0)
+        )
+        assert fitter.reset_calls == 1
     finally:
         wrapper.close()
 

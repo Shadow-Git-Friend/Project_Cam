@@ -72,11 +72,15 @@ class AsyncSmplFitter:
     def __init__(self, fitter):
         self._fitter = fitter
         self._cond = threading.Condition()
-        self._pending: Optional[tuple[np.ndarray, Optional[np.ndarray]]] = None
+        self._pending: Optional[
+            tuple[np.ndarray, Optional[np.ndarray], int]
+        ] = None
         self._snapshot: Optional[AsyncFitSnapshot] = None
         self._error: Optional[str] = None
         self._stop = False
         self._seq = 0
+        self._generation = 0
+        self._reset_requested = False
         self._busy = False
         self._thread = threading.Thread(
             target=self._worker, name="smpl-fit", daemon=True
@@ -90,7 +94,24 @@ class AsyncSmplFitter:
         with self._cond:
             if self._stop or self._error is not None:
                 return
-            self._pending = (joints, conf)
+            self._pending = (joints, conf, self._generation)
+            self._cond.notify()
+
+    def reset(self) -> None:
+        """Forget the previous person without blocking the live loop.
+
+        An in-flight result is discarded by generation, the wrapped session
+        fitter is reset on its worker thread, and only then is the newest
+        queued pose fitted.  This keeps shape calibration from leaking across
+        people when multi-person mode changes its primary track.
+        """
+        with self._cond:
+            if self._stop or self._error is not None:
+                return
+            self._generation += 1
+            self._pending = None
+            self._snapshot = None
+            self._reset_requested = True
             self._cond.notify()
 
     def latest(self) -> Optional[AsyncFitSnapshot]:
@@ -107,7 +128,7 @@ class AsyncSmplFitter:
     def busy(self) -> bool:
         """True while a fit is running (useful to pace submissions/telemetry)."""
         with self._cond:
-            return self._busy or self._pending is not None
+            return self._busy or self._pending is not None or self._reset_requested
 
     def close(self, timeout: float = 2.0) -> None:
         with self._cond:
@@ -119,31 +140,65 @@ class AsyncSmplFitter:
     def _worker(self) -> None:
         while True:
             with self._cond:
-                while self._pending is None and not self._stop:
+                while (
+                    self._pending is None
+                    and not self._reset_requested
+                    and not self._stop
+                ):
                     self._cond.wait(timeout=0.25)
                 if self._stop:
                     return
-                joints, conf = self._pending
-                self._pending = None
-                self._busy = True
+                if self._reset_requested:
+                    self._reset_requested = False
+                    self._busy = True
+                    reset_action = True
+                else:
+                    reset_action = False
+                    joints, conf, generation = self._pending
+                    self._pending = None
+                    self._busy = True
+
+            if reset_action:
+                try:
+                    reset = getattr(self._fitter, "reset", None)
+                    if callable(reset):
+                        reset()
+                except Exception as exc:
+                    with self._cond:
+                        self._error = f"{type(exc).__name__}: {exc}"
+                        self._busy = False
+                        self._cond.notify_all()
+                    return
+                with self._cond:
+                    self._busy = False
+                    self._cond.notify_all()
+                continue
+
             try:
                 result = self._fitter.fit(joints, conf)
             except ValueError:
                 # Not enough reliable joints in this snapshot; skip it.
                 with self._cond:
                     self._busy = False
+                    self._cond.notify_all()
                 continue
             except Exception as exc:  # fatal: model/device problems
                 with self._cond:
-                    self._error = f"{type(exc).__name__}: {exc}"
                     self._busy = False
-                return
+                    if generation == self._generation and not self._reset_requested:
+                        self._error = f"{type(exc).__name__}: {exc}"
+                        self._cond.notify_all()
+                        return
+                    self._cond.notify_all()
+                continue
             snapshot = AsyncFitSnapshot(
                 result=result,
                 pelvis_mm=pelvis_from_coco(joints),
                 seq=self._seq + 1,
             )
             with self._cond:
-                self._seq = snapshot.seq
-                self._snapshot = snapshot
+                if generation == self._generation and not self._reset_requested:
+                    self._seq = snapshot.seq
+                    self._snapshot = snapshot
                 self._busy = False
+                self._cond.notify_all()

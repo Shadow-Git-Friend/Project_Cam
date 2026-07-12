@@ -10,6 +10,9 @@ venv/
 *.pt
 *.engine
 *.onnx
+# Local biometric embeddings (default lives outside the checkout; this also
+# protects explicit --face-gallery paths under models/face).
+models/face/*.npz
 *.mp4
 *.avi
 *.mkv
