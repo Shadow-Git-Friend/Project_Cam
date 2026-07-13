@@ -800,6 +800,246 @@ def transform_world_point_y(world_pt, y_max, enabled=True):
     return out
 
 
+def advance_primary_epoch(*, primary_epoch, current_track_id, next_track_id):
+    """Advance the safety epoch exactly when primary ownership changes.
+
+    Initial acquisition (``None`` -> track ID) is a real ownership change and
+    therefore advances epoch zero to epoch one.
+    """
+    epoch = int(primary_epoch)
+    if epoch < 0:
+        raise ValueError("primary_epoch must be non-negative")
+    return epoch + int(current_track_id != next_track_id)
+
+
+def update_pose_safety_observation(
+    *,
+    inference_succeeded,
+    observation_ts,
+    frame_idx,
+    previous_ts,
+    previous_frame,
+):
+    """Advance pose safety time only after the model call returns normally."""
+    if not inference_succeeded:
+        return previous_ts, previous_frame
+    return float(observation_ts), int(frame_idx)
+
+
+def pose_inference_results_complete(results, *, expected_count, require_dict):
+    """Require one non-missing, correctly shaped result per input camera."""
+    expected = int(expected_count)
+    if expected <= 0 or results is None:
+        return False
+    try:
+        if len(results) != expected:
+            return False
+    except TypeError:
+        return False
+    if require_dict:
+        return all(
+            isinstance(result, dict)
+            and isinstance(result.get("predictions"), list)
+            for result in results
+        )
+    return all(result is not None for result in results)
+
+
+def update_pose_safety_ambiguity(
+    *,
+    inference_succeeded,
+    previous_unassigned_candidate_count,
+    observed_unassigned_candidate_count,
+):
+    """Retain the previous ambiguity result when pose inference fails."""
+    count = (
+        int(observed_unassigned_candidate_count)
+        if inference_succeeded
+        else int(previous_unassigned_candidate_count)
+    )
+    if count < 0:
+        raise ValueError("unassigned candidate count must be non-negative")
+    return count, count > 0
+
+
+def count_unassigned_pose_candidates(
+    per_cam_candidates,
+    assignments,
+    *,
+    pose_raw_counts=None,
+):
+    """Count assigned misses plus raw people rejected during pose extraction."""
+    assigned = {
+        (cam, int(candidate_idx))
+        for camera_selection in (assignments or {}).values()
+        for cam, candidate_idx in camera_selection.items()
+    }
+    unassigned_extracted = sum(
+        (cam, candidate_idx) not in assigned
+        for cam, candidates in (per_cam_candidates or {}).items()
+        for candidate_idx in range(len(candidates))
+    )
+    rejected_raw = sum(
+        max(
+            0,
+            int(raw_count) - len((per_cam_candidates or {}).get(cam, ())),
+        )
+        for cam, raw_count in (pose_raw_counts or {}).items()
+    )
+    return unassigned_extracted + rejected_raw
+
+
+def build_firing_line_safety_snapshot(
+    *,
+    snapshot_ts,
+    frame_idx,
+    y_max_mm,
+    y_mirrored,
+    multi_person,
+    primary_track_id,
+    primary_epoch,
+    tracks,
+    primary_state,
+    secondary_states,
+    ambiguous_detections,
+    unassigned_candidate_count,
+):
+    """Build JSON-ready all-person pose telemetry for the firing-line gate.
+
+    Face names, scores, and embeddings are intentionally ignored.  Track ID
+    zero is reserved for diagnostic single-person telemetry; associated
+    multi-person tracks must use positive IDs.
+    """
+    frame = int(frame_idx)
+    primary_id = int(primary_track_id)
+    epoch = int(primary_epoch)
+    unassigned = int(unassigned_candidate_count)
+    is_multi_person = bool(multi_person)
+    if is_multi_person and primary_id <= 0:
+        raise ValueError("multi-person primary_track_id must be positive")
+    if not is_multi_person and primary_id != 0:
+        raise ValueError("single-person primary_track_id must be zero")
+    if epoch < 0:
+        raise ValueError("primary_epoch must be non-negative")
+    if not is_multi_person and epoch != 0:
+        raise ValueError("single-person primary_epoch must be zero")
+    if unassigned < 0:
+        raise ValueError("unassigned_candidate_count must be non-negative")
+
+    tracks = {int(track_id): track for track_id, track in (tracks or {}).items()}
+    secondary_states = secondary_states or {}
+    if is_multi_person:
+        track_ids = sorted(tracks)
+        if any(track_id <= 0 for track_id in track_ids):
+            raise ValueError("multi-person track IDs must be positive")
+        if primary_id not in tracks:
+            raise ValueError(
+                "multi-person primary_track_id must exist in active tracks"
+            )
+    else:
+        if primary_id not in tracks:
+            raise ValueError(
+                "single-person primary_track_id must exist in active tracks"
+            )
+        track_ids = [0]
+
+    def track_last_seen_frame(track_id):
+        track = tracks.get(track_id)
+        if isinstance(track, dict):
+            if "last_seen_frame" not in track:
+                raise ValueError("track_last_seen_frame is required")
+            value = track["last_seen_frame"]
+        else:
+            if not hasattr(track, "last_seen_frame"):
+                raise ValueError("track_last_seen_frame is required")
+            value = track.last_seen_frame
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("track_last_seen_frame must be an integer") from exc
+
+    def state_joints(state):
+        if not isinstance(state, dict):
+            return {}
+        points = np.asarray(state.get("joints", ()), dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] < 3:
+            return {}
+        confidence = np.asarray(state.get("conf", ()), dtype=np.float64).reshape(-1)
+        camera_counts = np.asarray(state.get("cams", ())).reshape(-1)
+        last_seen = (
+            np.asarray(state["last_seen"]).reshape(-1)
+            if "last_seen" in state
+            else None
+        )
+        joints = {}
+        for joint_idx, joint_name in sorted(IDX_TO_JOINT_NAME.items()):
+            if joint_idx >= len(points):
+                continue
+            point = points[joint_idx, :3]
+            if not np.isfinite(point).all():
+                continue
+            if last_seen is None or joint_idx >= len(last_seen):
+                raise ValueError(
+                    f"joint last_seen metadata is required for {joint_name}"
+                )
+            try:
+                joint_last_seen = int(last_seen[joint_idx])
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"joint last_seen metadata is invalid for {joint_name}"
+                ) from exc
+            point_udp = transform_world_point_y(
+                point, y_max_mm, enabled=bool(y_mirrored)
+            )
+            joint_confidence = (
+                float(confidence[joint_idx])
+                if joint_idx < len(confidence)
+                and np.isfinite(confidence[joint_idx])
+                else 0.0
+            )
+            joints[joint_name] = {
+                "x_mm": float(point_udp[0]),
+                "y_mm": float(point_udp[1]),
+                "z_mm": float(point_udp[2]),
+                "conf": joint_confidence,
+                "cams": (
+                    int(camera_counts[joint_idx])
+                    if joint_idx < len(camera_counts)
+                    else 0
+                ),
+                "last_seen_frame": joint_last_seen,
+            }
+        return joints
+
+    people = []
+    for track_id in track_ids:
+        is_primary = track_id == primary_id
+        state = primary_state if is_primary else secondary_states.get(track_id)
+        people.append(
+            {
+                "track_id": track_id,
+                "primary": is_primary,
+                "track_last_seen_frame": track_last_seen_frame(track_id),
+                "joints": state_joints(state),
+            }
+        )
+
+    return {
+        "schema": "project_cam.firing_line.v1",
+        "snapshot_ts": float(snapshot_ts),
+        "frame": frame,
+        "geometry_id": "world_mm",
+        "y_mirrored": bool(y_mirrored),
+        "mode": "multi_person" if is_multi_person else "single_person",
+        "primary_track_id": primary_id,
+        "primary_epoch": epoch,
+        "observed_person_count": len(people),
+        "ambiguous_detections": bool(ambiguous_detections),
+        "unassigned_candidate_count": unassigned,
+        "people": people,
+    }
+
+
 def flatten_predictions(preds):
     out = []
     if not preds:
@@ -3054,7 +3294,15 @@ def main():
             udp_joint_indices_needed.add(JOINT_NAME_TO_IDX["right_hip"])
         elif idx is not None:
             udp_joint_indices_needed.add(idx)
-    triangulated_joint_indices = list(range(17)) if (args.show_3d or args.coach_overlay) else sorted(udp_joint_indices_needed)
+    triangulated_joint_indices = (
+        list(range(17))
+        if (
+            args.show_3d
+            or args.coach_overlay
+            or (args.multi_person > 1 and udp_sock is not None)
+        )
+        else sorted(udp_joint_indices_needed)
+    )
 
     ball_needed = args.track_ball and (args.show_3d or args.show_2d)
     pose_needed = args.show_2d or args.coach_overlay or bool(triangulated_joint_indices)
@@ -3291,6 +3539,12 @@ def main():
     mp_tracker = None
     mp_states = {}
     mp_primary_tid = None
+    mp_primary_epoch = 0
+    last_pose_safety_ts = None
+    last_pose_frame = 0
+    safety_unassigned_candidate_count = 0
+    safety_ambiguous_detections = False
+    latest_safety_snapshot = None
     face_identifier = None
     face_gallery = None
     face_voters = {}
@@ -3603,6 +3857,7 @@ def main():
             mp_measurements_by_tid = {}
             pose_every_eff = args.pose_every if pose_lock_active else pose_reacquire_every
             run_pose = (pose_infer is not None or yolopose_model is not None) and (frame_idx % pose_every_eff == 0)
+            pose_inference_succeeded = False
             per_cam_pose_curr = {}
             pose_und_by_cam = {}
             per_cam_all_cands = {}
@@ -3628,6 +3883,11 @@ def main():
                         yolopose_model,
                         frame_batch,
                         **yp_kwargs,
+                    )
+                    pose_inference_succeeded = pose_inference_results_complete(
+                        yp_results,
+                        expected_count=len(frame_batch),
+                        require_dict=False,
                     )
                 except Exception as exc:
                     pose_error = repr(exc)
@@ -3686,6 +3946,11 @@ def main():
                 # MMPose path (original)
                 try:
                     res_list = list(pose_infer(frame_batch, return_vis=False, batch_size=len(frame_batch)))
+                    pose_inference_succeeded = pose_inference_results_complete(
+                        res_list,
+                        expected_count=len(frame_batch),
+                        require_dict=True,
+                    )
                 except Exception as exc:
                     pose_error = repr(exc)
                     res_list = []
@@ -3720,7 +3985,17 @@ def main():
                     else:
                         per_cam_pose_state.pop(cam, None)
 
-            if run_pose and mp_tracker is not None:
+            last_pose_safety_ts, last_pose_frame = (
+                update_pose_safety_observation(
+                    inference_succeeded=pose_inference_succeeded,
+                    observation_ts=t_now,
+                    frame_idx=frame_idx,
+                    previous_ts=last_pose_safety_ts,
+                    previous_frame=last_pose_frame,
+                )
+            )
+
+            if pose_inference_succeeded and mp_tracker is not None:
                 mp_assignments = mp_tracker.step(
                     frame_idx,
                     per_cam_all_cands,
@@ -3743,6 +4018,11 @@ def main():
                     viable_primary_tracks,
                 )
                 if next_primary_tid != mp_primary_tid:
+                    mp_primary_epoch = advance_primary_epoch(
+                        primary_epoch=mp_primary_epoch,
+                        current_track_id=mp_primary_tid,
+                        next_track_id=next_primary_tid,
+                    )
                     if mp_primary_tid is not None:
                         old_state = mp_states.setdefault(
                             mp_primary_tid, make_secondary_pose_state()
@@ -3848,6 +4128,30 @@ def main():
                     pose_pair = (selected["kpts"], selected["scores"])
                     per_cam_pose_curr[cam] = pose_pair
                     per_cam_pose_state[cam] = pose_pair
+
+            observed_unassigned_candidate_count = 0
+            if pose_inference_succeeded:
+                observed_unassigned_candidate_count = (
+                    count_unassigned_pose_candidates(
+                        per_cam_all_cands,
+                        mp_assignments,
+                        pose_raw_counts=pose_raw_counts,
+                    )
+                    if mp_tracker is not None
+                    else 0
+                )
+            (
+                safety_unassigned_candidate_count,
+                safety_ambiguous_detections,
+            ) = update_pose_safety_ambiguity(
+                inference_succeeded=pose_inference_succeeded,
+                previous_unassigned_candidate_count=(
+                    safety_unassigned_candidate_count
+                ),
+                observed_unassigned_candidate_count=(
+                    observed_unassigned_candidate_count
+                ),
+            )
 
             # --- Shared post-processing for both YOLO-Pose and MMPose ---
             if run_pose:
@@ -4621,6 +4925,55 @@ def main():
                         "conf": conf,
                         "cams": cams,
                     }
+                if pose_inference_succeeded:
+                    # Replace the complete cached observation atomically.  A
+                    # failed inference tick leaves this JSON-only snapshot
+                    # untouched, including tracks and ambiguity metadata.
+                    latest_safety_snapshot = None
+                    safety_multi_person = mp_tracker is not None
+                    safety_primary_track_id = (
+                        mp_primary_tid if safety_multi_person else 0
+                    )
+                    safety_tracks = (
+                        mp_tracker.tracks
+                        if safety_multi_person
+                        else {0: {"last_seen_frame": last_pose_frame}}
+                    )
+                    if safety_primary_track_id is not None:
+                        try:
+                            latest_safety_snapshot = build_firing_line_safety_snapshot(
+                                snapshot_ts=last_pose_safety_ts,
+                                frame_idx=last_pose_frame,
+                                y_max_mm=dims["Y"],
+                                y_mirrored=udp_world_y_mirror,
+                                multi_person=safety_multi_person,
+                                primary_track_id=safety_primary_track_id,
+                                primary_epoch=(
+                                    mp_primary_epoch
+                                    if safety_multi_person
+                                    else 0
+                                ),
+                                tracks=safety_tracks,
+                                primary_state={
+                                    "joints": joints_state,
+                                    "conf": joints_conf_state,
+                                    "cams": joints_cam_state,
+                                    "last_seen": joint_last_seen_frame,
+                                },
+                                secondary_states=(
+                                    mp_states if safety_multi_person else {}
+                                ),
+                                ambiguous_detections=(
+                                    safety_ambiguous_detections
+                                ),
+                                unassigned_candidate_count=(
+                                    safety_unassigned_candidate_count
+                                ),
+                            )
+                        except ValueError:
+                            # Missing/invalid safety telemetry cannot authorize
+                            # fire, but it must not terminate the live viewer.
+                            pass
                 if joints_payload:
                     pkt = {
                         "type": "joints",
@@ -4628,6 +4981,8 @@ def main():
                         "frame": frame_idx,
                         "joints": joints_payload,
                     }
+                    if latest_safety_snapshot is not None:
+                        pkt["safety"] = latest_safety_snapshot
                     # Add predicted positions when prediction is active
                     if use_prediction:
                         pred_payload = {}
