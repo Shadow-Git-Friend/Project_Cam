@@ -46,6 +46,32 @@ def resolve_venv_python(repo_root=REPO_ROOT, fallback=sys.executable) -> str:
     return str(fallback)
 
 
+def parse_multi_people(raw, enabled):
+    if not enabled:
+        return 1
+    try:
+        people = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise ValueError("People count must be an integer from 2 to 6") from None
+    if not 2 <= people <= 6:
+        raise ValueError("People count must be from 2 to 6")
+    return people
+
+
+def process_group_alive(pgid):
+    if pgid is None:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 def build_live_command(
     *,
     repo_root,
@@ -620,7 +646,12 @@ class ArenaControlCenter:
         self.root = root
         self.python = resolve_venv_python()
         self.proc = None
+        self.proc_pgid = None
+        self.proc_exit_code = None
         self.proc_title = ""
+        self.proc_generation = 0
+        self.shutdown_stage = 0
+        self.shutdown_timer = None
         self.messages = queue.Queue()
         self.closing = False
 
@@ -646,7 +677,7 @@ class ArenaControlCenter:
         self.log_font = (mono_family, 10)
 
         self.multi_enabled = tk.BooleanVar(root, value=True)
-        self.multi_people = tk.IntVar(root, value=4)
+        self.multi_people = tk.StringVar(root, value="4")
         self.face_id = tk.BooleanVar(root, value=False)
         self.auto_orbit = tk.BooleanVar(root, value=False)
         self.limb_heat = tk.BooleanVar(root, value=False)
@@ -1188,7 +1219,13 @@ class ArenaControlCenter:
     # -- actions ----------------------------------------------------------------
 
     def launch_live(self, spec):
-        people = self.multi_people.get() if self.multi_enabled.get() else 1
+        try:
+            people = parse_multi_people(
+                self.multi_people.get(), self.multi_enabled.get()
+            )
+        except ValueError as exc:
+            self._log(f"Invalid people count: {exc}", "err")
+            return
         command = build_live_command(
             repo_root=REPO_ROOT,
             script=spec.script,
@@ -1226,16 +1263,24 @@ class ArenaControlCenter:
     # -- process management -------------------------------------------------------
 
     def _spawn(self, command, title):
-        if self.proc is not None and self.proc.poll() is None:
+        current_pgid = getattr(self, "proc_pgid", None)
+        if current_pgid is not None and process_group_alive(current_pgid):
             self._log("A pipeline is already running; stop it first", "err")
             return
+        if self.proc is not None and current_pgid is not None:
+            code = self.proc_exit_code
+            if code is None:
+                code = self.proc.poll()
+            self._finish_current_process(0 if code is None else code)
         try:
-            self.proc = subprocess.Popen(
+            process = subprocess.Popen(
                 command,
                 cwd=REPO_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 start_new_session=True,
                 env=dict(os.environ, PYTHONUNBUFFERED="1"),
@@ -1243,33 +1288,138 @@ class ArenaControlCenter:
         except OSError as exc:
             self._log(f"Launch failed: {exc}", "err")
             self.proc = None
+            self.proc_pgid = None
+            self.proc_exit_code = None
             return
+        self._cancel_shutdown_timer()
+        self.proc_generation = getattr(self, "proc_generation", 0) + 1
+        generation = self.proc_generation
+        self.proc = process
+        self.proc_pgid = process.pid
+        self.proc_exit_code = None
+        self.shutdown_stage = 0
         self.proc_title = title
         self.command.set(shlex.join(command))
         self._set_status_running(title)
         self._log("$ " + shlex.join(command), "cmd")
         self._set_interlock(True)
         self._show_view("CONTROL")
-        threading.Thread(target=self._read_child, args=(self.proc,),
+        threading.Thread(target=self._read_child, args=(process, generation),
                          daemon=True).start()
 
-    def _read_child(self, process):
+    def _read_child(self, process, generation):
         try:
             if process.stdout is not None:
                 for line in process.stdout:
-                    self.messages.put(("line", line.rstrip()))
+                    self.messages.put(
+                        ("line", process, generation, line.rstrip())
+                    )
         finally:
-            self.messages.put(("exit", process.wait()))
+            self.messages.put(("exit", process, generation, process.wait()))
 
     def stop(self):
-        if self.proc is None or self.proc.poll() is not None:
+        process = self.proc
+        pgid = self.proc_pgid
+        if process is None or pgid is None:
             return
+        self._advance_shutdown(process, self.proc_generation, pgid)
+
+    def _advance_shutdown(self, process, generation, pgid):
+        if (
+            self.proc is not process
+            or self.proc_generation != generation
+            or self.proc_pgid != pgid
+        ):
+            return
+        if not process_group_alive(pgid):
+            self._finish_current_process(self._current_exit_code(process))
+            return
+
+        stage = self.shutdown_stage
+        if stage == 0:
+            sig = signal.SIGINT
+            next_stage = 1
+            delay = 10_000
+            message = "SIGINT sent; waiting for clean shutdown"
+        elif stage == 1:
+            sig = signal.SIGTERM
+            next_stage = 2
+            delay = 3_000
+            message = "SIGTERM sent; waiting for forced shutdown"
+        elif stage == 2:
+            sig = signal.SIGKILL
+            next_stage = 3
+            delay = None
+            message = "SIGKILL sent; waiting for process exit"
+        else:
+            return
+
+        self._cancel_shutdown_timer()
+        self.shutdown_stage = next_stage
         try:
-            os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
-            self._log("SIGINT sent; waiting for clean shutdown", "sys")
-            self.stop_button.configure(state="disabled")
+            os.killpg(pgid, sig)
+            self._log(message, "sys")
         except OSError as exc:
-            self._log(f"Stop failed: {exc}", "err")
+            self._log(f"Shutdown signal failed: {exc}", "err")
+
+        if not process_group_alive(pgid):
+            self._finish_current_process(self._current_exit_code(process))
+        elif delay is not None:
+            self.shutdown_timer = self.root.after(
+                delay,
+                self._shutdown_timeout,
+                process,
+                generation,
+                pgid,
+                next_stage,
+            )
+        elif next_stage == 3:
+            self.stop_button.configure(state="disabled")
+
+    def _shutdown_timeout(self, process, generation, pgid, expected_stage):
+        if (
+            self.proc is not process
+            or self.proc_generation != generation
+            or self.proc_pgid != pgid
+            or self.shutdown_stage != expected_stage
+        ):
+            return
+        self.shutdown_timer = None
+        self._advance_shutdown(process, generation, pgid)
+
+    def _current_exit_code(self, process):
+        code = self.proc_exit_code
+        if code is None:
+            code = process.poll()
+        return 0 if code is None else int(code)
+
+    def _finish_current_process(self, code):
+        code = int(code)
+        self._log(f"{self.proc_title} exited with code {code}",
+                  "sys" if code in (0, 130, -2) else "err")
+        self._set_status_idle(
+            "IDLE" if code in (0, 130, -2) else f"EXITED {code}")
+        self._cancel_shutdown_timer()
+        self.proc = None
+        self.proc_pgid = None
+        self.proc_exit_code = None
+        self.shutdown_stage = 0
+        self._set_interlock(False)
+        self._render_readiness()
+        if self.closing:
+            self.root.destroy()
+            return True
+        return False
+
+    def _cancel_shutdown_timer(self):
+        timer = getattr(self, "shutdown_timer", None)
+        if timer is None:
+            return
+        self.shutdown_timer = None
+        try:
+            self.root.after_cancel(timer)
+        except tk.TclError:
+            pass
 
     def _set_status_running(self, title):
         self.status.set("● RUNNING  /  " + title)
@@ -1287,24 +1437,41 @@ class ArenaControlCenter:
         self.stop_button.configure(state="normal" if running else "disabled")
 
     def _pump(self):
+        destroy_after_exit = False
         try:
             while True:
-                kind, payload = self.messages.get_nowait()
+                kind, process, generation, payload = self.messages.get_nowait()
+                if (
+                    process is not self.proc
+                    or generation != self.proc_generation
+                ):
+                    continue
                 if kind == "line":
                     self._log(str(payload))
                 else:
                     code = int(payload)
-                    self._log(f"{self.proc_title} exited with code {code}",
-                              "sys" if code in (0, 130, -2) else "err")
-                    self._set_status_idle(
-                        "IDLE" if code in (0, 130, -2) else f"EXITED {code}")
-                    self.proc = None
-                    self._set_interlock(False)
-                    self._render_readiness()
+                    self.proc_exit_code = code
+                    if process_group_alive(self.proc_pgid):
+                        self._log(
+                            f"{self.proc_title} leader exited with code {code}; "
+                            "process group still running",
+                            "sys",
+                        )
+                    else:
+                        destroy_after_exit = self._finish_current_process(code)
         except queue.Empty:
             pass
-        if not self.closing:
-            self.root.after(60, self._pump)
+        if (
+            self.proc is not None
+            and self.proc_exit_code is not None
+            and not process_group_alive(self.proc_pgid)
+        ):
+            destroy_after_exit = self._finish_current_process(
+                self.proc_exit_code
+            )
+        if destroy_after_exit:
+            return
+        self.root.after(60, self._pump)
 
     def _log(self, text, tag=None):
         self.log.configure(state="normal")
@@ -1315,12 +1482,11 @@ class ArenaControlCenter:
 
     def close(self):
         self.closing = True
-        if self.proc is not None and self.proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
-            except OSError:
-                pass
-        self.root.destroy()
+        if self.proc is None or self.proc_pgid is None:
+            self._cancel_shutdown_timer()
+            self.root.destroy()
+            return
+        self.stop()
 
 
 def build_parser():
