@@ -54,7 +54,11 @@ def choose_enrollment_face(
 
 
 def list_gallery(path) -> int:
-    gallery = FaceGallery.load(path)
+    try:
+        gallery = FaceGallery.load(path)
+    except (OSError, EOFError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
     print(f"Gallery: {Path(path).expanduser()}")
     if not len(gallery):
         print("  (empty)")
@@ -65,13 +69,17 @@ def list_gallery(path) -> int:
 
 
 def remove_identity(path, name: str) -> int:
-    name = validate_identity_name(name)
-    gallery = FaceGallery.load(path)
-    removed = gallery.remove(name)
-    if not removed:
-        print(f"Identity not found: {name}")
+    try:
+        name = validate_identity_name(name)
+        gallery = FaceGallery.load(path)
+        removed = gallery.remove(name)
+        if not removed:
+            print(f"Identity not found: {name}")
+            return 1
+        saved = gallery.save(path)
+    except (OSError, EOFError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
-    saved = gallery.save(path)
     print(f"Removed {name}: {removed} sample(s); gallery={saved}")
     return 0
 
@@ -244,12 +252,16 @@ def main(argv=None) -> int:
         )
         return 1
 
-    gallery = FaceGallery.load(args.gallery)
-    if args.replace:
-        gallery.remove(name)
-    for embedding in embeddings[:samples]:
-        gallery.add(name, embedding)
-    saved = gallery.save(args.gallery)
+    try:
+        gallery = FaceGallery.load(args.gallery)
+        if args.replace:
+            gallery.remove(name)
+        for embedding in embeddings[:samples]:
+            gallery.add(name, embedding)
+        saved = gallery.save(args.gallery)
+    except (OSError, EOFError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
     print(f"[DONE] Enrolled {name}: {samples} samples -> {saved}")
     print("Reminder: local face labels are not anti-spoof/liveness authentication.")
     return 0

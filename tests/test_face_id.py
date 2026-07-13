@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
+import sys
+import types
+import zipfile
 
 import numpy as np
 import pytest
 
+from project_cam.tracking import face_id as face_id_module
 from project_cam.tracking.face_id import (
     SFACE_DIM,
     FaceGallery,
+    FaceIdentifier,
     NameVoter,
     associate_faces_to_tracks,
     default_face_gallery_path,
@@ -75,17 +80,138 @@ def test_gallery_suffixless_round_trip_is_atomic_private_and_not_truncated(tmp_p
     np.testing.assert_allclose(loaded.embeddings, gallery.embeddings)
 
 
-def test_gallery_load_rejects_malformed_row_count(tmp_path):
+@pytest.mark.parametrize(
+    ("names", "embeddings", "meta_json", "cause_match"),
+    [
+        (["Alice"], np.ones((1, 3), dtype=np.float32), "{}", "shape"),
+        (
+            ["Alice"],
+            np.stack([embedding(0), embedding(1)]),
+            "{}",
+            "row count",
+        ),
+        (
+            ["Alice"],
+            np.zeros((1, SFACE_DIM), dtype=np.float32),
+            "{}",
+            "zero vector",
+        ),
+        (
+            ["Alice"],
+            np.full((1, SFACE_DIM), np.nan, dtype=np.float32),
+            "{}",
+            "finite",
+        ),
+        (["Alice"], embedding(0)[None, :], "{", "Expecting"),
+        (["Alice"], embedding(0)[None, :], "[]", "JSON object"),
+    ],
+    ids=[
+        "embedding-shape",
+        "row-count",
+        "zero-embedding",
+        "nonfinite-embedding",
+        "metadata-json",
+        "metadata-object",
+    ],
+)
+def test_gallery_load_wraps_corrupt_gallery_data_with_path_and_cause(
+    tmp_path, names, embeddings, meta_json, cause_match
+):
     path = tmp_path / "broken.npz"
     with path.open("wb") as fh:
         np.savez(
             fh,
-            names=np.array(["Alice"]),
-            embeddings=np.stack([embedding(0), embedding(1)]),
-            meta_json=np.array("{}"),
+            names=np.asarray(names),
+            embeddings=embeddings,
+            meta_json=np.asarray(meta_json),
         )
-    with pytest.raises(ValueError, match="names"):
+
+    with pytest.raises(ValueError) as caught:
         FaceGallery.load(path)
+
+    assert str(path) in str(caught.value)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert cause_match in str(caught.value.__cause__)
+
+
+def test_gallery_load_wraps_numpy_payload_that_is_not_an_npz_archive(tmp_path):
+    path = tmp_path / "disguised.npz"
+    with path.open("wb") as fh:
+        np.save(fh, embedding(0))
+
+    with pytest.raises(ValueError) as caught:
+        FaceGallery.load(path)
+
+    assert str(path) in str(caught.value)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert "NPZ" in str(caught.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [np.asarray("Alice"), np.asarray([["Alice"]])],
+    ids=["scalar", "two-dimensional"],
+)
+def test_gallery_load_wraps_non_vector_names_array(tmp_path, names):
+    path = tmp_path / "broken-names.npz"
+    with path.open("wb") as fh:
+        np.savez(
+            fh,
+            names=names,
+            embeddings=embedding(0)[None, :],
+            meta_json=np.asarray("{}"),
+        )
+
+    with pytest.raises(ValueError) as caught:
+        FaceGallery.load(path)
+
+    assert str(path) in str(caught.value)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert "names" in str(caught.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    "load_error",
+    [
+        OSError("read failed"),
+        EOFError("truncated archive"),
+        ValueError("invalid array data"),
+        zipfile.BadZipFile("invalid zip archive"),
+    ],
+    ids=["os-error", "eof-error", "value-error", "bad-zip"],
+)
+def test_gallery_load_wraps_known_archive_errors_with_path_and_cause(
+    monkeypatch, tmp_path, load_error
+):
+    path = tmp_path / "corrupt.npz"
+    path.touch()
+
+    def fail_load(*_args, **_kwargs):
+        raise load_error
+
+    monkeypatch.setattr(face_id_module.np, "load", fail_load)
+
+    with pytest.raises(ValueError) as caught:
+        FaceGallery.load(path)
+
+    assert str(path) in str(caught.value)
+    assert caught.value.__cause__ is load_error
+
+
+def test_gallery_load_does_not_mask_unexpected_errors(monkeypatch, tmp_path):
+    path = tmp_path / "gallery.npz"
+    path.touch()
+    unexpected = RuntimeError("unexpected loader failure")
+
+    def fail_load(*_args, **_kwargs):
+        raise unexpected
+
+    monkeypatch.setattr(face_id_module.np, "load", fail_load)
+
+    with pytest.raises(RuntimeError) as caught:
+        FaceGallery.load(path)
+
+    assert caught.value is unexpected
 
 
 def test_remove_identity_and_empty_gallery_shape():
@@ -161,6 +287,55 @@ def test_model_path_error_names_missing_files(tmp_path):
     assert "face_detection_yunet_2023mar.onnx" in message
     assert "face_recognition_sface_2021dec.onnx" in message
     assert "download_face_models.py" in message
+
+
+@pytest.mark.parametrize(
+    ("failing_factory", "model_name", "path_index"),
+    [
+        ("detector", "YuNet", 0),
+        ("recognizer", "SFace", 1),
+    ],
+)
+def test_face_identifier_wraps_each_opencv_model_constructor_error(
+    monkeypatch, tmp_path, failing_factory, model_name, path_index
+):
+    detector_path = tmp_path / "detector.onnx"
+    recognizer_path = tmp_path / "recognizer.onnx"
+    model_paths = (detector_path, recognizer_path)
+    monkeypatch.setattr(
+        face_id_module,
+        "resolve_face_model_paths",
+        lambda _models_dir: model_paths,
+    )
+
+    class FakeCvError(Exception):
+        pass
+
+    failure = FakeCvError("OpenCV constructor failed")
+    fake_cv2 = types.ModuleType("cv2")
+    fake_cv2.error = FakeCvError
+
+    def create_detector(*_args):
+        if failing_factory == "detector":
+            raise failure
+        return object()
+
+    def create_recognizer(*_args):
+        if failing_factory == "recognizer":
+            raise failure
+        return object()
+
+    fake_cv2.FaceDetectorYN_create = create_detector
+    fake_cv2.FaceRecognizerSF_create = create_recognizer
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+
+    with pytest.raises(ValueError) as caught:
+        FaceIdentifier(tmp_path)
+
+    message = str(caught.value)
+    assert model_name in message
+    assert str(model_paths[path_index]) in message
+    assert caught.value.__cause__ is failure
 
 
 def test_default_gallery_uses_private_xdg_data_home(monkeypatch, tmp_path):

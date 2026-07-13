@@ -125,6 +125,129 @@ def test_gallery_list_and_remove_actions_are_headless(tmp_path, capsys):
     assert FaceGallery.load(path).people() == {}
 
 
+@pytest.mark.parametrize(
+    ("action", "module_name"),
+    [
+        (["--list"], "face_enroll_corrupt_list"),
+        (["--remove", "Alice"], "face_enroll_corrupt_remove"),
+    ],
+)
+def test_gallery_actions_report_corrupt_gallery_without_traceback(
+    tmp_path, capsys, action, module_name
+):
+    module = load_script(ENROLL, module_name)
+    path = tmp_path / "corrupt.npz"
+    path.write_bytes(b"not an npz archive")
+
+    result = module.main([*action, "--gallery", str(path)])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.err.startswith("[ERROR] ")
+    assert str(path) in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_remove_reports_gallery_save_error_without_traceback(
+    monkeypatch, tmp_path, capsys
+):
+    module = load_script(ENROLL, "face_enroll_remove_save_error")
+
+    class Gallery:
+        def remove(self, _name):
+            return 1
+
+        def save(self, _path):
+            raise OSError("gallery disk is full")
+
+    class GalleryLoader:
+        @staticmethod
+        def load(_path):
+            return Gallery()
+
+    monkeypatch.setattr(module, "FaceGallery", GalleryLoader)
+
+    result = module.main(
+        ["--remove", "Alice", "--gallery", str(tmp_path / "gallery.npz")]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.err == "[ERROR] gallery disk is full\n"
+    assert "Traceback" not in captured.err
+
+
+def _stub_image_enrollment(module, monkeypatch):
+    accepted = np.zeros(SFACE_DIM, dtype=np.float32)
+    accepted[0] = 1.0
+    monkeypatch.setattr(module, "FaceIdentifier", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        module,
+        "embeddings_from_images",
+        lambda *_args, **_kwargs: [accepted],
+    )
+
+
+def _image_enrollment_args(tmp_path, gallery_path):
+    return [
+        "--name",
+        "Alice",
+        "--image",
+        str(tmp_path / "face.jpg"),
+        "--samples",
+        "1",
+        "--gallery",
+        str(gallery_path),
+    ]
+
+
+def test_enrollment_reports_final_gallery_load_error_without_traceback(
+    monkeypatch, tmp_path, capsys
+):
+    module = load_script(ENROLL, "face_enroll_final_load_error")
+    _stub_image_enrollment(module, monkeypatch)
+    path = tmp_path / "corrupt.npz"
+    path.write_bytes(b"not an npz archive")
+
+    result = module.main(_image_enrollment_args(tmp_path, path))
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.err.startswith("[ERROR] ")
+    assert str(path) in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_enrollment_reports_final_gallery_save_error_without_traceback(
+    monkeypatch, tmp_path, capsys
+):
+    module = load_script(ENROLL, "face_enroll_final_save_error")
+    _stub_image_enrollment(module, monkeypatch)
+
+    class Gallery:
+        def add(self, _name, _embedding):
+            pass
+
+        def save(self, _path):
+            raise OSError("gallery disk is full")
+
+    class GalleryLoader:
+        @staticmethod
+        def load(_path):
+            return Gallery()
+
+    monkeypatch.setattr(module, "FaceGallery", GalleryLoader)
+
+    result = module.main(
+        _image_enrollment_args(tmp_path, tmp_path / "gallery.npz")
+    )
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.err == "[ERROR] gallery disk is full\n"
+    assert "Traceback" not in captured.err
+
+
 @pytest.mark.parametrize("script", [DOWNLOAD, ENROLL])
 def test_face_cli_help_is_headless(script):
     result = subprocess.run(

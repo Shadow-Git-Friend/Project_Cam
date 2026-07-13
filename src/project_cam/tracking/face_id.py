@@ -12,6 +12,7 @@ import os
 import tempfile
 import time
 import unicodedata
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -61,6 +62,40 @@ def _normalize_embedding(value) -> np.ndarray:
     return embedding / norm
 
 
+def _load_gallery_data(source: Path) -> Tuple[List[str], np.ndarray, dict]:
+    loaded = np.load(source, allow_pickle=False)
+    if not isinstance(loaded, np.lib.npyio.NpzFile):
+        raise ValueError("gallery must be an NPZ archive")
+    with loaded as data:
+        if "names" not in data or "embeddings" not in data:
+            raise ValueError("gallery must contain names and embeddings")
+        names_raw = np.asarray(data["names"])
+        if names_raw.ndim != 1:
+            raise ValueError(
+                f"gallery names must be a one-dimensional array, got {names_raw.shape}"
+            )
+        names = [validate_identity_name(str(name)) for name in names_raw]
+        embeddings = np.asarray(data["embeddings"], dtype=np.float32)
+        meta_raw = str(data["meta_json"]) if "meta_json" in data else "{}"
+
+    if embeddings.ndim != 2 or embeddings.shape[1:] != (SFACE_DIM,):
+        raise ValueError(
+            f"gallery embeddings must have shape (N, {SFACE_DIM}), got {embeddings.shape}"
+        )
+    if len(names) != embeddings.shape[0]:
+        raise ValueError("gallery names row count must match embeddings row count")
+    normalized = [_normalize_embedding(row) for row in embeddings]
+    loaded_embeddings = (
+        np.asarray(normalized, dtype=np.float32)
+        if normalized
+        else np.zeros((0, SFACE_DIM), dtype=np.float32)
+    )
+    meta = json.loads(meta_raw)
+    if not isinstance(meta, dict):
+        raise ValueError("gallery metadata must be a JSON object")
+    return names, loaded_embeddings, meta
+
+
 class FaceGallery:
     """A local set of normalized SFace embeddings grouped by display name."""
 
@@ -76,38 +111,12 @@ class FaceGallery:
         if not source.exists():
             return gallery
         try:
-            with np.load(source, allow_pickle=False) as data:
-                if "names" not in data or "embeddings" not in data:
-                    raise ValueError("gallery must contain names and embeddings")
-                names = [validate_identity_name(str(name)) for name in data["names"]]
-                embeddings = np.asarray(data["embeddings"], dtype=np.float32)
-                meta_raw = str(data["meta_json"]) if "meta_json" in data else "{}"
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, ValueError) and str(exc).startswith("gallery"):
-                raise
+            names, embeddings, meta = _load_gallery_data(source)
+        except (OSError, EOFError, ValueError, zipfile.BadZipFile) as exc:
             raise ValueError(f"cannot load face gallery {source}: {exc}") from exc
-
-        if embeddings.ndim != 2 or embeddings.shape[1:] != (SFACE_DIM,):
-            raise ValueError(
-                f"gallery embeddings must have shape (N, {SFACE_DIM}), got {embeddings.shape}"
-            )
-        if len(names) != embeddings.shape[0]:
-            raise ValueError(
-                "gallery names row count must match embeddings row count"
-            )
-        normalized = [_normalize_embedding(row) for row in embeddings]
         gallery.names = names
-        gallery.embeddings = (
-            np.asarray(normalized, dtype=np.float32)
-            if normalized
-            else np.zeros((0, SFACE_DIM), dtype=np.float32)
-        )
-        try:
-            gallery.meta = json.loads(meta_raw)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise ValueError(f"gallery metadata is invalid JSON: {exc}") from exc
-        if not isinstance(gallery.meta, dict):
-            raise ValueError("gallery metadata must be a JSON object")
+        gallery.embeddings = embeddings
+        gallery.meta = meta
         return gallery
 
     def save(self, path) -> Path:
@@ -347,15 +356,25 @@ class FaceIdentifier:
         detector_path, recognizer_path = resolve_face_model_paths(models_dir)
         self._cv2 = cv2
         self.det_width = int(det_width)
-        self.detector = cv2.FaceDetectorYN_create(
-            str(detector_path),
-            "",
-            (self.det_width, self.det_width),
-            float(score_thresh),
-            float(nms_thresh),
-            int(top_k),
-        )
-        self.recognizer = cv2.FaceRecognizerSF_create(str(recognizer_path), "")
+        try:
+            self.detector = cv2.FaceDetectorYN_create(
+                str(detector_path),
+                "",
+                (self.det_width, self.det_width),
+                float(score_thresh),
+                float(nms_thresh),
+                int(top_k),
+            )
+        except cv2.error as exc:
+            raise ValueError(
+                f"cannot load YuNet face detector model {detector_path}: {exc}"
+            ) from exc
+        try:
+            self.recognizer = cv2.FaceRecognizerSF_create(str(recognizer_path), "")
+        except cv2.error as exc:
+            raise ValueError(
+                f"cannot load SFace face recognizer model {recognizer_path}: {exc}"
+            ) from exc
         self._input_size = None
 
     def detect_and_encode(self, frame_bgr: np.ndarray) -> List[dict]:
