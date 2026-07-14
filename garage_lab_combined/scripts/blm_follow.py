@@ -40,6 +40,7 @@ Safety:
 
 import argparse
 import json
+import math
 import select
 import socket
 import sys
@@ -56,7 +57,12 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from project_cam.closed_loop import evaluate_joint_gate  # noqa: E402
+from project_cam.closed_loop import (  # noqa: E402
+    ArmedShotContext,
+    arm_shot_context,
+    evaluate_joint_gate,
+    request_shoot,
+)
 
 try:
     import serial
@@ -144,6 +150,7 @@ class UDPJointListener:
         self.port = port
         self.lock = threading.Lock()
         self.joints: Dict[str, dict] = {}
+        self.latest_safety: Optional[dict] = None
         self.last_packet_ts = 0.0
         self.packet_count = 0
         self._running = True
@@ -159,34 +166,44 @@ class UDPJointListener:
             try:
                 data, _ = sock.recvfrom(65535)
                 pkt = json.loads(data.decode("utf-8", errors="ignore"))
-                now = time.time()
-                with self.lock:
-                    self.last_packet_ts = now
-                    self.packet_count += 1
-                    joints_obj = pkt.get("joints", {})
-                    if isinstance(joints_obj, dict):
-                        for j, val in joints_obj.items():
-                            if not isinstance(val, dict):
-                                continue
-                            if not all(k in val for k in ("x_mm", "y_mm", "z_mm")):
-                                continue
-                            self.joints[j] = {
-                                "x_mm": float(val["x_mm"]),
-                                "y_mm": float(val["y_mm"]),
-                                "z_mm": float(val["z_mm"]),
-                                "conf": float(val.get("conf", 1.0)),
-                                "cams": int(val.get("cams", 0)),
-                                "ts": now,
-                            }
+                self._store_packet(pkt, received_at=time.time())
             except socket.timeout:
                 pass
             except Exception:
                 pass
         sock.close()
 
+    def _store_packet(self, pkt: dict, *, received_at: float) -> None:
+        """Atomically store joints and the safety object from one datagram."""
+        with self.lock:
+            self.last_packet_ts = received_at
+            self.packet_count += 1
+            safety = pkt.get("safety")
+            self.latest_safety = safety if isinstance(safety, dict) else None
+            joints_obj = pkt.get("joints", {})
+            if not isinstance(joints_obj, dict):
+                return
+            for j, val in joints_obj.items():
+                if not isinstance(val, dict):
+                    continue
+                if not all(k in val for k in ("x_mm", "y_mm", "z_mm")):
+                    continue
+                self.joints[j] = {
+                    "x_mm": float(val["x_mm"]),
+                    "y_mm": float(val["y_mm"]),
+                    "z_mm": float(val["z_mm"]),
+                    "conf": float(val.get("conf", 1.0)),
+                    "cams": int(val.get("cams", 0)),
+                    "ts": received_at,
+                }
+
     def get_joint(self, name: str) -> Optional[dict]:
         with self.lock:
             return self.joints.get(name)
+
+    def get_safety_snapshot(self) -> Optional[dict]:
+        with self.lock:
+            return self.latest_safety
 
     def stop(self):
         self._running = False
@@ -207,6 +224,205 @@ TARGETABLE_JOINTS = [
 
 def send_serial(ser, cmd_str):
     ser.write((cmd_str + "\n").encode())
+
+
+def commit_aim_command(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    expected_target: str,
+    expected_generation: int,
+    command: str,
+    command_v: float,
+    command_h: float,
+    armed_context: Optional[ArmedShotContext],
+    send_command: Callable[[str], None],
+) -> bool:
+    """Commit one serial aim and its context under the shoot-state lock."""
+    with state_lock:
+        if (
+            state.get("busy")
+            or not state.get("armed")
+            or state.get("target") != expected_target
+            or state.get("aim_generation") != expected_generation
+        ):
+            return False
+        send_command(command)
+        state["last_v"] = command_v
+        state["last_h"] = command_h
+        state["armed_context"] = armed_context
+        return True
+
+
+def send_fire_command_if_current(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    command: str,
+    expected_generation: int,
+    expected_context: Optional[ArmedShotContext],
+    send_command: Callable[[str], None],
+) -> None:
+    """Serialize fire output and reject stale shoot callbacks fail-closed."""
+    with state_lock:
+        if command == "shoot" and (
+            expected_context is None
+            or not state.get("busy")
+            or not state.get("armed")
+            or state.get("aim_generation") != expected_generation
+            or state.get("armed_context") is not expected_context
+        ):
+            raise RuntimeError("armed shot context was invalidated before serial send")
+        send_command(command)
+
+
+def send_reload_command_if_current(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    expected_generation: int,
+    send_command: Callable[[str], None],
+) -> bool:
+    """Send reload only while its exclusive-action generation still owns state."""
+    with state_lock:
+        if (
+            not state.get("busy")
+            or state.get("aim_generation") != expected_generation
+        ):
+            return False
+        send_command("reload")
+        return True
+
+
+def _invalidate_armed_aim_locked(state: dict) -> int:
+    """Clear one aim and advance its generation while the caller owns the lock."""
+    state["aim_generation"] = int(state.get("aim_generation", 0)) + 1
+    state["armed_context"] = None
+    state["last_v"] = None
+    state["last_h"] = None
+    return state["aim_generation"]
+
+
+def stop_and_release_launcher_action(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    send_command: Callable[[str], None],
+) -> bool:
+    """Fail one exclusive action closed before publishing it as no longer busy."""
+    with state_lock:
+        _invalidate_armed_aim_locked(state)
+        state["armed"] = False
+        stop_sent = True
+        try:
+            send_command("stop")
+        except Exception:
+            stop_sent = False
+        state["busy"] = False
+        return stop_sent
+
+
+def invalidate_operator_command(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    updates: dict,
+    shoot_enabled: bool,
+    send_command: Callable[[str], None],
+) -> bool:
+    """Publish an operator invalidation, then physically stop active hardware."""
+    with state_lock:
+        had_context = state.get("armed_context") is not None
+        action_active = bool(state.get("busy"))
+        state.update(updates)
+        _invalidate_armed_aim_locked(state)
+        if not shoot_enabled or not (had_context or action_active):
+            return False
+        try:
+            send_command("stop")
+        except Exception:
+            return False
+        return True
+
+
+def invalidate_armed_aim(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    send_command: Callable[[str], None],
+) -> bool:
+    """Publish aim invalidation before a serialized best-effort stop."""
+    with state_lock:
+        _invalidate_armed_aim_locked(state)
+        try:
+            send_command("stop")
+        except Exception:
+            return False
+        return True
+
+
+def begin_exclusive_launcher_action(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    capture_armed_context: bool,
+    send_command: Callable[[str], None],
+) -> tuple[bool, Optional[ArmedShotContext], int]:
+    """Atomically claim reload/shoot or invalidate a conflicting busy action."""
+    with state_lock:
+        if state.get("quit"):
+            invalidated_generation = _invalidate_armed_aim_locked(state)
+            state["armed"] = False
+            try:
+                send_command("stop")
+            except Exception:
+                pass
+            return False, None, invalidated_generation
+        if state.get("busy"):
+            invalidated_generation = _invalidate_armed_aim_locked(state)
+            try:
+                send_command("stop")
+            except Exception:
+                pass
+            return False, None, invalidated_generation
+
+        armed_context = None
+        if capture_armed_context and state.get("armed"):
+            armed_context = state.get("armed_context")
+        state["busy"] = True
+        state["aim_generation"] = int(state.get("aim_generation", 0)) + 1
+        action_generation = state["aim_generation"]
+        if not capture_armed_context:
+            state["armed_context"] = None
+            state["last_v"] = None
+            state["last_h"] = None
+        return True, armed_context, action_generation
+
+
+def continue_exclusive_launcher_action(
+    state: dict,
+    state_lock: threading.Lock,
+    *,
+    expected_generation: int,
+    send_command: Callable[[str], None],
+) -> tuple[bool, int]:
+    """Atomically hand an owned action to auto-reload or stop if invalidated."""
+    with state_lock:
+        if (
+            not state.get("busy")
+            or state.get("aim_generation") != expected_generation
+        ):
+            invalidated_generation = int(state.get("aim_generation", 0))
+        else:
+            reload_generation = _invalidate_armed_aim_locked(state)
+            return True, reload_generation
+
+    stop_and_release_launcher_action(
+        state,
+        state_lock,
+        send_command=send_command,
+    )
+    return False, invalidated_generation
 
 
 # --------------- line editor (raw-mode stdin reader) ---------------
@@ -323,75 +539,198 @@ class CommandHandler:
 
     def __init__(self, state: dict, state_lock: threading.Lock,
                  ser, serial_reader, shoot_enabled: bool,
+                 get_safety_snapshot: Callable[[], Optional[dict]],
+                 launcher_xyz_mm, launcher_yaw_deg: float,
                  auto_reload: bool = False):
         self.state = state
         self.state_lock = state_lock
         self.ser = ser
         self.serial_reader = serial_reader
         self.shoot_enabled = shoot_enabled
+        self.get_safety_snapshot = get_safety_snapshot
+        self.launcher_xyz_mm = launcher_xyz_mm
+        self.launcher_yaw_deg = launcher_yaw_deg
         self.auto_reload = auto_reload
 
-    def _do_reload(self):
-        with self.state_lock:
-            self.state["busy"] = True
+    def _do_reload(self, continuing_generation: Optional[int] = None):
+        if continuing_generation is None:
+            claimed, _, reload_generation = begin_exclusive_launcher_action(
+                self.state,
+                self.state_lock,
+                capture_armed_context=False,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
+        else:
+            claimed, reload_generation = continue_exclusive_launcher_action(
+                self.state,
+                self.state_lock,
+                expected_generation=continuing_generation,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
+        if not claimed:
+            safe_print("  [BLOCKED] launcher busy; aim invalidated and stop requested.")
+            return
         safe_print("  Reloading: retract pusher → dispense ball → center aim...")
         self.serial_reader.last_state_msg = ""
-        send_serial(self.ser, "reload")
+        try:
+            reload_sent = send_reload_command_if_current(
+                self.state,
+                self.state_lock,
+                expected_generation=reload_generation,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
+        except Exception:
+            reload_sent = False
+        if not reload_sent:
+            stop_and_release_launcher_action(
+                self.state,
+                self.state_lock,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
+            safe_print("  [BLOCKED] reload invalidated; launcher stopped and disarmed.")
+            return
         t0 = time.time()
+        reload_completed = False
         while time.time() - t0 < 15:
             if "RELOAD DONE" in self.serial_reader.last_state_msg:
+                reload_completed = True
                 break
             time.sleep(0.2)
         self.serial_reader.last_state_msg = ""
+        if not reload_completed:
+            stop_and_release_launcher_action(
+                self.state,
+                self.state_lock,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
+            safe_print(
+                "  [BLOCKED] reload status timeout; launcher stopped and disarmed."
+            )
+            return
         with self.state_lock:
+            reload_still_current = (
+                self.state.get("busy")
+                and self.state.get("aim_generation") == reload_generation
+            )
             self.state["busy"] = False
-            self.state["armed"] = True
+            self.state["armed"] = bool(reload_still_current)
+            self.state["armed_context"] = None
             # Force a resend on next cycle since reload re-centered the launcher
             self.state["last_v"] = None
             self.state["last_h"] = None
+        if not reload_still_current:
+            safe_print("  [RELOAD INVALIDATED] DISARMED — retry reload when idle.")
+            return
         safe_print("  [RELOAD COMPLETE] ARMED — tracking active.")
 
     def _do_shoot(self):
-        with self.state_lock:
-            if not self.state.get("armed"):
-                safe_print("  [BLOCKED] Not armed — type 'reload' first.")
-                return
-            self.state["busy"] = True
-        safe_print("  Firing at current target...")
+        claimed, armed_context, shot_generation = begin_exclusive_launcher_action(
+            self.state,
+            self.state_lock,
+            capture_armed_context=True,
+            send_command=lambda command: send_serial(self.ser, command),
+        )
+        if not claimed:
+            safe_print("  [BLOCKED] launcher busy; aim invalidated and stop requested.")
+            return
         self.serial_reader.last_state_msg = ""
-        send_serial(self.ser, "shoot")
+        outcome = request_shoot(
+            lambda command: send_fire_command_if_current(
+                self.state,
+                self.state_lock,
+                command=command,
+                expected_generation=shot_generation,
+                expected_context=armed_context,
+                send_command=lambda serial_command: send_serial(
+                    self.ser, serial_command
+                ),
+            ),
+            shoot_enabled=self.shoot_enabled,
+            latest_snapshot=self.get_safety_snapshot(),
+            armed_context=armed_context,
+            launcher_xyz_mm=self.launcher_xyz_mm,
+            launcher_yaw_deg=self.launcher_yaw_deg,
+            source="blm_follow",
+        )
+        safe_print(f"  [FIRE OUTCOME] {json.dumps(outcome, sort_keys=True)}")
+        if not outcome["serial_shoot_sent"]:
+            with self.state_lock:
+                self.state["busy"] = False
+                self.state["armed"] = False
+                self.state["armed_context"] = None
+                self.state["last_v"] = None
+                self.state["last_h"] = None
+            safe_print(
+                f"  [BLOCKED] {outcome['reason']}: {outcome['message']}"
+            )
+            return
+        safe_print("  Firing at current target...")
         t0 = time.time()
+        shot_fired = False
         while time.time() - t0 < 10:
             if "SHOT FIRED" in self.serial_reader.last_state_msg:
+                shot_fired = True
                 break
             time.sleep(0.2)
         self.serial_reader.last_state_msg = ""
+        if not shot_fired:
+            stop_and_release_launcher_action(
+                self.state,
+                self.state_lock,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
+            safe_print(
+                "  [BLOCKED] shot status timeout; launcher stopped and disarmed."
+            )
+            return
         with self.state_lock:
-            self.state["busy"] = False
+            shot_still_current = (
+                self.state.get("busy")
+                and self.state.get("aim_generation") == shot_generation
+                and self.state.get("armed_context") is armed_context
+            )
             self.state["armed"] = False
+            self.state["armed_context"] = None
             self.state["last_v"] = None
             self.state["last_h"] = None
-        if self.auto_reload:
+            if not (self.auto_reload and shot_still_current):
+                self.state["busy"] = False
+        if self.auto_reload and shot_still_current:
             safe_print("  [SHOT COMPLETE] auto-reloading...")
-            self._do_reload()
+            self._do_reload(continuing_generation=shot_generation)
         else:
             safe_print("  [SHOT COMPLETE] DISARMED — type 'reload' for next shot.")
 
     def handle(self, raw: str):
         cmd = (raw or "").strip().lower()
         if cmd == "__quit__":
-            with self.state_lock:
-                self.state["quit"] = True
+            invalidate_operator_command(
+                self.state,
+                self.state_lock,
+                updates={"quit": True},
+                shoot_enabled=self.shoot_enabled,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
             return
         if not cmd:
             return
         if cmd in ("quit", "exit", "q"):
-            with self.state_lock:
-                self.state["quit"] = True
+            invalidate_operator_command(
+                self.state,
+                self.state_lock,
+                updates={"quit": True},
+                shoot_enabled=self.shoot_enabled,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
             return
         if cmd in ("pause", "stop"):
-            with self.state_lock:
-                self.state["paused"] = True
+            invalidate_operator_command(
+                self.state,
+                self.state_lock,
+                updates={"paused": True},
+                shoot_enabled=self.shoot_enabled,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
             safe_print("  [PAUSED] type 'resume' to continue")
             return
         if cmd in ("resume", "go"):
@@ -416,10 +755,13 @@ class CommandHandler:
             return
         joint = cmd.replace("-", "_").replace(" ", "_")
         if joint in TARGETABLE_JOINTS:
-            with self.state_lock:
-                self.state["target"] = joint
-                self.state["last_v"] = None
-                self.state["last_h"] = None
+            invalidate_operator_command(
+                self.state,
+                self.state_lock,
+                updates={"target": joint},
+                shoot_enabled=self.shoot_enabled,
+                send_command=lambda command: send_serial(self.ser, command),
+            )
             safe_print(f"  → tracking {joint}")
         else:
             safe_print(f"  Unknown command '{raw}'. "
@@ -498,7 +840,12 @@ def main():
     udp = UDPJointListener(args.udp_host, args.udp_port)
     print(f"[OK] UDP listener on {args.udp_host}:{args.udp_port}")
 
-    ser = serial.Serial(args.serial_port, args.baud_rate, timeout=0.1)
+    ser = serial.Serial(
+        args.serial_port,
+        args.baud_rate,
+        timeout=0.1,
+        write_timeout=0.5,
+    )
     time.sleep(2)
     ser.reset_input_buffer()
     serial_reader = SerialReader(ser, verbose=args.verbose_serial)
@@ -527,6 +874,8 @@ def main():
         "quit": False,
         "last_v": None,
         "last_h": None,
+        "armed_context": None,
+        "aim_generation": 0,
     }
     state_lock = threading.Lock()
 
@@ -542,7 +891,9 @@ def main():
     print()
 
     handler = CommandHandler(state, state_lock, ser, serial_reader,
-                             args.shoot_enabled, auto_reload=args.auto_reload)
+                             args.shoot_enabled, udp.get_safety_snapshot,
+                             launcher_xyz, args.launcher_yaw_deg,
+                             auto_reload=args.auto_reload)
     editor = LineEditor(on_line=handler.handle)
 
     if args.voice_port > 0:
@@ -591,6 +942,8 @@ def main():
                 target = state["target"]
                 last_v = state["last_v"]
                 last_h = state["last_h"]
+                armed_context: ArmedShotContext | None = state["armed_context"]
+                aim_generation = state["aim_generation"]
 
             if paused or busy or not armed:
                 time.sleep(0.05)
@@ -598,6 +951,23 @@ def main():
 
             joint_data = udp.get_joint(target)
             now = time.time()
+            latest_safety = udp.get_safety_snapshot()
+            if args.shoot_enabled and armed_context is not None:
+                context_changed = (
+                    not isinstance(latest_safety, dict)
+                    or latest_safety.get("primary_track_id") != armed_context.primary_track_id
+                    or latest_safety.get("primary_epoch") != armed_context.primary_epoch
+                    or latest_safety.get("y_mirrored") != armed_context.y_mirrored
+                )
+                if context_changed:
+                    invalidate_armed_aim(
+                        state,
+                        state_lock,
+                        send_command=lambda command: send_serial(ser, command),
+                    )
+                    safe_print("  [BLOCKED] Primary/mirror safety context changed; fresh aim required.")
+                    time.sleep(0.05)
+                    continue
             gate = evaluate_joint_gate(
                 joint_data,
                 min_confidence=args.min_confidence,
@@ -606,6 +976,12 @@ def main():
                 now=now,
             )
             if not gate.ok:
+                if args.shoot_enabled and armed_context is not None:
+                    invalidate_armed_aim(
+                        state,
+                        state_lock,
+                        send_command=lambda command: send_serial(ser, command),
+                    )
                 if gate.reason == "stale":
                     skip_stale += 1
                 elif gate.reason == "low_confidence":
@@ -627,6 +1003,12 @@ def main():
 
             sol = solve_angles_ballistic(x_lat_m, y_fwd_m, dz_m, v_ms=args.v_base_mps)
             if sol is None:
+                if args.shoot_enabled and armed_context is not None:
+                    invalidate_armed_aim(
+                        state,
+                        state_lock,
+                        send_command=lambda command: send_serial(ser, command),
+                    )
                 skip_unreach += 1
                 time.sleep(0.05)
                 continue
@@ -638,6 +1020,8 @@ def main():
             # SAFETY clamp
             v_deg = max(0.0, min(30.0, v_deg))
             h_deg = max(-30.0, min(30.0, h_deg))
+            command_v = float(f"{v_deg:.1f}")
+            command_h = float(f"{h_deg:.1f}")
 
             # Rate limit
             if now - last_send_t < args.min_interval_s:
@@ -646,22 +1030,55 @@ def main():
 
             # Deadband
             if last_v is not None and last_h is not None:
-                if abs(v_deg - last_v) < args.min_delta_deg and abs(h_deg - last_h) < args.min_delta_deg:
+                if abs(command_v - last_v) < args.min_delta_deg and abs(command_h - last_h) < args.min_delta_deg:
                     time.sleep(0.02)
                     continue
 
-            cmd_str = f"set {v_deg:.1f} {h_deg:.1f} {wl} {wr}"
-            send_serial(ser, cmd_str)
+            cmd_str = f"set {command_v:.1f} {command_h:.1f} {wl} {wr}"
+            candidate_armed_context = None
+            if args.shoot_enabled:
+                candidate_armed_context, clearance = arm_shot_context(
+                    latest_safety,
+                    target_xyz_mm=corrected_xyz,
+                    pitch_deg=command_v,
+                    yaw_deg=command_h,
+                    speed_mps=args.v_base_mps,
+                    launcher_xyz_mm=launcher_xyz,
+                    launcher_yaw_deg=args.launcher_yaw_deg,
+                )
+                if not clearance.ok or candidate_armed_context is None:
+                    invalidate_armed_aim(
+                        state,
+                        state_lock,
+                        send_command=lambda command: send_serial(ser, command),
+                    )
+                    safe_print(
+                        f"  [BLOCKED] Aim clearance: {clearance.reason}: "
+                        f"{clearance.message} {json.dumps(clearance.to_dict(), sort_keys=True)}"
+                    )
+                    time.sleep(0.05)
+                    continue
+            committed = commit_aim_command(
+                state,
+                state_lock,
+                expected_target=target,
+                expected_generation=aim_generation,
+                command=cmd_str,
+                command_v=command_v,
+                command_h=command_h,
+                armed_context=candidate_armed_context,
+                send_command=lambda command: send_serial(ser, command),
+            )
+            if not committed:
+                time.sleep(0.02)
+                continue
             last_send_t = now
             send_count += 1
-            with state_lock:
-                state["last_v"] = v_deg
-                state["last_h"] = h_deg
 
             if args.print_every > 0 and send_count % args.print_every == 0:
                 d_m = math.sqrt(x_lat_m**2 + y_fwd_m**2)
                 safe_print(
-                    f"  [{send_count:5d}] {target:<15} pitch={v_deg:5.1f}  yaw={h_deg:6.1f}  "
+                    f"  [{send_count:5d}] {target:<15} pitch={command_v:5.1f}  yaw={command_h:6.1f}  "
                     f"dist={d_m:.2f}m  conf={joint_data['conf']:.2f}  "
                     f"(skip stale={skip_stale} unreach={skip_unreach} "
                     f"lowconf={skip_low_conf} lowcams={skip_low_cams} missing={skip_missing})"

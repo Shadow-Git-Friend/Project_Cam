@@ -6,6 +6,7 @@ import them without dragging in the offline-only assessment tree.
 """
 
 from .event_log import EVENT_TYPES, SCHEMA_VERSION, EventLogger
+from .fire_control import ArmedShotContext, arm_shot_context, request_shoot
 from .firing_line import (
     FIRING_LINE_GEOMETRY_ID,
     FIRING_LINE_SCHEMA,
@@ -24,10 +25,13 @@ __all__ = [
     "FIRING_LINE_GEOMETRY_ID",
     "FIRING_LINE_SCHEMA",
     "FiringLineDecision",
+    "ArmedShotContext",
     "GateResult",
     "evaluate_firing_line",
+    "arm_shot_context",
     "evaluate_joint_gate",
     "evaluate_shot_clearance",
     "sample_ballistic_path_mm",
+    "request_shoot",
     "segment_distance_3d",
 ]

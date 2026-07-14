@@ -50,6 +50,18 @@ from launcher_common import (apply_correction, load_correction_model, load_rpm_s
                              rpm_in_calibrated_range, rpm_to_speed, solve_angles_ballistic,
                              world_to_launcher_xy_delta)
 
+# Make src/ importable for the hardware-free fire-control boundary.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_SRC = _REPO_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from project_cam.closed_loop import (  # noqa: E402
+    ArmedShotContext,
+    arm_shot_context,
+    request_shoot,
+)
+
 try:
     import serial
 except ImportError:
@@ -116,6 +128,7 @@ class UDPJointListener:
         self.port = port
         self.lock = threading.Lock()
         self.joints: Dict[str, dict] = {}
+        self.latest_safety: Optional[dict] = None
         self.last_packet_ts = 0.0
         self.packet_count = 0
         self._running = True
@@ -131,40 +144,45 @@ class UDPJointListener:
             try:
                 data, _ = sock.recvfrom(65535)
                 pkt = json.loads(data.decode("utf-8", errors="ignore"))
-                now = time.time()
-                with self.lock:
-                    self.last_packet_ts = now
-                    self.packet_count += 1
-                    joints_obj = pkt.get("joints", {})
-                    if isinstance(joints_obj, dict):
-                        for j, val in joints_obj.items():
-                            if not isinstance(val, dict):
-                                continue
-                            if not all(k in val for k in ("x_mm", "y_mm", "z_mm")):
-                                continue
-                            self.joints[j] = {
-                                "x_mm": float(val["x_mm"]),
-                                "y_mm": float(val["y_mm"]),
-                                "z_mm": float(val["z_mm"]),
-                                "conf": float(val.get("conf", 1.0)),
-                                "cams": int(val.get("cams", 0)),
-                                "ts": now,
-                            }
-                    elif "joint" in pkt and "x_mm" in pkt:
-                        j = str(pkt["joint"])
-                        self.joints[j] = {
-                            "x_mm": float(pkt["x_mm"]),
-                            "y_mm": float(pkt["y_mm"]),
-                            "z_mm": float(pkt["z_mm"]),
-                            "conf": float(pkt.get("conf", 1.0)),
-                            "cams": int(pkt.get("cams", 0)),
-                            "ts": now,
-                        }
+                self._store_packet(pkt, received_at=time.time())
             except socket.timeout:
                 pass
             except Exception:
                 pass
         sock.close()
+
+    def _store_packet(self, pkt: dict, *, received_at: float) -> None:
+        """Atomically store joints and the safety object from one datagram."""
+        with self.lock:
+            self.last_packet_ts = received_at
+            self.packet_count += 1
+            safety = pkt.get("safety")
+            self.latest_safety = safety if isinstance(safety, dict) else None
+            joints_obj = pkt.get("joints", {})
+            if isinstance(joints_obj, dict):
+                for j, val in joints_obj.items():
+                    if not isinstance(val, dict):
+                        continue
+                    if not all(k in val for k in ("x_mm", "y_mm", "z_mm")):
+                        continue
+                    self.joints[j] = {
+                        "x_mm": float(val["x_mm"]),
+                        "y_mm": float(val["y_mm"]),
+                        "z_mm": float(val["z_mm"]),
+                        "conf": float(val.get("conf", 1.0)),
+                        "cams": int(val.get("cams", 0)),
+                        "ts": received_at,
+                    }
+            elif "joint" in pkt and "x_mm" in pkt:
+                j = str(pkt["joint"])
+                self.joints[j] = {
+                    "x_mm": float(pkt["x_mm"]),
+                    "y_mm": float(pkt["y_mm"]),
+                    "z_mm": float(pkt["z_mm"]),
+                    "conf": float(pkt.get("conf", 1.0)),
+                    "cams": int(pkt.get("cams", 0)),
+                    "ts": received_at,
+                }
 
     def get_joint(self, name: str) -> Optional[dict]:
         with self.lock:
@@ -173,6 +191,10 @@ class UDPJointListener:
     def get_all_joints(self) -> Dict[str, dict]:
         with self.lock:
             return dict(self.joints)
+
+    def get_safety_snapshot(self) -> Optional[dict]:
+        with self.lock:
+            return self.latest_safety
 
     def get_status(self) -> Tuple[int, float]:
         with self.lock:
@@ -265,7 +287,12 @@ def main():
     print(f"[OK] UDP listener started on {args.udp_host}:{args.udp_port}")
 
     # Connect serial
-    ser = serial.Serial(args.serial_port, args.baud_rate, timeout=0.1)
+    ser = serial.Serial(
+        args.serial_port,
+        args.baud_rate,
+        timeout=0.1,
+        write_timeout=0.5,
+    )
     time.sleep(2)
     ser.reset_input_buffer()
 
@@ -307,6 +334,7 @@ def main():
 
     test_number = 0
     last_aim_cmd = None  # track last aim command for logging
+    armed_context: ArmedShotContext | None = None
 
     while True:
         try:
@@ -325,12 +353,16 @@ def main():
 
         if cmd_low == "stop":
             send_serial(ser, "stop")
+            last_aim_cmd = None
+            armed_context = None
             time.sleep(0.3)
             print("  [STOPPED]")
             continue
 
         if cmd_low == "center":
             send_serial(ser, "center")
+            last_aim_cmd = None
+            armed_context = None
             time.sleep(0.3)
             continue
 
@@ -349,6 +381,8 @@ def main():
                     break
                 time.sleep(0.2)
             serial_reader.last_state_msg = ""
+            last_aim_cmd = None
+            armed_context = None
             print("  [RELOAD COMPLETE] Ready for next aim.")
             continue
 
@@ -356,15 +390,49 @@ def main():
             if not args.shoot_enabled:
                 print("  [BLOCKED] Shoot is disabled. Use --shoot-enabled flag.")
                 continue
-            if last_aim_cmd is None:
+            if last_aim_cmd is None or armed_context is None:
                 print("  [BLOCKED] Aim at a joint first before shooting.")
+                outcome = request_shoot(
+                    lambda command: send_serial(ser, command),
+                    shoot_enabled=args.shoot_enabled,
+                    latest_snapshot=udp.get_safety_snapshot(),
+                    armed_context=armed_context,
+                    launcher_xyz_mm=launcher_xyz,
+                    launcher_yaw_deg=args.launcher_yaw_deg,
+                    source="live_aim_test",
+                )
+                if log_fp:
+                    log_fp.write(json.dumps({
+                        "action": "shoot_blocked",
+                        "fire_outcome": outcome,
+                    }) + "\n")
+                    log_fp.flush()
                 continue
             confirm = input("  FIRE? This will launch a ball. [yes/N] ").strip().lower()
             if confirm != "yes":
                 print("  Aborted.")
                 continue
+            outcome = request_shoot(
+                lambda command: send_serial(ser, command),
+                shoot_enabled=args.shoot_enabled,
+                latest_snapshot=udp.get_safety_snapshot(),
+                armed_context=armed_context,
+                launcher_xyz_mm=launcher_xyz,
+                launcher_yaw_deg=args.launcher_yaw_deg,
+                source="live_aim_test",
+            )
+            if not outcome["serial_shoot_sent"]:
+                print(f"  [BLOCKED] {outcome['reason']}: {outcome['message']}")
+                if log_fp:
+                    log_fp.write(json.dumps({
+                        "action": "shoot_blocked",
+                        "fire_outcome": outcome,
+                    }) + "\n")
+                    log_fp.flush()
+                last_aim_cmd = None
+                armed_context = None
+                continue
             print("  Firing...")
-            send_serial(ser, "shoot")
             # Wait for shot fired
             t0 = time.time()
             while time.time() - t0 < 10:
@@ -375,10 +443,16 @@ def main():
 
             # Log
             if log_fp and last_aim_cmd:
-                log_rec = {**last_aim_cmd, "action": "shoot", "shoot_timestamp": time.time()}
+                log_rec = {
+                    **last_aim_cmd,
+                    "action": "shoot",
+                    "shoot_timestamp": time.time(),
+                    "fire_outcome": outcome,
+                }
                 log_fp.write(json.dumps(log_rec, ensure_ascii=False) + "\n")
                 log_fp.flush()
             last_aim_cmd = None
+            armed_context = None
             print("  [SHOT COMPLETE] Type 'reload' to load next ball.")
             continue
 
@@ -452,6 +526,8 @@ def main():
         # SAFETY: clamp pitch to [0, 30], yaw to [-30, 30]
         v_deg = max(0.0, min(30.0, v_deg))
         h_deg = max(-30.0, min(30.0, h_deg))
+        command_v = float(f"{v_deg:.1f}")
+        command_h = float(f"{h_deg:.1f}")
         was_clamped = (v_deg != v_raw) or (h_deg != h_raw)
 
         test_number += 1
@@ -471,7 +547,7 @@ def main():
             print(f"  CLAMPED:   pitch={v_deg:.2f} deg  yaw={h_deg:.2f} deg")
             if v_raw < 0:
                 print(f"  WARNING: PITCH WAS NEGATIVE ({v_raw:.2f} deg) — clamped to 0 deg")
-        print(f"  Command:   set {v_deg:.1f} {h_deg:.1f} {wl} {wr}")
+        print(f"  Command:   set {command_v:.1f} {command_h:.1f} {wl} {wr}")
 
         confirm = input("  Send? [y/N] ").strip().lower()
         if confirm != "y":
@@ -479,7 +555,35 @@ def main():
             continue
 
         # Send aim + wheels
-        cmd_str = f"set {v_deg:.1f} {h_deg:.1f} {wl} {wr}"
+        cmd_str = f"set {command_v:.1f} {command_h:.1f} {wl} {wr}"
+        candidate_armed_context = None
+        if args.shoot_enabled:
+            candidate_armed_context, clearance = arm_shot_context(
+                udp.get_safety_snapshot(),
+                target_xyz_mm=corrected_xyz,
+                pitch_deg=command_v,
+                yaw_deg=command_h,
+                speed_mps=v_exit_mps,
+                launcher_xyz_mm=launcher_xyz,
+                launcher_yaw_deg=args.launcher_yaw_deg,
+            )
+            if not clearance.ok or candidate_armed_context is None:
+                try:
+                    send_serial(ser, "stop")
+                except Exception:
+                    pass
+                armed_context = None
+                last_aim_cmd = None
+                print(f"  [BLOCKED] Aim clearance: {clearance.reason}: {clearance.message}")
+                if log_fp:
+                    log_fp.write(json.dumps({
+                        "action": "aim_blocked",
+                        "timestamp": time.time(),
+                        "joint": joint_name,
+                        "clearance": clearance.to_dict(),
+                    }) + "\n")
+                    log_fp.flush()
+                continue
         send_serial(ser, cmd_str)
         time.sleep(0.5)
 
@@ -501,7 +605,7 @@ def main():
                 "distance_m": d_m,
             },
             "angles_raw": {"pitch_deg": v_raw, "yaw_deg": h_raw},
-            "angles_clamped": {"pitch_deg": v_deg, "yaw_deg": h_deg},
+            "angles_clamped": {"pitch_deg": command_v, "yaw_deg": command_h},
             "was_clamped": was_clamped,
             "sent_command": cmd_str,
             "wheel_rpm": args.wheel_rpm,
@@ -510,6 +614,7 @@ def main():
             "cams": joint_data["cams"],
             "data_age_sec": age,
         }
+        armed_context = candidate_armed_context
 
         # Log aim
         if log_fp:
