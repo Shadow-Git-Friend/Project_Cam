@@ -14,29 +14,46 @@ modify the protected geometry functions, do not enable `--shoot-enabled` on the
 
 ## Implementation status — 2026-06-29
 
+Current reviewer-facing status is tracked in
+[`docs/current_status.md`](docs/current_status.md). As of 2026-06-30, public
+GitHub `main` had failed `ci` and `docker-smoke` runs (commit
+`18b3baba5b2799b8777940a061101fd6f8d9a8a4`). Both were root-caused and fixed on
+branch `projector-goal-detection-fixes-20260528`, which is now **green on both
+`ci` and `docker-smoke`** (verified via the Actions API at `8fd49734`/`d35312e8`).
+Four distinct causes: (1) `/v1/session/report` imported a non-existent
+`summarize_session`; (2) a blanket `*.json` `.gitignore` hid the CI test fixtures
+from every fresh checkout; (3) the CPU API image never installed `cv2`, so the
+container crashed on boot; (4) bare `pytest` (vs `python -m pytest`) does not add
+the CWD to `sys.path`, so the repo-root `services.*` API-test imports failed
+collection (exit 2) — fixed with `pythonpath = ["src", "."]`. Public `main` goes
+green when this branch merges. Local checks are not a substitute for green public
+Actions.
+
 Legend: ✅ done (software, tested) · 🟡 partial · ⏳ needs hardware/operator · ⛔ deliberately not done.
 
 | Phase | Status | What landed |
 |---|---|---|
-| **0 — 6-camera promotion gates** | ⏳ | Manifest + gate tracker (`configs/calibration/usb6_manifest.yaml`); 4-cam fallback preserved. Capture gate / intrinsics / extrinsics / static-GT runs need the rig. |
+| **0 — 6-camera promotion gates** | 🟡 | 2026-06-29 run filled `configs/calibration/usb6_manifest.yaml`: frame-health capture passed (min FPS 16.51, max gap 81.11 ms), intrinsics passed at 1280x720, extrinsics solved for all 6 (mean RMSE 2.97 px, max 6.41 px). Full promotion still blocked by single USB controller topology and missing six-camera static-GT trial data. |
 | **1 — Repo cleanup & restructure** | ✅ | `pyproject.toml`, expanded `.gitignore`, camera configs, `docs/archive_manifest.md`, thesis/archive moves under `docs/`, and local generated/heavy material moved to ignored `artifacts_local/`. Active runtime/calibration paths preserved. |
 | **2 — Backend & API** | ✅ | `src/project_cam/api/` + `services/api/app/main.py`: `/health`, `/v1/system/info`, `/v1/cameras`, `/v1/triangulate`, `/v1/predict`, `/v1/detect/{ball,pose}` (501), `/v1/session/report`, `/metrics`. Reuses geometry core; aim-only. |
 | **3 — Containerization & CI/CD** | ✅ | `Dockerfile` (CPU), `Dockerfile.gpu`, `docker-compose.{cpu,gpu}.yml`, `Makefile`, `.github/workflows/{ci,docker-smoke}.yml`, `requirements-api.txt`. |
 | **4 — Optimization & benchmarking** | ✅ | `benchmarks/{benchmark_inference,benchmark_pipeline,benchmark_camera_count}.py` with `--dry-run` + CSV schema (`_bench_common.py`), `benchmarks/results/README.md`. Real numbers need the GPU host. |
 | **5 — MLOps & monitoring** | ✅ | `src/project_cam/monitoring/metrics.py` (Prometheus + dependency-free fallback), model registry/provenance (`configs/models.yaml`, `src/project_cam/models/`), 3D accuracy regression gate (`src/project_cam/evaluation/`, `make eval-gate`, CI), input-quality drift checks (`src/project_cam/quality/`), `deploy/prometheus/prometheus.yml`, `deploy/grafana/project_cam_dashboard.json`, `docs/{monitoring,mlops}.md`. |
 | **6 — Streaming / edge demo** | ✅ | `src/project_cam/streaming/rtsp_source.py`, `apps/edge_stream_demo/` (README, run script, GStreamer notes). BLM-disabled. |
-| **7 — Supine leg-raise mode** | ✅ | `assessment/live_trainer/{leg_raise_mode,limb_identity,limb_constraints}.py`, `configs/exercises/leg_raise.yaml`, `apps/athlete_assessment/run_live_leg_raise.sh`. Does not change squat/push-up. |
+| **7 — Supine leg-raise mode** | ✅ | `assessment/live_trainer/{leg_raise_mode,limb_identity,limb_constraints,leg_raise_stabilizer}.py`, `configs/exercises/leg_raise.yaml`, `apps/athlete_assessment/run_live_leg_raise.sh`, and opt-in `--leg-raise-mode` in the live 3D arena for lower-body identity lock + JSONL diagnostics. Does not change squat/push-up. |
 | **8 — Docs & polish** | ✅ | `docs/{architecture,portfolio_case_study,job_alignment,performance_report,model_card,data_card,safety_boundaries}.md`; README updated. |
 
 **Tests added** (hardware-free): `test_camera_profiles`,
 `test_monitoring_metrics`, `test_api_schemas`, `test_api_health`,
 `test_api_triangulate`, `test_model_registry`, `test_frame_quality`,
-`test_eval_gate_cli`, `test_api_mlops`, `test_leg_raise_mode`,
-`test_limb_identity`, `test_limb_constraints`, `test_rtsp_source_config`,
+`test_eval_gate_cli`, `test_api_mlops`, `test_api_session_report`,
+`test_leg_raise_mode`,
+`test_limb_identity`, `test_limb_constraints`, `test_leg_raise_stabilizer`,
+`test_rtsp_source_config`,
 `test_benchmark_dry_run`. API/FastAPI tests skip cleanly without the `api` extra
 and run in CI/Docker.
 
-**Verification run 2026-06-29**:
+**Historical local verification run 2026-06-29**:
 
 ```bash
 make lint          # ruff: all checks passed
@@ -45,15 +62,30 @@ make eval-gate     # ball_static CI regression gate passed
 make benchmark-dry # wrote camera-count, inference, and pipeline dry-run CSVs
 ```
 
-The `api` extra (fastapi/pydantic/prometheus/httpx/uvicorn) is now installed in
-the venv, so the API tests run for real and the service was booted end-to-end:
-health, system-info, cameras, triangulate (recovers a synthetic point to
-sub-micron), predict, and `/metrics` all verified. Captured in
-`docs/api_demo.md`; OpenAPI committed at `docs/openapi.json`.
+The `api` extra (fastapi/pydantic/prometheus/httpx/uvicorn) is installed in the
+repo venv, so API tests run for real locally. Public trust still depends on
+GitHub Actions passing after this branch is pushed.
 
 Docker smoke was not run in this local checkout because Docker is not installed
 (`docker: command not found`). The Docker smoke workflow is present in
 `.github/workflows/docker-smoke.yml` for a runner/host with Docker.
+
+**Local verification run 2026-06-30 (this working tree):**
+
+```bash
+./venv/bin/python -m pytest                  # 276 passed
+./venv/bin/python -m project_cam.evaluation.gate --pairs tests/fixtures/eval_pairs_ball_static.json --suite ball_static
+```
+
+The exact CI subset listed in `.github/workflows/ci.yml` passed twice:
+`123 passed` under the repo Python 3.10 venv and `123 passed` under a clean
+temporary Python 3.11.15 venv.
+The production-surface Ruff check used by CI, plus `offline_assess.py` and the
+new session-report test, also passed.
+
+The June 30 pass also adds a route-level regression test for
+`/v1/session/report`; that route previously returned `501 assessment_not_configured`
+because the API imported a missing `summarize_session` symbol.
 
 **Not done on purpose:** Phase 0 hardware runs (no cameras here), moving
 runtime-linked paths such as `proxiball_3d-main/projector/`,
@@ -67,6 +99,12 @@ functions or `--shoot-enabled`.
 Run `scripts/usb6_capture_gate.py`, validate intrinsics at the live resolution,
 solve extrinsics (`scripts/solve_extrinsics_usb6.py`), run static 3D GT, and fill
 `configs/calibration/usb6_manifest.yaml` + `docs/performance_report.md`.
+
+2026-06-29 evidence: the frame-health part of the 30 s capture gate passed for
+all six cameras, intrinsics at 1280x720 passed, and extrinsics solved for all six
+with mean reprojection RMSE 2.97 px. The full capture gate did **not** pass
+because all six cameras still enumerate under one USB controller. Static 3D GT
+was not run because no six-camera static-GT trial dataset was available.
 
 Acceptance: `capture_ok`, no camera drops in 30 s, `max_gap_ms ≤ 100`/camera, all
 6 intrinsics at runtime res, all 6 extrinsics, mean reprojection `< 25 px`, static
@@ -101,7 +139,9 @@ RTSP/file/device ingestion + GStreamer pipeline string; JSONL events; BLM disabl
 
 ## Phase 7 — Supine leg-raise mode (✅)
 Per-leg elevation angle, left/right identity lock, segment-length priors, rep
-counting. Single-camera joint recovery off unless explicitly enabled. Validation
+counting. Single-camera joint recovery off unless explicitly enabled. The live
+3D arena now has an opt-in `--leg-raise-mode` that applies lower-body left/right
+identity lock before EMA and writes per-frame JSONL diagnostics. Validation
 dataset + measured metrics are the remaining (hardware) step.
 
 ## Phase 8 — Docs & portfolio polish (✅)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,32 @@ def run_assessment(
             session_id=session_id,
         )
     return report
+
+
+def summarize_session(
+    input_path: str | Path,
+    exercise: str = "squat",
+    *,
+    athlete_id: str = "api_session",
+    age: int | None = None,
+    sex: str | None = "unspecified",
+    fps: float = 15.0,
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Return an assessment report for API callers without requiring output paths."""
+    with tempfile.TemporaryDirectory(prefix="project_cam_session_report_") as td:
+        return run_assessment(
+            input_path=input_path,
+            output_path=Path(td) / "report.json",
+            exercise=exercise,
+            athlete_id=athlete_id,
+            age=age,
+            sex=sex,
+            fps=fps,
+            config_path=config_path,
+            session_id=session_id,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

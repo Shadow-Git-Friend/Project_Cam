@@ -29,20 +29,32 @@ sections from real runs on the GPU host / live rig.
 | Bias (correctable) | X+60, Z−104 mm | X+83, Z−125 mm |
 
 ## 3D accuracy — 6-camera (NOT YET MEASURED)
-Pending Phase 0 promotion gates (`configs/calibration/usb6_manifest.yaml`):
+Phase 0 was re-run on 2026-06-29 where hardware/data were available. Current
+state in [`configs/calibration/usb6_manifest.yaml`](../configs/calibration/usb6_manifest.yaml):
 
 ```text
-capture_ok:                       <fill>
-max_gap_ms <= 100 (per camera):   <fill>
-all 6 intrinsics @ runtime res:   <fill>
-all 6 extrinsics solved:          <fill>
-mean reprojection error < 25 px:  <fill>
-static 3D GT mean error (mm):     <fill>
-static 3D GT P95 error (mm):      <fill>
+capture_gate_passed:              false
+capture_ok (frame health):        true
+usb_controller_split_ok:          false (all 6 on one controller)
+min fresh FPS:                    16.51
+max gap ms (per camera):          81.11
+gaps >100 ms:                     0
+all 6 intrinsics @ runtime res:   true (max intrinsics reproj 1.12 px)
+all 6 extrinsics solved:          true
+mean extrinsics reproj RMSE:      2.97 px
+max extrinsics reproj RMSE:       6.41 px
+mean reprojection error < 25 px:  true
+static 3D GT mean error (mm):     not run
+static 3D GT P95 error (mm):      not run
 4-camera fallback still runs:     yes
 ```
 
-Do not state 6-camera production accuracy until these are filled from real runs.
+Capture evidence: all six cameras opened at 1280x720 MJPG and stayed under the
+100 ms max-gap gate for 30 s, but the full capture gate remains blocked because
+all six enumerate under one USB controller. Static 3D GT remains unmeasured
+because no six-camera static-GT trial dataset was found in the repo/artifacts
+during this run. Do not state 6-camera production accuracy until the USB topology
+issue and static-GT measurement are closed.
 
 ## Latency / FPS benchmark matrix (planned → CSV)
 Schema in `benchmarks/_bench_common.py`; rows marked `mode=dry_run, measured=False`
@@ -79,8 +91,23 @@ gates for the 6-camera rig.
 - **Rendering** (matplotlib) was the old hot spot; the cv2 renderer (~2 ms) fixed it.
 - **Fast/bounce ball** is camera-geometry-limited, not a detector-threshold problem.
 
-## Leg-raise metrics (planned)
-To be reported from `data/validation/leg_raise/` once recorded:
+## Leg-raise metrics (planned / instrumented)
+The live 3D arena now supports opt-in leg-raise stabilization and diagnostics:
+
+```bash
+./Parallel_working/run_live_usb6_mirrored_skeleton.sh \
+  --pose-conf 0.25 --pose-max-reproj-px 70 \
+  --leg-raise-mode \
+  --leg-raise-log-jsonl artifacts_local/leg_raise_debug/leg_raise.jsonl
+```
+
+The mode applies lower-body left/right identity lock before EMA, adds left/right
+leg angles to the HUD, uses the first ~15 s flat hold to learn leg-length priors,
+and logs per-frame leg state, identity status, raw/identity-corrected lower-body
+3D points, segment lengths, dropped joints, per-camera 2D lower-body keypoints,
+joint confidence, and contributing camera counts. Validation metrics are still
+to be reported from `data/validation/leg_raise/` once real right-only, left-only,
+flat, and alternating clips are recorded:
 `leg_raise_side_accuracy`, `leg_raise_angle_mae_deg`,
 `leg_raise_angle_p95_error_deg`, `left_right_swap_count`,
 `ankle_/knee_detection_rate`, `mean_contributing_cameras_per_leg_joint`,

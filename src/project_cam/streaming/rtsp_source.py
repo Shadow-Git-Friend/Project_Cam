@@ -64,6 +64,11 @@ class StreamConfig:
     output_jsonl: Optional[str] = None
     max_frames: Optional[int] = None
     annotate_output: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    fps: Optional[float] = None
+    fourcc: Optional[str] = None
+    buffer_size: Optional[int] = None
     shoot_enabled: bool = field(default=False, init=False)  # always False
 
     @classmethod
@@ -76,6 +81,11 @@ class StreamConfig:
         output_jsonl: Optional[str] = None,
         max_frames: Optional[int] = None,
         annotate_output: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        fps: Optional[float] = None,
+        fourcc: Optional[str] = None,
+        buffer_size: Optional[int] = None,
     ) -> "StreamConfig":
         stype = classify_source(source)
         if stype == "unknown":
@@ -94,6 +104,11 @@ class StreamConfig:
             output_jsonl=output_jsonl,
             max_frames=max_frames,
             annotate_output=annotate_output,
+            width=width,
+            height=height,
+            fps=fps,
+            fourcc=fourcc,
+            buffer_size=buffer_size,
         )
 
     def capture_argument(self):
@@ -114,6 +129,7 @@ def run_stream(
     detector: Optional[Callable[["object"], List[dict]]] = None,
     *,
     show: bool = False,
+    fullscreen: bool = False,
 ) -> int:
     """Capture from the source, emit JSONL events, return the frame count.
 
@@ -123,15 +139,35 @@ def run_stream(
     """
     import cv2  # local import: keeps module import hardware-free
 
+    backend = cv2.CAP_V4L2 if (
+        config.source_type == "device" and str(config.source).startswith("/dev/")
+    ) else cv2.CAP_ANY
     cap = cv2.VideoCapture(
         config.capture_argument(),
-        cv2.CAP_GSTREAMER if config.use_gstreamer else cv2.CAP_ANY,
+        cv2.CAP_GSTREAMER if config.use_gstreamer else backend,
     )
     if not cap.isOpened():
         raise RuntimeError(f"could not open stream: {config.source!r}")
 
+    if config.fourcc:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*config.fourcc))
+    if config.width:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.width)
+    if config.height:
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.height)
+    if config.fps:
+        cap.set(cv2.CAP_PROP_FPS, config.fps)
+    if config.buffer_size:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, config.buffer_size)
+
     writer = None
     jsonl = open(config.output_jsonl, "w", encoding="utf-8") if config.output_jsonl else None
+    window_name = "edge_stream_demo"
+    if show:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        if fullscreen:
+            cv2.setWindowProperty(
+                window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     frames = 0
     try:
         while True:
@@ -154,7 +190,7 @@ def run_stream(
             if writer is not None:
                 writer.write(frame)
             if show:
-                cv2.imshow("edge_stream_demo", frame)
+                cv2.imshow(window_name, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
             frames += 1
@@ -180,6 +216,13 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--annotate-output", default=None)
     p.add_argument("--max-frames", type=int, default=None)
     p.add_argument("--show", action="store_true")
+    p.add_argument("--fullscreen", action="store_true",
+                   help="show the preview window fullscreen")
+    p.add_argument("--width", type=int, default=None)
+    p.add_argument("--height", type=int, default=None)
+    p.add_argument("--fps", type=float, default=None)
+    p.add_argument("--fourcc", default=None)
+    p.add_argument("--buffer-size", type=int, default=None)
     # Present for clarity; the demo can never shoot regardless of this flag.
     p.add_argument("--no-blm", action="store_true", default=True,
                    help="BLM is always disabled in the streaming demo")
@@ -191,10 +234,11 @@ def main(argv=None) -> int:
     config = StreamConfig.from_source(
         args.source, latency_ms=args.latency_ms, use_gstreamer=args.gstreamer,
         output_jsonl=args.output_jsonl, max_frames=args.max_frames,
-        annotate_output=args.annotate_output)
+        annotate_output=args.annotate_output, width=args.width, height=args.height,
+        fps=args.fps, fourcc=args.fourcc, buffer_size=args.buffer_size)
     print(f"[edge-demo] source={config.source} type={config.source_type} "
           f"gstreamer={config.use_gstreamer} shoot_enabled={config.shoot_enabled}")
-    n = run_stream(config, show=args.show)
+    n = run_stream(config, show=args.show, fullscreen=args.fullscreen)
     print(f"[edge-demo] processed {n} frames")
     return 0
 

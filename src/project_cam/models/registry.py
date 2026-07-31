@@ -1,8 +1,9 @@
-"""Hardware-free model registry with provenance and checksum checks."""
+"""Hardware-free model registry with provenance, checksum and licence checks."""
 
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,6 +12,48 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REGISTRY_PATH = REPO_ROOT / "configs" / "models.yaml"
+
+#: Allowed values for ``Licensing.commercial_use``.
+#:
+#: ``undeclared`` is the default on purpose: a record that says nothing must read
+#: as a gap, never as permission.
+COMMERCIAL_VERDICTS = ("clear", "blocked", "unverified", "undeclared")
+
+#: Markers that make a licence layer non-commercial. Matched with word
+#: boundaries so ``aic`` hits ``pt-aic-coco`` but not ``mosaic``.
+#:
+#: This list is the memory of every blocker found so far. ``aic`` is here because
+#: a permissive repository badge hid it: MMPose is Apache-2.0, but every published
+#: RTMPose checkpoint is pretrained on AI Challenger, which is research-only.
+NON_COMMERCIAL_MARKERS = (
+    r"agpl",
+    r"aic\b",
+    r"ai[ -]challenger",
+    r"mpii",
+    r"crowdpose",
+    r"halpe",
+    r"body[78]\b",
+    r"smpl",
+    r"cc[- ]by[- ]nc",
+    r"non[- ]commercial",
+    r"research[- ]only",
+)
+
+_MARKER_RE = re.compile(
+    "|".join(rf"(?<![0-9a-z]){pattern}" for pattern in NON_COMMERCIAL_MARKERS),
+    re.IGNORECASE,
+)
+
+
+def non_commercial_markers(text: Optional[str]) -> List[str]:
+    """Return the non-commercial markers found in a licence-layer string.
+
+    Empty list means "nothing recognised", which is NOT the same as "clean" — an
+    unrecognised licence name is simply unverified.
+    """
+    if not text:
+        return []
+    return sorted({match.group(0).lower() for match in _MARKER_RE.finditer(text)})
 
 
 def sha256_file(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
@@ -29,6 +72,88 @@ def _as_pair(value: Any, *, field_name: str) -> Tuple[int, int]:
 
 
 @dataclass(frozen=True)
+class Licensing:
+    """Three-layer licence record for one model artifact.
+
+    The layers are separate because they routinely disagree, and the third one is
+    invisible in a repository badge:
+
+    * ``code`` — the framework's licence (Apache-2.0, AGPL-3.0, ...).
+    * ``weights`` — the checkpoint's own licence, which can differ from the code's.
+    * ``training_data`` — the datasets the checkpoint absorbed. This is where every
+      blocker so far has lived, and it does not appear in either of the above.
+
+    ``commercial_use`` is the verdict a human recorded after checking all three,
+    with ``evidence`` naming *where* it was checked (a config path, a licence file,
+    a vendor statement). Defaults are deliberately pessimistic.
+    """
+
+    code: Optional[str] = None
+    weights: Optional[str] = None
+    training_data: Optional[str] = None
+    commercial_use: str = "undeclared"
+    blocker: Optional[str] = None
+    evidence: Optional[str] = None
+    verified_on: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.commercial_use not in COMMERCIAL_VERDICTS:
+            raise ValueError(
+                f"commercial_use must be one of {COMMERCIAL_VERDICTS}, "
+                f"got {self.commercial_use!r}"
+            )
+        if self.commercial_use == "clear":
+            found = self.detected_markers()
+            if found:
+                raise ValueError(
+                    "commercial_use='clear' contradicts non-commercial markers "
+                    f"{found} in the licence layers"
+                )
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "Licensing":
+        if not data:
+            return cls()
+        return cls(
+            code=data.get("code"),
+            weights=data.get("weights"),
+            training_data=data.get("training_data"),
+            commercial_use=str(data.get("commercial_use", "undeclared")),
+            blocker=data.get("blocker"),
+            evidence=data.get("evidence"),
+            verified_on=str(data["verified_on"]) if data.get("verified_on") else None,
+        )
+
+    def undeclared_layers(self) -> List[str]:
+        """Names of the layers this record leaves blank."""
+        return [
+            name
+            for name in ("code", "weights", "training_data")
+            if not getattr(self, name)
+        ]
+
+    def detected_markers(self) -> List[str]:
+        """Non-commercial markers found across all three layers."""
+        found: List[str] = []
+        for layer in (self.code, self.weights, self.training_data):
+            found.extend(non_commercial_markers(layer))
+        return sorted(set(found))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "code": self.code,
+            "weights": self.weights,
+            "training_data": self.training_data,
+            "commercial_use": self.commercial_use,
+            "blocker": self.blocker,
+            "evidence": self.evidence,
+            "verified_on": self.verified_on,
+            "undeclared_layers": self.undeclared_layers(),
+            "detected_markers": self.detected_markers(),
+        }
+
+
+@dataclass(frozen=True)
 class ModelRecord:
     """One model artifact and the metadata needed to reason about deployment."""
 
@@ -44,6 +169,7 @@ class ModelRecord:
     source: Optional[str] = None
     metrics: Dict[str, Any] = field(default_factory=dict)
     notes: Optional[str] = None
+    licensing: Licensing = field(default_factory=Licensing)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ModelRecord":
@@ -73,6 +199,7 @@ class ModelRecord:
             source=data.get("source"),
             metrics=dict(data.get("metrics") or {}),
             notes=data.get("notes"),
+            licensing=Licensing.from_dict(data.get("licensing")),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -89,6 +216,10 @@ class ModelRecord:
             "source": self.source,
             "metrics": self.metrics,
             "notes": self.notes,
+            # Always present, even when the YAML says nothing: a missing licence
+            # must read as an explicit gap in the API response, not as an absent
+            # field a consumer can overlook.
+            "licensing": self.licensing.to_dict(),
         }
 
 
@@ -125,6 +256,32 @@ class ModelRegistry:
 
     def active_models(self) -> List[ModelRecord]:
         return [m for m in self.models if m.status == "active"]
+
+    def commercial_blockers(self, *, statuses: Tuple[str, ...] = ("active",)) -> List[Dict[str, Any]]:
+        """Models in ``statuses`` that are not cleared for commercial use.
+
+        Returns one row per problem model so the gap is queryable rather than
+        remembered. ``undeclared`` counts as a blocker: an unaudited artifact is
+        not a clean one, which is the whole lesson of the AI Challenger finding.
+        """
+        rows: List[Dict[str, Any]] = []
+        for model in self.models:
+            if model.status not in statuses:
+                continue
+            licence = model.licensing
+            if licence.commercial_use == "clear":
+                continue
+            rows.append(
+                {
+                    "model_id": model.model_id,
+                    "task": model.task,
+                    "commercial_use": licence.commercial_use,
+                    "blocker": licence.blocker,
+                    "undeclared_layers": licence.undeclared_layers(),
+                    "detected_markers": licence.detected_markers(),
+                }
+            )
+        return rows
 
     def default_model(self, task: str) -> ModelRecord:
         try:

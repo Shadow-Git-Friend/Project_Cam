@@ -11,9 +11,11 @@ right_knee -> right_hip -> left_shoulder sequence.
 """
 
 import argparse
+import copy
 import csv
 import json
 import math
+import os
 import queue
 import signal
 import socket
@@ -23,7 +25,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from launcher_common import apply_correction, load_correction_model, solve_angles_ballistic, world_to_launcher_xy_delta
@@ -34,6 +36,36 @@ except Exception:  # pragma: no cover
     serial = None
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from project_cam.closed_loop import (  # noqa: E402
+    FIRING_LINE_SCHEMA,
+    ArmedShotContext,
+    arm_shot_context,
+    request_shoot,
+)
+
+
+def desktop_session_defaults(environ=None):
+    """Return optional desktop-owned session/event-log defaults.
+
+    Explicit CLI arguments still take precedence through argparse. Standalone
+    launches remain unchanged when the desktop environment is absent.
+    """
+
+    env = os.environ if environ is None else environ
+    session_id = str(env.get("PROJECT_CAM_SESSION_ID", "")).strip()
+    explicit = str(env.get("PROJECT_CAM_EVENT_LOG_OUTPUT", "")).strip()
+    if explicit:
+        return session_id, explicit
+    session_dir = str(env.get("PROJECT_CAM_SESSION_DIR", "")).strip()
+    output = str(Path(session_dir) / "events.jsonl") if session_dir else ""
+    return session_id, output
+
+
 @dataclass
 class JointSample:
     ts: float
@@ -42,6 +74,220 @@ class JointSample:
     z_mm: float
     conf: float
     cams: int
+
+
+@dataclass
+class RuntimeFireState:
+    """Main-thread-only safety and one-shot authorization state."""
+
+    latest_safety: Optional[dict] = None
+    latest_safety_order: Optional[Tuple[int, float]] = None
+    latest_primary_key: Optional[Tuple[int, int, bool]] = None
+    armed_context: Optional[ArmedShotContext] = None
+    aim_generation: int = 0
+    armed_generation: Optional[int] = None
+
+
+def invalidate_runtime_aim(state: RuntimeFireState) -> None:
+    """Consume or invalidate an aim authorization."""
+
+    state.aim_generation += 1
+    state.armed_context = None
+    state.armed_generation = None
+
+
+def validate_runtime_configuration(
+    *, static_mode: bool, shoot_enabled: bool, serial_write_timeout_sec: float
+) -> None:
+    """Reject configurations that cannot provide a bounded safe fire path."""
+
+    if static_mode and shoot_enabled:
+        raise RuntimeError(
+            "Static target mode has no all-person safety snapshot; "
+            "--shoot-enabled requires live UDP safety telemetry"
+        )
+    if not math.isfinite(float(serial_write_timeout_sec)) or serial_write_timeout_sec <= 0:
+        raise RuntimeError("Serial write timeout must be a finite value greater than zero")
+
+
+def _runtime_safety_metadata(snapshot: Any):
+    if not isinstance(snapshot, dict) or snapshot.get("schema") != FIRING_LINE_SCHEMA:
+        return None
+    frame = snapshot.get("frame")
+    timestamp = snapshot.get("snapshot_ts")
+    track_id = snapshot.get("primary_track_id")
+    epoch = snapshot.get("primary_epoch")
+    mirrored = snapshot.get("y_mirrored")
+    if (
+        isinstance(frame, bool)
+        or not isinstance(frame, int)
+        or frame < 0
+        or isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or not math.isfinite(float(timestamp))
+        or isinstance(track_id, bool)
+        or not isinstance(track_id, int)
+        or track_id < 0
+        or isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch < 0
+        or not isinstance(mirrored, bool)
+    ):
+        return None
+    return (int(frame), float(timestamp)), (int(track_id), int(epoch), mirrored)
+
+
+def _clear_runtime_buffers(buffers) -> None:
+    for buffer in buffers.values():
+        buffer.clear()
+
+
+def store_runtime_safety_packet(
+    state: RuntimeFireState,
+    packet: Any,
+    buffers,
+    *,
+    shoot_enabled: bool,
+) -> bool:
+    """Store one additive safety object; return whether its joints may be used."""
+
+    snapshot = packet.get("safety") if isinstance(packet, dict) else None
+    metadata = _runtime_safety_metadata(snapshot)
+    if metadata is None:
+        state.latest_safety = None
+        if shoot_enabled:
+            invalidate_runtime_aim(state)
+            _clear_runtime_buffers(buffers)
+            return False
+        return True
+
+    order, primary_key = metadata
+    if state.latest_safety_order is not None and order < state.latest_safety_order:
+        return False
+
+    context_key = None
+    if state.armed_context is not None:
+        context_key = (
+            state.armed_context.primary_track_id,
+            state.armed_context.primary_epoch,
+            state.armed_context.y_mirrored,
+        )
+    primary_changed = (
+        (state.latest_primary_key is not None and primary_key != state.latest_primary_key)
+        or (context_key is not None and primary_key != context_key)
+    )
+    if shoot_enabled and primary_changed:
+        invalidate_runtime_aim(state)
+        _clear_runtime_buffers(buffers)
+
+    state.latest_safety = copy.deepcopy(snapshot)
+    state.latest_safety_order = order
+    state.latest_primary_key = primary_key
+    return True
+
+
+def build_runtime_set_command(
+    *, pitch_deg: float, yaw_deg: float, wheel_left: int, wheel_right: int
+) -> Tuple[str, float, float]:
+    """Build the command and return the exact angles transmitted on serial."""
+
+    command_v = float(f"{pitch_deg:.2f}")
+    command_h = float(f"{yaw_deg:.2f}")
+    return (
+        f"set {command_v:.2f} {command_h:.2f} {int(wheel_left)} {int(wheel_right)}",
+        command_v,
+        command_h,
+    )
+
+
+def commit_runtime_aim(
+    state: RuntimeFireState,
+    *,
+    context: Optional[ArmedShotContext],
+    command: str,
+    send_command: Callable[[str], None],
+) -> None:
+    """Transmit one set command and bind its authorization to a new generation."""
+
+    invalidate_runtime_aim(state)
+    send_command(command)
+    if context is not None:
+        state.armed_context = context
+        state.armed_generation = state.aim_generation
+
+
+def request_runtime_shoot(
+    state: RuntimeFireState,
+    send_command: Callable[[str], None],
+    *,
+    shoot_enabled: bool,
+    latest_snapshot: Optional[dict],
+    launcher_xyz_mm,
+    launcher_yaw_deg: float,
+    source: str,
+    now: Optional[float] = None,
+    **clearance_kwargs,
+) -> dict:
+    """One generation-guarded request through the shared firing-line boundary."""
+
+    context = state.armed_context
+    generation = state.armed_generation
+    if generation != state.aim_generation:
+        context = None
+
+    def guarded_send(command: str) -> None:
+        if command == "shoot" and (
+            context is None
+            or state.armed_context is not context
+            or state.armed_generation != generation
+            or state.aim_generation != generation
+        ):
+            raise RuntimeError("aim authorization changed before serial shoot")
+        send_command(command)
+
+    try:
+        return request_shoot(
+            guarded_send,
+            shoot_enabled=shoot_enabled,
+            latest_snapshot=latest_snapshot,
+            armed_context=context,
+            launcher_xyz_mm=launcher_xyz_mm,
+            launcher_yaw_deg=launcher_yaw_deg,
+            source=source,
+            now=now,
+            **clearance_kwargs,
+        )
+    finally:
+        invalidate_runtime_aim(state)
+
+
+def audit_runtime_fire_outcome(
+    outcome: dict,
+    *,
+    joint_name: Optional[str],
+    log_decision: Callable[..., None],
+    event_logger=None,
+) -> None:
+    """Persist one JSON-safe fire result to both existing audit streams."""
+
+    sent = bool(outcome.get("serial_shoot_sent"))
+    log_decision(
+        decision="FIRE_SENT" if sent else "FIRE_BLOCKED",
+        decision_reason=outcome.get("reason"),
+        joint_name=joint_name,
+        extra={"fire_outcome": outcome},
+    )
+    if event_logger is not None:
+        event_logger.emit(
+            "ball_launched" if sent else "safety_gate_blocked",
+            {
+                "joint_name": joint_name,
+                "source": outcome.get("source"),
+                "reason": outcome.get("reason"),
+                "serial_shoot_sent": sent,
+                "fire_outcome": outcome,
+            },
+        )
 
 
 def load_zone_by_joint(
@@ -310,9 +556,16 @@ def stable_target_from_buffer(
 
 
 def main():
+    desktop_session_id, desktop_event_log = desktop_session_defaults()
     ap = argparse.ArgumentParser(description="Run BLM sequence from live UDP joint targets.")
     ap.add_argument("--serial-port", required=True, help="ESP32 serial port, e.g. /dev/ttyUSB0")
     ap.add_argument("--baud-rate", type=int, default=921600)
+    ap.add_argument(
+        "--serial-write-timeout-sec",
+        type=float,
+        default=0.5,
+        help="Bound serial command writes so a disconnected launcher fails closed",
+    )
     ap.add_argument("--udp-host", default="0.0.0.0")
     ap.add_argument("--udp-port", type=int, default=5005)
     ap.add_argument("--static-target-x-mm", type=float, default=None, help="Enable one-terminal mode with static target X")
@@ -546,14 +799,14 @@ def main():
     )
     ap.add_argument(
         "--session-id",
-        default="",
+        default=desktop_session_id,
         help="Optional session identifier. Written into every decision-log row and "
              "into the curated EventLogger stream (--event-log-output). Used to join "
              "the engineering decision log with the demo-narrative event log.",
     )
     ap.add_argument(
         "--event-log-output",
-        default="",
+        default=desktop_event_log,
         help="Optional path to write the curated closed-loop EventLogger JSONL stream "
              "(session_start, aim_command_sent, ball_launched, session_end). Distinct "
              "from --dry-run-log-jsonl, which is the raw engineering decision log.",
@@ -605,7 +858,18 @@ def main():
     if args.static_target_joint and args.static_target_joint not in target_order:
         raise RuntimeError(f"--static-target-joint '{args.static_target_joint}' must be in --targets")
 
-    ser = serial.Serial(args.serial_port, args.baud_rate, timeout=0.05)
+    validate_runtime_configuration(
+        static_mode=static_mode,
+        shoot_enabled=bool(args.shoot_enabled),
+        serial_write_timeout_sec=args.serial_write_timeout_sec,
+    )
+
+    ser = serial.Serial(
+        args.serial_port,
+        args.baud_rate,
+        timeout=0.05,
+        write_timeout=args.serial_write_timeout_sec,
+    )
     time.sleep(1.5)
     print(f"[OK] Serial connected: {args.serial_port} @ {args.baud_rate}")
 
@@ -630,6 +894,7 @@ def main():
     print("Operator commands: start | home | setzero | shoot | reload | estop | clear | status | quit")
 
     buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
+    fire_state = RuntimeFireState()
     launcher_xyz = np.array([args.launcher_x_mm, args.launcher_y_mm, args.launcher_z_mm], dtype=np.float64)
 
     # Load correction model
@@ -699,15 +964,23 @@ def main():
         )
 
     def send_cmd(cmd: str):
-        ser.write((cmd.strip() + "\n").encode("utf-8"))
-        ser.flush()
+        payload = (cmd.strip() + "\n").encode("utf-8")
+        written = ser.write(payload)
+        if written is not None and written != len(payload):
+            raise OSError(f"partial serial write: {written}/{len(payload)} bytes")
         print(f"[TX] {cmd.strip()}")
 
+    def send_stop():
+        invalidate_runtime_aim(fire_state)
+        send_cmd("stop")
+
     def send_home_set():
+        invalidate_runtime_aim(fire_state)
         send_cmd("set 0 0 0 0")
         time.sleep(max(0.0, args.home_settle_sec))
 
     def send_setzero():
+        invalidate_runtime_aim(fire_state)
         send_cmd("setzero")
         time.sleep(max(0.0, args.setzero_settle_sec))
 
@@ -716,7 +989,7 @@ def main():
             print(f"[INFO] Graceful shutdown: {reason}")
         try:
             if args.stop_on_exit:
-                send_cmd("stop")
+                send_stop()
             if args.home_on_exit:
                 send_home_set()
             elif args.center_on_exit:
@@ -760,6 +1033,24 @@ def main():
         try:
             data, _ = sock.recvfrom(65535)
             pkt = json.loads(data.decode("utf-8", errors="ignore"))
+            had_armed_context = fire_state.armed_context is not None
+            packet_accepted = store_runtime_safety_packet(
+                fire_state,
+                pkt,
+                buffers,
+                shoot_enabled=bool(args.shoot_enabled),
+            )
+            if (
+                args.shoot_enabled
+                and had_armed_context
+                and fire_state.armed_context is None
+            ):
+                try:
+                    send_cmd("stop")
+                except Exception:
+                    pass
+            if not packet_accepted:
+                return
             for j, s in parse_joint_samples(pkt, now_ts):
                 if j in tracked_joints:
                     buffers[j].append(s)
@@ -800,31 +1091,69 @@ def main():
         log_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
         log_fp.flush()
 
+    def request_and_audit_fire(source: str, joint_name: Optional[str]):
+        # Pull one more packet at the final boundary.  The shared evaluator then
+        # enforces its own timestamp, primary epoch, mirror, and occupancy gates.
+        if not static_mode:
+            ingest_targets_once()
+        outcome = request_runtime_shoot(
+            fire_state,
+            send_cmd,
+            shoot_enabled=bool(args.shoot_enabled),
+            latest_snapshot=fire_state.latest_safety,
+            launcher_xyz_mm=launcher_xyz,
+            launcher_yaw_deg=args.launcher_yaw_deg,
+            source=source,
+        )
+        audit_runtime_fire_outcome(
+            outcome,
+            joint_name=joint_name,
+            log_decision=log_decision,
+            event_logger=event_logger,
+        )
+        print(f"[FIRE OUTCOME] {json.dumps(outcome, sort_keys=True)}")
+        return outcome
+
     def handle_operator_command(op: str, *, stage: str, joint_name: Optional[str] = None):
         nonlocal started, estop, last_stop_sent, current_joint
         active_joint = joint_name if joint_name is not None else current_joint
         if op == "start":
+            invalidate_runtime_aim(fire_state)
             started = True
             print("[INFO] Sequence started")
             return
         if op == "home":
+            started = False
             send_home_set()
             print("[INFO] Home command executed (set 0 0 0 0)")
             return
         if op == "setzero":
+            started = False
             send_setzero()
             print("[INFO] setzero executed (current pose is now logical zero)")
             return
         if op == "shoot":
-            send_cmd("shoot")
-            print("[INFO] Manual SHOOT command sent")
+            started = False
+            outcome = request_and_audit_fire("launcher_runtime.manual", active_joint)
+            if outcome["serial_shoot_sent"]:
+                print("[INFO] Manual SHOOT command sent")
+            else:
+                print(f"[WARN] Manual shoot blocked: {outcome['reason']}")
             return
         if op == "reload":
+            started = False
+            invalidate_runtime_aim(fire_state)
             send_cmd("reload")
             print("[INFO] Manual RELOAD command sent")
             return
         if op == "estop":
             estop = True
+            started = False
+            try:
+                send_stop()
+                last_stop_sent = True
+            except Exception:
+                last_stop_sent = False
             print("[INFO] E-STOP latched")
             log_decision(
                 decision="ESTOP",
@@ -834,7 +1163,9 @@ def main():
             return
         if op == "clear":
             estop = False
+            started = False
             last_stop_sent = False
+            invalidate_runtime_aim(fire_state)
             print("[INFO] E-STOP cleared")
             return
         if op == "status":
@@ -865,7 +1196,7 @@ def main():
         end_ts = time.time() + max(0.0, duration_sec)
         while time.time() < end_ts:
             drain_operator_commands(stage=stage, joint_name=joint_name)
-            if estop:
+            if estop or not started:
                 break
             ingest_targets_once()
             _ = drain_serial_lines(ser)
@@ -890,7 +1221,7 @@ def main():
             # Emergency stop latch
             if estop:
                 if not last_stop_sent:
-                    send_cmd("stop")
+                    send_stop()
                     last_stop_sent = True
                 # keep draining UDP + serial but no actions
                 ingest_targets_once()
@@ -911,7 +1242,7 @@ def main():
             if pre_aim_sec > 0.0:
                 print(f"[INFO] Pre-aim delay for {joint}: {pre_aim_sec:.2f}s")
                 wait_with_background(pre_aim_sec, stage="pre_aim_delay", joint_name=joint)
-                if estop:
+                if estop or not started:
                     log_decision(decision="ESTOP", joint_name=joint, extra={"stage": "pre_aim_delay"})
                     continue
 
@@ -922,7 +1253,7 @@ def main():
             while (time.time() - acquire_start) < args.acquire_timeout_sec:
                 # Commands during acquisition
                 drain_operator_commands(stage="acquire", joint_name=joint)
-                if estop:
+                if estop or not started:
                     break
 
                 ingest_targets_once()
@@ -942,7 +1273,7 @@ def main():
                 if stable is not None:
                     break
 
-            if estop:
+            if estop or not started:
                 log_decision(decision="ESTOP", joint_name=joint, extra={"stage": "acquire_or_wait"})
                 continue
 
@@ -1142,10 +1473,86 @@ def main():
             # 1) Fast aim
             # In aim-only mode we keep wheels stopped by default to avoid unsafe spin.
             cmd_wl, cmd_wr = (wl, wr) if args.shoot_enabled else (args.aim_only_wheel_rpm, args.aim_only_wheel_rpm)
-            send_cmd(f"set {v_deg:.2f} {h_deg:.2f} {cmd_wl} {cmd_wr}")
+            cmd_str, command_v, command_h = build_runtime_set_command(
+                pitch_deg=v_deg,
+                yaw_deg=h_deg,
+                wheel_left=cmd_wl,
+                wheel_right=cmd_wr,
+            )
+            candidate_context = None
+            if args.shoot_enabled:
+                candidate_context, clearance = arm_shot_context(
+                    fire_state.latest_safety,
+                    target_xyz_mm=xyz_mm,
+                    pitch_deg=command_v,
+                    yaw_deg=command_h,
+                    speed_mps=v_ms,
+                    launcher_xyz_mm=launcher_xyz,
+                    launcher_yaw_deg=args.launcher_yaw_deg,
+                )
+                if not clearance.ok or candidate_context is None:
+                    try:
+                        send_stop()
+                        stop_sent = True
+                        stop_error = None
+                    except Exception as exc:
+                        stop_sent = False
+                        stop_error = f"{type(exc).__name__}: {exc}"
+                    arm_outcome = {
+                        "source": "launcher_runtime.auto_arm",
+                        "requested_at": time.time(),
+                        "shoot_enabled": True,
+                        "serial_shoot_sent": False,
+                        "stop_command_sent": stop_sent,
+                        "stop_error": stop_error,
+                        "reason": clearance.reason,
+                        "message": clearance.message,
+                        "decision": clearance.to_dict(),
+                        "armed_context": None,
+                    }
+                    audit_runtime_fire_outcome(
+                        arm_outcome,
+                        joint_name=joint,
+                        log_decision=log_decision,
+                        event_logger=event_logger,
+                    )
+                    print(
+                        f"[WARN] Aim clearance blocked: {clearance.reason}: "
+                        f"{clearance.message}"
+                    )
+                    target_idx = (target_idx + 1) % len(target_order)
+                    continue
+            commit_runtime_aim(
+                fire_state,
+                context=candidate_context,
+                command=cmd_str,
+                send_command=send_cmd,
+            )
+            if event_logger is not None:
+                event_logger.emit(
+                    "aim_command_sent",
+                    {
+                        "joint_name": joint,
+                        "pitch_deg": command_v,
+                        "yaw_deg": command_h,
+                        "speed_mps": v_ms,
+                        "wheel_left_rpm": cmd_wl,
+                        "wheel_right_rpm": cmd_wr,
+                        "shoot_enabled": bool(args.shoot_enabled),
+                        "armed_context": (
+                            candidate_context.to_dict()
+                            if candidate_context is not None
+                            else None
+                        ),
+                    },
+                )
             wait_with_background(args.aim_settle_sec, stage="aim_settle", joint_name=joint)
-            if estop:
-                log_decision(decision="ESTOP", joint_name=joint, extra={"stage": "aim_settle"})
+            if estop or not started:
+                log_decision(
+                    decision="ESTOP" if estop else "INTERRUPTED",
+                    joint_name=joint,
+                    extra={"stage": "aim_settle"},
+                )
                 continue
 
             # 2) Wait telemetry RPM (best-effort)
@@ -1154,6 +1561,7 @@ def main():
             if args.shoot_enabled:
                 tw = time.time()
                 while (time.time() - tw) < args.wait_rpm_sec:
+                    ingest_targets_once()
                     lines = drain_serial_lines(ser)
                     rpm_pair = read_rpm_from_lines(lines)
                     if rpm_pair is not None:
@@ -1162,12 +1570,16 @@ def main():
                             telemetry_rpm_ok = True
                             break
                     drain_operator_commands(stage="rpm_gate_wait", joint_name=joint)
-                    if estop:
+                    if estop or not started:
                         break
                     time.sleep(0.03)
 
-            if estop:
-                log_decision(decision="ESTOP", joint_name=joint, extra={"stage": "rpm_gate_wait"})
+            if estop or not started:
+                log_decision(
+                    decision="ESTOP" if estop else "INTERRUPTED",
+                    joint_name=joint,
+                    extra={"stage": "rpm_gate_wait"},
+                )
                 continue
 
             rpm_ok = telemetry_rpm_ok
@@ -1177,6 +1589,7 @@ def main():
                 print("[WARN] RPM gate not reached; proceeding due to --ignore-rpm-gate")
 
             hold_sec = max(0.0, hold_sec_map.get(joint, args.target_hold_sec))
+            fire_outcome = None
 
             # 3) Shoot or aim-only
             if args.shoot_enabled:
@@ -1191,7 +1604,11 @@ def main():
                         hold_xyz = []
                         while (time.time() - hold_t0) < hold_sec:
                             drain_operator_commands(stage="hold", joint_name=joint)
-                            if estop:
+                            if (
+                                estop
+                                or not started
+                                or fire_state.armed_context is None
+                            ):
                                 break
                             ingest_targets_once()
                             _ = drain_serial_lines(ser)
@@ -1224,17 +1641,48 @@ def main():
                                 **yaw_extra,
                             },
                         )
-                        send_cmd("stop")
+                        send_stop()
                     else:
-                        send_cmd("shoot")
+                        fire_outcome = request_and_audit_fire(
+                            "launcher_runtime.auto", joint
+                        )
+                        if not fire_outcome["serial_shoot_sent"]:
+                            target_idx = (target_idx + 1) % len(target_order)
+                            continue
                         wait_with_background(args.shoot_pulse_sec, stage="shoot_pulse", joint_name=joint)
                         if estop:
                             log_decision(decision="ESTOP", joint_name=joint, extra={"stage": "shoot_pulse"})
                             continue
-                        send_cmd("stop")
+                        send_stop()
                 else:
                     print("[WARN] RPM gate not reached, skip shoot")
-                    send_cmd("stop")
+                    try:
+                        send_stop()
+                        stop_sent = True
+                        stop_error = None
+                    except Exception as exc:
+                        stop_sent = False
+                        stop_error = f"{type(exc).__name__}: {exc}"
+                    fire_outcome = {
+                        "source": "launcher_runtime.auto",
+                        "requested_at": time.time(),
+                        "shoot_enabled": True,
+                        "serial_shoot_sent": False,
+                        "stop_command_sent": stop_sent,
+                        "stop_error": stop_error,
+                        "reason": "rpm_gate_not_reached",
+                        "message": "launcher telemetry RPM gate was not reached",
+                        "decision": None,
+                        "armed_context": None,
+                    }
+                    audit_runtime_fire_outcome(
+                        fire_outcome,
+                        joint_name=joint,
+                        log_decision=log_decision,
+                        event_logger=event_logger,
+                    )
+                    target_idx = (target_idx + 1) % len(target_order)
+                    continue
             else:
                 print("[INFO] Aim-only mode (shoot disabled)")
                 if hold_sec > 0:
@@ -1248,8 +1696,12 @@ def main():
                         _ = drain_serial_lines(ser)
                         time.sleep(0.03)
 
-            if estop:
-                log_decision(decision="ESTOP", joint_name=joint, extra={"stage": "shoot_or_hold"})
+            if estop or not started:
+                log_decision(
+                    decision="ESTOP" if estop else "INTERRUPTED",
+                    joint_name=joint,
+                    extra={"stage": "shoot_or_hold"},
+                )
                 continue
 
             log_decision(
@@ -1286,6 +1738,7 @@ def main():
                     "rpm_gate_telemetry_ok": bool(telemetry_rpm_ok),
                     "rpm_gate_bypassed": bool(rpm_gate_bypassed),
                     "target_hold_sec": hold_sec,
+                    "fire_outcome": fire_outcome,
                     **yaw_extra,
                 },
             )

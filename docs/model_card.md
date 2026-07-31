@@ -5,12 +5,50 @@
 Machine-readable provenance is tracked in
 [`configs/models.yaml`](../configs/models.yaml) and exposed by `GET /v1/models`.
 
-| Role | Model | Backend | Notes |
-|---|---|---|---|
-| Ball detection | YOLO26m (`models/ball/yolo26m-672.engine`) | TensorRT FP16, dynamic batch | trained on dataset-main, 100 epochs |
-| Pose (primary) | YOLO11m-Pose | TensorRT FP16 / `.pt` | COCO-17, ≈6× faster than MMPose |
-| Pose (fallback) | RTMDet-m + RTMPose-m (MMPose) | PyTorch | slightly more keypoints, slower |
-| Prediction | Constant-velocity 3D Kalman filter | NumPy | not learned; tuned PN/MN |
+| Role | Model | Backend | Commercial use | Notes |
+|---|---|---|---|---|
+| Ball detection | YOLO26m (`models/ball/yolo26m-672.engine`) | TensorRT FP16, dynamic batch | **blocked** (AGPL) | trained on dataset-main, 100 epochs |
+| Pose (primary) | YOLO11m-Pose | TensorRT FP16 / `.pt` | **blocked** (AGPL) | COCO-17, ≈6× faster than MMPose |
+| Pose (fallback) | RTMDet-m + RTMPose-m (MMPose) | PyTorch | **blocked** (AI Challenger) | slower; **not** the AGPL escape route — see below |
+| Pose (clean target) | RTMO-m (MMPose) | PyTorch, not yet exported | **clear** | one-stage, bottom-up, COCO-only; candidate |
+| Face detect / recognize | YuNet + SFace (OpenCV Zoo) | ONNX Runtime | **unverified** | identification labels only, never authorization |
+| Prediction | Constant-velocity 3D Kalman filter | NumPy | n/a (not learned) | tuned PN/MN |
+
+## Licensing (audited 2026-07-30)
+
+Each artifact is audited across **three layers — code, weights, training data —**
+recorded per-model in [`configs/models.yaml`](../configs/models.yaml) and exposed
+by `GET /v1/models`. The layers routinely disagree, and the third one does not
+appear in a repository badge.
+
+**No active model in this pipeline is currently cleared for commercial use.**
+That is pinned by `tests/test_model_licensing.py`, so clearing one is a deliberate
+edit rather than a drift.
+
+- **Ultralytics (ball + primary pose): AGPL-3.0.** The *data* is fine — the ball
+  detector is fine-tuned on our own garage imagery, and YOLO11m-pose uses COCO —
+  the framework licence is the obstacle. The ball path is the harder half: it has
+  no in-repo permissive alternative. Candidates are RF-DETR detection (Apache-2.0)
+  retrained on this dataset, or LibreYOLO (MIT).
+- **MMPose / RTMPose was believed to be the AGPL escape and is not.** MMPose code
+  is Apache-2.0, but every published RTMPose checkpoint (tiny/s/m/l, *including*
+  those named `simcc-coco`) is pretrained on **AI Challenger**, which is
+  research-only. Verified in the installed package metafile.
+- **RTMO is the verified clean replacement and already ships in the installed
+  MMPose.** Read from the config, not the model-zoo table:
+  `rtmo-s_8xb32-600e_coco-640x640.py` trains on `CocoDataset` /
+  `person_keypoints_train2017` and initialises its backbone from
+  `yolox_s_8x8_300e_coco`. Chain: MMPose → MMDetection → YOLOX (all Apache-2.0)
+  → COCO (CC-BY-4.0). Use the `coco/` configs only; `crowdpose/` and `body7/` are
+  separate, contaminated families. Not yet exported or benchmarked.
+- **YuNet / SFace weights are unverified.** The OpenCV Zoo repository is
+  Apache-2.0 but states that per-model licences differ, so the badge does not
+  cover the weights. Must be read in the per-model directory before any
+  commercial claim — inferring it from the repository licence is exactly the
+  mistake that hid the RTMPose blocker. Biometric consent, retention and deletion
+  obligations apply regardless of the model licence.
+- **SMPL** (`--avatar-body`, opt-in) is non-commercial and is excluded from the
+  pilot.
 
 ## Intended use
 Markerless 3D ball/pose tracking in a calibrated indoor arena for predictive

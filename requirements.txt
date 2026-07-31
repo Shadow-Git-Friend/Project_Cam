@@ -15,6 +15,10 @@ PyYAML==6.0.3
 matplotlib==3.10.7
 Jinja2==3.1.6
 
+# Optional live mesh avatar / SMPL fitting dependencies live in
+# requirements-avatar.txt. Install them only on machines that will run
+# `--smpl-avatar`, because the body model stack is large and CUDA-sensitive.
+
 # Biomechanics export (C3D for Visual3D / Mokka / OpenSim partnerships)
 ezc3d>=1.5,<2.0
 

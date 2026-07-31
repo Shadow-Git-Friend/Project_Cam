@@ -42,6 +42,8 @@ fi
   --no-show-2d --show-3d \
   --viz-backend cv2 \
   --viz-width 1600 --viz-height 900 \
+  --avatar-body --avatar-markers \
+  --min-active-cameras 6 \
   --camera-open-retries 20 --camera-open-retry-delay 5 \
   --ema-alpha 0.55 \
   --ema-snap-thresh-mm 80 \

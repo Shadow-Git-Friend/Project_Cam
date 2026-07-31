@@ -1,20 +1,21 @@
 import argparse
-from dataclasses import dataclass, field
+import hashlib
 import json
 import math
 import multiprocessing as mp
+import os
 import re
 import shutil
-import os
 import socket
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
-from queue import Full
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from queue import Full
 
 import cv2
 import matplotlib.pyplot as plt
@@ -50,6 +51,13 @@ COL_RIGHT = (255, 200, 40)   # cyan         (right side)
 COL_SPINE = (240, 240, 240)  # near-white   (torso/head links)
 COL_HEAD = (150, 255, 170)   # mint         (face)
 TRAIL_JOINTS = (9, 10, 15, 16)  # wrists + ankles get motion trails
+MP_PALETTE = (
+    (90, 200, 255),   # amber
+    (255, 120, 200),  # violet
+    (140, 255, 160),  # mint
+    (255, 210, 90),   # sky
+    (120, 140, 255),  # coral
+)
 
 
 def _bone_color(s, e):
@@ -191,6 +199,36 @@ def ensure_project_src_on_path():
         sys.path.insert(0, str(src_dir))
     return src_dir
 
+
+_ID_TEXT_HELPERS = None
+
+
+def identity_text_helpers():
+    """(put_text, text_size) that can draw non-ASCII athlete names.
+
+    cv2.putText renders one '?' per non-ASCII UTF-8 byte, so a Cyrillic
+    gallery name like "Арлен" showed as "??????????" on the identity pill and
+    the LOCAL FACE LABELS panel. project_cam.viz.text rasterizes those via
+    PIL/DejaVu instead. Display-only; falls back to plain cv2 when the helper
+    is unavailable.
+    """
+    global _ID_TEXT_HELPERS
+    if _ID_TEXT_HELPERS is None:
+        try:
+            ensure_project_src_on_path()
+            from project_cam.viz.text import put_text, text_size  # noqa: E402
+
+            _ID_TEXT_HELPERS = (put_text, text_size)
+        except Exception:
+            _ID_TEXT_HELPERS = (
+                lambda img, text, org, scale, color, thickness=1: cv2.putText(
+                    img, str(text), org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                    color, thickness, cv2.LINE_AA),
+                lambda text, scale, thickness=1: cv2.getTextSize(
+                    str(text), cv2.FONT_HERSHEY_SIMPLEX, scale, thickness),
+            )
+    return _ID_TEXT_HELPERS
+
 # --------------- BLM Demo: ballistic math + correction ---------------
 
 def _blm_forward_right(yaw_deg):
@@ -288,7 +326,7 @@ class StageTimer:
     def report(self, frame_idx, every):
         if every <= 0 or frame_idx == 0 or frame_idx % every != 0:
             return None
-        order = ["capture", "ball", "pose", "triang", "coach", "udp", "viz3d", "mosaic", "total"]
+        order = ["capture", "ball", "ballwait", "pose", "triang", "coach", "udp", "viz3d", "mosaic", "total"]
         parts = []
         payload = {"frame": int(frame_idx)}
         for stage in order:
@@ -368,6 +406,95 @@ def open_camera_capture(device):
     if sys.platform.startswith("linux") and str(device).startswith("/dev/"):
         return cv2.VideoCapture(device, cv2.CAP_V4L2)
     return cv2.VideoCapture(device)
+
+
+def v4l2_device_ready(device, timeout_s=3.0, run_fn=subprocess.run, v4l2_ctl=None):
+    """Return whether a Linux V4L2 node responds before OpenCV opens it."""
+    if timeout_s is None or float(timeout_s) <= 0:
+        return True, "disabled"
+    if not sys.platform.startswith("linux") or not str(device).startswith("/dev/"):
+        return True, "not_v4l2"
+    tool = v4l2_ctl or shutil.which("v4l2-ctl")
+    if not tool:
+        return True, "v4l2-ctl missing"
+    cmd = [tool, "-d", str(device), "--info"]
+    try:
+        result = run_fn(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=float(timeout_s),
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"v4l2-ctl --info timed out after {float(timeout_s):.1f}s"
+    except OSError as exc:
+        return False, str(exc)
+    if int(getattr(result, "returncode", 1)) != 0:
+        detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+        return False, detail or f"v4l2-ctl --info exited {result.returncode}"
+    return True, "ok"
+
+
+CAPTURE_CONTEXT_SCHEMA = "project_cam.capture_context.v1"
+
+
+def build_capture_context(config_path, intrinsics_dir, extrinsics_path,
+                          dimensions_path, configured_roles, opened_roles):
+    """Evidence-only description of what this run actually captured with.
+
+    Two facts a session record cannot reconstruct afterwards: which camera
+    ROLES were open (a role is stable, `/dev/videoN` is not), and which
+    calibration produced the coordinates. The fingerprint covers the files the
+    run actually loaded, so re-calibrating starts a new baseline epoch on its
+    own rather than silently mixing incomparable numbers.
+
+    Never reaches the launcher: the heartbeat carrying this is flag-gated off
+    by default, because `store_runtime_safety_packet` disarms the runtime on
+    any packet without a valid `safety` block (fail-closed by design).
+    """
+    digest = hashlib.sha256()
+    paths = [Path(config_path), Path(extrinsics_path), Path(dimensions_path)]
+    paths += [Path(intrinsics_dir) / f"{cam}_intrinsics.json"
+              for cam in sorted(configured_roles)]
+    for path in paths:
+        digest.update(path.name.encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            # A missing artifact must change the fingerprint, not crash the run.
+            digest.update(b"<unreadable>")
+    return {
+        "context_schema": CAPTURE_CONTEXT_SCHEMA,
+        "configured_camera_roles": list(configured_roles),
+        "opened_camera_roles": list(opened_roles),
+        "calibration_fingerprint": "sha256:" + digest.hexdigest(),
+    }
+
+
+def validate_min_active_cameras(requested, configured_count):
+    minimum = int(requested)
+    configured = int(configured_count)
+    if minimum < 2:
+        raise ValueError("--min-active-cameras must be at least 2")
+    if minimum > configured:
+        raise ValueError(
+            f"--min-active-cameras {minimum} exceeds configured camera count {configured}"
+        )
+    return minimum
+
+
+def require_camera_count(
+    *, stage, available_count, configured_count, minimum, config_path
+):
+    available = int(available_count)
+    configured = int(configured_count)
+    required = int(minimum)
+    if available < required:
+        raise RuntimeError(
+            f"Only {available}/{configured} camera device(s) {stage}; "
+            f"require >={required}. Config: {config_path}"
+        )
 
 
 def apply_uvc_low_latency_controls(device, cam, args, log=False):
@@ -716,6 +843,148 @@ def robust_triangulate_joint(obs_norm, obs_px, proj_mats, extr, intr,
     return None, []
 
 
+def _pair_norm_cost_px(X, obs_norm_subset, extr, intr):
+    """Mean ray residual of X against normalized observations, scaled by each
+    camera's fx to approximate pixels. numpy-only — cheap enough to score
+    every label-flip hypothesis in split_merged_lr_pair."""
+    if X is None:
+        return float("inf")
+    errs = []
+    for cam, (ox, oy) in obs_norm_subset.items():
+        xc = extr[cam]["R"] @ np.asarray(X, dtype=np.float64) + extr[cam]["tvec"].reshape(3)
+        if xc[2] <= 1e-6:
+            return float("inf")
+        fx = float(intr[cam]["K"][0][0])
+        errs.append(fx * float(np.hypot(xc[0] / xc[2] - ox, xc[1] / xc[2] - oy)))
+    return float(np.mean(errs)) if errs else float("inf")
+
+
+def _lr_sep_ok(a, b, min_sep_mm):
+    if a is None or b is None:
+        return False
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        return False
+    return float(np.linalg.norm(a - b)) >= min_sep_mm
+
+
+def split_merged_lr_pair(obs_l, obs_px_l, obs_r, obs_px_r, proj_mats, extr, intr,
+                         prev_l=None, prev_r=None, anchor_l=None, anchor_r=None,
+                         min_cams=2, max_reproj_px=40.0, min_sep_mm=100.0,
+                         max_flip_cams=6, flip_margin=0.8):
+    """Re-solve one left/right joint pair by geometric consensus, distrusting
+    the per-camera left/right labels entirely.
+
+    When some cameras mirror a pair's labels, triangulating each label
+    separately collapses BOTH 3D joints onto their average — merged legs /
+    "the second leg rises too". This treats each camera's two detections as
+    an unordered pair: enumerate per-camera label flips (reference camera
+    fixed), triangulate both hypotheses per flip set with the plain SVD, and
+    keep the assignment with the smallest total ray residual. The winning
+    assignment is re-triangulated through robust_triangulate_joint so a
+    genuinely bad ray is still rejected. Which cluster is LEFT is decided by
+    temporal continuity against (prev_l, prev_r) when those are separated,
+    else by parent anchors (knees for ankles, hips for knees), else the
+    reference camera's labeling stands.
+
+    Returns (pt_l, pt_r, used_l, used_r, flipped_cams, renamed) or None when
+    there is not enough data, no assignment is consistent, or the pair is
+    genuinely together (best split still under min_sep_mm — feet side by
+    side is not an error). Calls triangulate_multi; never modifies it.
+    """
+    pair_cams = [c for c in obs_l if c in obs_r][:max_flip_cams]
+    if len(pair_cams) < min_cams:
+        return None
+    best = None
+    cost0 = None
+    n_free = len(pair_cams) - 1
+    for mask in range(1 << n_free):
+        a_obs, b_obs = {}, {}
+        for i, cam in enumerate(pair_cams):
+            flip = i > 0 and (mask >> (i - 1)) & 1
+            if flip:
+                a_obs[cam], b_obs[cam] = obs_r[cam], obs_l[cam]
+            else:
+                a_obs[cam], b_obs[cam] = obs_l[cam], obs_r[cam]
+        xa = triangulate_multi(a_obs, proj_mats)
+        xb = triangulate_multi(b_obs, proj_mats)
+        if xa is None or xb is None:
+            continue
+        cost = 0.5 * (_pair_norm_cost_px(xa, a_obs, extr, intr)
+                      + _pair_norm_cost_px(xb, b_obs, extr, intr))
+        if mask == 0:
+            cost0 = cost
+        if best is None or cost < best[0]:
+            best = (cost, mask)
+    if best is None or best[0] > max_reproj_px:
+        return None
+    mask = best[1]
+    # Anti-churn: keep the label-trusting assignment unless a flip is CLEARLY
+    # better (flip_margin). Near-tie winners alternate between frames and
+    # would churn the legs at the update rate; a genuine mixed-label frame
+    # beats the direct assignment by a wide residual gap anyway.
+    if mask != 0 and cost0 is not None and cost0 <= max_reproj_px \
+            and best[0] > cost0 * flip_margin:
+        mask = 0
+    a_obs, a_px, b_obs, b_px = {}, {}, {}, {}
+    for i, cam in enumerate(pair_cams):
+        flip = i > 0 and (mask >> (i - 1)) & 1
+        if flip:
+            a_obs[cam], a_px[cam] = obs_r[cam], obs_px_r[cam]
+            b_obs[cam], b_px[cam] = obs_l[cam], obs_px_l[cam]
+        else:
+            a_obs[cam], a_px[cam] = obs_l[cam], obs_px_l[cam]
+            b_obs[cam], b_px[cam] = obs_r[cam], obs_px_r[cam]
+    pt_a, used_a = robust_triangulate_joint(
+        a_obs, a_px, proj_mats, extr, intr,
+        min_cams=min_cams, max_reproj_px=max_reproj_px)
+    pt_b, used_b = robust_triangulate_joint(
+        b_obs, b_px, proj_mats, extr, intr,
+        min_cams=min_cams, max_reproj_px=max_reproj_px)
+    if pt_a is None or pt_b is None:
+        return None
+    pt_a = triangulate_multi(a_obs, proj_mats)
+    pt_b = triangulate_multi(b_obs, proj_mats)
+    if not _lr_sep_ok(pt_a, pt_b, min_sep_mm):
+        return None
+    renamed = False
+    for ref_l, ref_r in ((prev_l, prev_r), (anchor_l, anchor_r)):
+        if not _lr_sep_ok(ref_l, ref_r, min_sep_mm):
+            continue
+        ref_l = np.asarray(ref_l, dtype=np.float64)
+        ref_r = np.asarray(ref_r, dtype=np.float64)
+        keep = (np.linalg.norm(pt_a - ref_l) + np.linalg.norm(pt_b - ref_r))
+        swap = (np.linalg.norm(pt_a - ref_r) + np.linalg.norm(pt_b - ref_l))
+        renamed = bool(swap < keep)
+        break
+    flipped = [pair_cams[i + 1] for i in range(n_free) if (mask >> i) & 1]
+    if renamed:
+        return pt_b, pt_a, used_b, used_a, flipped, True
+    return pt_a, pt_b, used_a, used_b, flipped, False
+
+
+def rename_crossed_lr_pair(pt_l, pt_r, prev_l, prev_r, min_sep_mm=100.0,
+                           margin=0.5):
+    """True when a freshly triangulated L/R pair should swap names: both the
+    current pair and the previous state are well separated, and the crossed
+    matching is CLEARLY (margin) closer to the previous state. Catches a
+    whole-pair label swap that triangulated cleanly (both legs correct in
+    space, names exchanged) before it can flip the drill's stance-leg logic.
+    The margin keeps genuine leg crossings (which pass through proximity,
+    never a clear cross) from being fought."""
+    if not (_lr_sep_ok(pt_l, pt_r, min_sep_mm)
+            and _lr_sep_ok(prev_l, prev_r, min_sep_mm)):
+        return False
+    pt_l = np.asarray(pt_l, dtype=np.float64)
+    pt_r = np.asarray(pt_r, dtype=np.float64)
+    prev_l = np.asarray(prev_l, dtype=np.float64)
+    prev_r = np.asarray(prev_r, dtype=np.float64)
+    keep = np.linalg.norm(pt_l - prev_l) + np.linalg.norm(pt_r - prev_r)
+    cross = np.linalg.norm(pt_l - prev_r) + np.linalg.norm(pt_r - prev_l)
+    return bool(cross < keep * margin)
+
+
 def select_ball_box_for_cam(boxes_xyxyc, kf_pred_uv, kf_gate_px,
                             min_side_px, max_side_px):
     """Pick one ball bbox for a single camera from its raw YOLO candidates.
@@ -763,6 +1032,246 @@ def transform_world_point_y(world_pt, y_max, enabled=True):
     out = np.array(world_pt, copy=True)
     out[..., 1] = y_max - out[..., 1]
     return out
+
+
+def advance_primary_epoch(*, primary_epoch, current_track_id, next_track_id):
+    """Advance the safety epoch exactly when primary ownership changes.
+
+    Initial acquisition (``None`` -> track ID) is a real ownership change and
+    therefore advances epoch zero to epoch one.
+    """
+    epoch = int(primary_epoch)
+    if epoch < 0:
+        raise ValueError("primary_epoch must be non-negative")
+    return epoch + int(current_track_id != next_track_id)
+
+
+def update_pose_safety_observation(
+    *,
+    inference_succeeded,
+    observation_ts,
+    frame_idx,
+    previous_ts,
+    previous_frame,
+):
+    """Advance pose safety time only after the model call returns normally."""
+    if not inference_succeeded:
+        return previous_ts, previous_frame
+    return float(observation_ts), int(frame_idx)
+
+
+def pose_inference_results_complete(results, *, expected_count, require_dict):
+    """Require one non-missing, correctly shaped result per input camera."""
+    expected = int(expected_count)
+    if expected <= 0 or results is None:
+        return False
+    try:
+        if len(results) != expected:
+            return False
+    except TypeError:
+        return False
+    if require_dict:
+        return all(
+            isinstance(result, dict)
+            and isinstance(result.get("predictions"), list)
+            for result in results
+        )
+    return all(result is not None for result in results)
+
+
+def update_pose_safety_ambiguity(
+    *,
+    inference_succeeded,
+    previous_unassigned_candidate_count,
+    observed_unassigned_candidate_count,
+):
+    """Retain the previous ambiguity result when pose inference fails."""
+    count = (
+        int(observed_unassigned_candidate_count)
+        if inference_succeeded
+        else int(previous_unassigned_candidate_count)
+    )
+    if count < 0:
+        raise ValueError("unassigned candidate count must be non-negative")
+    return count, count > 0
+
+
+def count_unassigned_pose_candidates(
+    per_cam_candidates,
+    assignments,
+    *,
+    pose_raw_counts=None,
+):
+    """Count assigned misses plus raw people rejected during pose extraction."""
+    assigned = {
+        (cam, int(candidate_idx))
+        for camera_selection in (assignments or {}).values()
+        for cam, candidate_idx in camera_selection.items()
+    }
+    unassigned_extracted = sum(
+        (cam, candidate_idx) not in assigned
+        for cam, candidates in (per_cam_candidates or {}).items()
+        for candidate_idx in range(len(candidates))
+    )
+    rejected_raw = sum(
+        max(
+            0,
+            int(raw_count) - len((per_cam_candidates or {}).get(cam, ())),
+        )
+        for cam, raw_count in (pose_raw_counts or {}).items()
+    )
+    return unassigned_extracted + rejected_raw
+
+
+def build_firing_line_safety_snapshot(
+    *,
+    snapshot_ts,
+    frame_idx,
+    y_max_mm,
+    y_mirrored,
+    multi_person,
+    primary_track_id,
+    primary_epoch,
+    tracks,
+    primary_state,
+    secondary_states,
+    ambiguous_detections,
+    unassigned_candidate_count,
+):
+    """Build JSON-ready all-person pose telemetry for the firing-line gate.
+
+    Face names, scores, and embeddings are intentionally ignored.  Track ID
+    zero is reserved for diagnostic single-person telemetry; associated
+    multi-person tracks must use positive IDs.
+    """
+    frame = int(frame_idx)
+    primary_id = int(primary_track_id)
+    epoch = int(primary_epoch)
+    unassigned = int(unassigned_candidate_count)
+    is_multi_person = bool(multi_person)
+    if is_multi_person and primary_id <= 0:
+        raise ValueError("multi-person primary_track_id must be positive")
+    if not is_multi_person and primary_id != 0:
+        raise ValueError("single-person primary_track_id must be zero")
+    if epoch < 0:
+        raise ValueError("primary_epoch must be non-negative")
+    if not is_multi_person and epoch != 0:
+        raise ValueError("single-person primary_epoch must be zero")
+    if unassigned < 0:
+        raise ValueError("unassigned_candidate_count must be non-negative")
+
+    tracks = {int(track_id): track for track_id, track in (tracks or {}).items()}
+    secondary_states = secondary_states or {}
+    if is_multi_person:
+        track_ids = sorted(tracks)
+        if any(track_id <= 0 for track_id in track_ids):
+            raise ValueError("multi-person track IDs must be positive")
+        if primary_id not in tracks:
+            raise ValueError(
+                "multi-person primary_track_id must exist in active tracks"
+            )
+    else:
+        if primary_id not in tracks:
+            raise ValueError(
+                "single-person primary_track_id must exist in active tracks"
+            )
+        track_ids = [0]
+
+    def track_last_seen_frame(track_id):
+        track = tracks.get(track_id)
+        if isinstance(track, dict):
+            if "last_seen_frame" not in track:
+                raise ValueError("track_last_seen_frame is required")
+            value = track["last_seen_frame"]
+        else:
+            if not hasattr(track, "last_seen_frame"):
+                raise ValueError("track_last_seen_frame is required")
+            value = track.last_seen_frame
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("track_last_seen_frame must be an integer") from exc
+
+    def state_joints(state):
+        if not isinstance(state, dict):
+            return {}
+        points = np.asarray(state.get("joints", ()), dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] < 3:
+            return {}
+        confidence = np.asarray(state.get("conf", ()), dtype=np.float64).reshape(-1)
+        camera_counts = np.asarray(state.get("cams", ())).reshape(-1)
+        last_seen = (
+            np.asarray(state["last_seen"]).reshape(-1)
+            if "last_seen" in state
+            else None
+        )
+        joints = {}
+        for joint_idx, joint_name in sorted(IDX_TO_JOINT_NAME.items()):
+            if joint_idx >= len(points):
+                continue
+            point = points[joint_idx, :3]
+            if not np.isfinite(point).all():
+                continue
+            if last_seen is None or joint_idx >= len(last_seen):
+                raise ValueError(
+                    f"joint last_seen metadata is required for {joint_name}"
+                )
+            try:
+                joint_last_seen = int(last_seen[joint_idx])
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"joint last_seen metadata is invalid for {joint_name}"
+                ) from exc
+            point_udp = transform_world_point_y(
+                point, y_max_mm, enabled=bool(y_mirrored)
+            )
+            joint_confidence = (
+                float(confidence[joint_idx])
+                if joint_idx < len(confidence)
+                and np.isfinite(confidence[joint_idx])
+                else 0.0
+            )
+            joints[joint_name] = {
+                "x_mm": float(point_udp[0]),
+                "y_mm": float(point_udp[1]),
+                "z_mm": float(point_udp[2]),
+                "conf": joint_confidence,
+                "cams": (
+                    int(camera_counts[joint_idx])
+                    if joint_idx < len(camera_counts)
+                    else 0
+                ),
+                "last_seen_frame": joint_last_seen,
+            }
+        return joints
+
+    people = []
+    for track_id in track_ids:
+        is_primary = track_id == primary_id
+        state = primary_state if is_primary else secondary_states.get(track_id)
+        people.append(
+            {
+                "track_id": track_id,
+                "primary": is_primary,
+                "track_last_seen_frame": track_last_seen_frame(track_id),
+                "joints": state_joints(state),
+            }
+        )
+
+    return {
+        "schema": "project_cam.firing_line.v1",
+        "snapshot_ts": float(snapshot_ts),
+        "frame": frame,
+        "geometry_id": "world_mm",
+        "y_mirrored": bool(y_mirrored),
+        "mode": "multi_person" if is_multi_person else "single_person",
+        "primary_track_id": primary_id,
+        "primary_epoch": epoch,
+        "observed_person_count": len(people),
+        "ambiguous_detections": bool(ambiguous_detections),
+        "unassigned_candidate_count": unassigned,
+        "people": people,
+    }
 
 
 def flatten_predictions(preds):
@@ -831,6 +1340,344 @@ def select_target_person(candidates, prev_state, conf_thresh, switch_area_ratio)
         if dominant["mean_score"] >= conf_thresh and dominant["area"] > tracked["area"] * switch_area_ratio:
             return dominant
     return tracked
+
+
+def choose_primary_track_id(tracks, current_tid, requested_name="", viable_track_ids=None):
+    """Choose a stable primary without blending two people's filter state.
+
+    ``viable_track_ids`` gates only a *new* selection.  A current track stays
+    primary through short camera occlusions while the tracker still owns it.
+    This prevents a one-frame visibility drop from moving UDP/coach state to a
+    different person.
+    """
+    viable = set(tracks) if viable_track_ids is None else set(viable_track_ids)
+    viable.intersection_update(tracks)
+    wanted = str(requested_name or "").strip().casefold()
+    if wanted:
+        named = [
+            tid for tid in viable
+            if str(getattr(tracks[tid], "name", "") or "").casefold() == wanted
+        ]
+        if named:
+            return min(
+                named,
+                key=lambda tid: (
+                    -float(getattr(tracks[tid], "name_score", 0.0)),
+                    -int(getattr(tracks[tid], "hits", 0)),
+                    tid,
+                ),
+            )
+    if current_tid in tracks:
+        return current_tid
+    if not viable:
+        return None
+    return min(viable, key=lambda tid: (-int(getattr(tracks[tid], "hits", 0)), tid))
+
+
+def person_head_point(joints, pelvis_mm=None):
+    """Best available 3D head anchor for projecting a Face-ID association gate."""
+    arr = np.asarray(joints, dtype=np.float64) if joints is not None else None
+    if arr is not None and arr.shape == (17, 3):
+        face = arr[:5]
+        finite = np.isfinite(face).all(axis=1)
+        if finite.any():
+            return np.mean(face[finite], axis=0)
+        shoulders = arr[[5, 6]]
+        if np.isfinite(shoulders).all():
+            point = np.mean(shoulders, axis=0)
+            point[2] += 350.0
+            return point
+    if pelvis_mm is not None:
+        pelvis = np.asarray(pelvis_mm, dtype=np.float64).reshape(3)
+        if np.isfinite(pelvis).all():
+            return pelvis + np.array([0.0, 0.0, 650.0])
+    return None
+
+
+def person_pelvis_point(joint_points):
+    """Stable pelvis anchor from hips, or from at least two torso joints."""
+    if isinstance(joint_points, dict):
+        def get_point(joint):
+            return joint_points.get(joint)
+    else:
+        array = np.asarray(joint_points, dtype=np.float64)
+        if array.shape != (17, 3):
+            return None
+
+        def get_point(joint):
+            return array[joint]
+
+    def finite_point(joint):
+        value = get_point(joint)
+        if value is None:
+            return None
+        point = np.asarray(value, dtype=np.float64).reshape(-1)
+        if len(point) < 3 or not np.isfinite(point[:3]).all():
+            return None
+        return point[:3]
+
+    left_hip = finite_point(11)
+    right_hip = finite_point(12)
+    if left_hip is not None and right_hip is not None:
+        return 0.5 * (left_hip + right_hip)
+    torso = [
+        point
+        for joint in (5, 6, 11, 12)
+        if (point := finite_point(joint)) is not None
+    ]
+    if len(torso) >= 2:
+        return np.mean(np.asarray(torso), axis=0)
+    return None
+
+
+def make_secondary_pose_state():
+    """Allocate display state for a non-primary track."""
+    return {
+        "joints": np.full((17, 3), np.nan, dtype=np.float32),
+        "display": np.full((17, 3), np.nan, dtype=np.float32),
+        "conf": np.zeros(17, dtype=np.float32),
+        "cams": np.zeros(17, dtype=np.int32),
+        "last_seen": np.full(17, -10_000_000, dtype=np.int64),
+    }
+
+
+def update_secondary_pose_state(
+    state,
+    measurements,
+    *,
+    frame_idx,
+    stale_frames,
+    ema_alpha,
+    snap_thresh_mm,
+    display_alpha,
+):
+    """Update, smooth, and expire one secondary skeleton in place."""
+    for joint, measurement in measurements.items():
+        point = np.asarray(measurement["point"], dtype=np.float64).reshape(3)
+        if not np.isfinite(point).all():
+            continue
+        previous = state["joints"][joint]
+        previous = previous if np.isfinite(previous).all() else None
+        alpha = float(ema_alpha)
+        if previous is not None and float(snap_thresh_mm) > 0.0:
+            displacement = float(np.linalg.norm(point - previous))
+            if displacement > float(snap_thresh_mm):
+                alpha = min(
+                    1.0, alpha * displacement / float(snap_thresh_mm)
+                )
+        state["joints"][joint] = ema_update(previous, point, alpha=alpha)
+        state["conf"][joint] = float(measurement.get("conf", 0.0))
+        state["cams"][joint] = int(measurement.get("cams", 0))
+        state["last_seen"][joint] = int(frame_idx)
+
+    for joint in range(17):
+        if int(frame_idx) - int(state["last_seen"][joint]) > int(stale_frames):
+            state["joints"][joint] = np.nan
+            state["display"][joint] = np.nan
+            state["conf"][joint] = 0.0
+            state["cams"][joint] = 0
+            continue
+        source = state["joints"][joint]
+        if not np.isfinite(source).all():
+            state["display"][joint] = np.nan
+            continue
+        target = state["display"][joint]
+        if not np.isfinite(target).all():
+            state["display"][joint] = source
+        else:
+            state["display"][joint] = (
+                target + float(display_alpha) * (source - target)
+            )
+    return state
+
+
+def triangulate_person_assignment(
+    camera_selection,
+    per_cam_candidates,
+    *,
+    intr,
+    proj,
+    extr,
+    joint_indices,
+    pose_conf,
+    min_cams,
+    max_reproj_px,
+):
+    """Triangulate one track's selected 2D detections into joint measurements."""
+    normalized_by_cam = {}
+    pixels_by_cam = {}
+    scores_by_cam = {}
+    for cam, candidate_idx in camera_selection.items():
+        candidates = per_cam_candidates.get(cam) or []
+        if candidate_idx < 0 or candidate_idx >= len(candidates) or cam not in intr:
+            continue
+        candidate = candidates[candidate_idx]
+        keypoints = np.asarray(candidate["kpts"], dtype=np.float64)
+        scores = np.asarray(candidate["scores"], dtype=np.float64)
+        accepted_joints = [
+            joint for joint in joint_indices
+            if joint < len(scores)
+            and scores[joint] >= float(pose_conf)
+            and np.isfinite(keypoints[joint, :2]).all()
+        ]
+        pixels = [tuple(keypoints[joint, :2]) for joint in accepted_joints]
+        normalized = undistort_points_batch(
+            pixels, intr[cam]["K"], intr[cam]["D"]
+        )
+        normalized_by_cam[cam] = dict(zip(accepted_joints, normalized))
+        pixels_by_cam[cam] = keypoints
+        scores_by_cam[cam] = scores
+
+    measurements = {}
+    for joint in joint_indices:
+        observations = {}
+        pixel_observations = {}
+        for cam, normalized in normalized_by_cam.items():
+            if joint not in normalized:
+                continue
+            observations[cam] = normalized[joint]
+            pixel_observations[cam] = pixels_by_cam[cam][joint, :2]
+        if len(observations) < int(min_cams):
+            continue
+        point, used = robust_triangulate_joint(
+            observations,
+            pixel_observations,
+            proj,
+            extr,
+            intr,
+            min_cams=int(min_cams),
+            max_reproj_px=float(max_reproj_px),
+        )
+        if point is None:
+            continue
+        used_cams = [cam for cam in used if cam in scores_by_cam]
+        confidence = (
+            float(np.mean([scores_by_cam[cam][joint] for cam in used_cams]))
+            if used_cams else 0.0
+        )
+        measurements[joint] = {
+            "point": np.asarray(point, dtype=np.float64),
+            "conf": confidence,
+            "cams": len(used_cams),
+        }
+    return measurements
+
+
+def apply_face_identity_tick(
+    *,
+    identifier,
+    gallery,
+    voters,
+    tracks,
+    track_joints,
+    frame_bgr,
+    camera_name,
+    project_fn,
+    gate_px,
+    min_score,
+    voter_factory,
+):
+    """Detect faces once and apply gated, one-to-one identity votes."""
+    ensure_project_src_on_path()
+    from project_cam.tracking import associate_faces_to_tracks  # noqa: E402
+
+    faces = identifier.detect_and_encode(frame_bgr)
+    projected_heads = {}
+    for track_id, track in tracks.items():
+        head = person_head_point(
+            track_joints.get(track_id), getattr(track, "pelvis_mm", None)
+        )
+        if head is None:
+            continue
+        projected = project_fn(head, camera_name)
+        if projected is not None:
+            projected_heads[track_id] = projected
+    assignments = associate_faces_to_tracks(faces, projected_heads, gate_px)
+
+    for track_id, track in tracks.items():
+        voter = voters.setdefault(track_id, voter_factory())
+        face_index = assignments.get(track_id)
+        if face_index is None:
+            voter.add_vote(None)
+        else:
+            name, score = gallery.match(
+                faces[face_index]["embedding"], min_score=float(min_score)
+            )
+            voter.add_vote(name, score)
+        locked_name, strength = voter.current()
+        track.name = locked_name
+        track.name_score = strength
+
+    # An enrolled identity represents one person.  If noisy tracks both lock
+    # the same name, display it only on the stronger owner until evidence
+    # separates them.
+    owners = {}
+    for track_id, track in tracks.items():
+        if track.name:
+            owners.setdefault(track.name, []).append(track_id)
+    for track_ids in owners.values():
+        winner = min(
+            track_ids,
+            key=lambda track_id: (-float(tracks[track_id].name_score), track_id),
+        )
+        for track_id in track_ids:
+            if track_id != winner:
+                tracks[track_id].name = None
+                tracks[track_id].name_score = 0.0
+    return assignments
+
+
+def single_person_identity_context(track, joints_state, joints_display, frame_idx):
+    """Expose a single-person Face-ID target only while 3D pose is current."""
+    if track is None:
+        return {}, {}
+    state = np.asarray(joints_state, dtype=np.float64)
+    if state.shape != (17, 3):
+        return {}, {}
+    pelvis = person_pelvis_point(state)
+    if pelvis is None:
+        return {}, {}
+    track.pelvis_mm = pelvis
+    track.last_seen_frame = int(frame_idx)
+    return {track.tid: track}, {track.tid: joints_display}
+
+
+def pose_health_payload(
+    *,
+    run_pose,
+    pose_error,
+    batch_order,
+    pose_raw_counts,
+    per_cam_pose_curr,
+    pose_und_by_cam,
+    joints_3d_now,
+    joints_display,
+):
+    selected_cams = sorted(str(cam) for cam in per_cam_pose_curr.keys())
+    raw_counts = {str(cam): int(pose_raw_counts.get(cam, 0)) for cam in batch_order}
+    high_conf_counts = {
+        str(cam): int(len(pose_und_by_cam.get(cam, {})))
+        for cam in batch_order
+    }
+    visible = 0
+    if joints_display is not None:
+        arr = np.asarray(joints_display, dtype=np.float64)
+        if arr.ndim == 2 and arr.shape[1] == 3:
+            visible = int(np.count_nonzero(np.isfinite(arr).all(axis=1)))
+    payload = {
+        "pose_run": bool(run_pose),
+        "pose_raw_person_count": int(sum(raw_counts.values())),
+        "pose_raw_person_count_per_cam": raw_counts,
+        "pose_selected_cam_count": int(len(selected_cams)),
+        "pose_selected_cams": selected_cams,
+        "pose_high_conf_keypoint_count": int(sum(high_conf_counts.values())),
+        "pose_high_conf_keypoint_count_per_cam": high_conf_counts,
+        "pose_triangulated_joint_count": int(len(joints_3d_now)),
+        "pose_visible_joint_count": visible,
+    }
+    if pose_error:
+        payload["pose_error"] = str(pose_error)
+    return payload
 
 
 def draw_arena_static(ax, dims, tags, extr, world_y_mirror=True):
@@ -1030,6 +1877,33 @@ def _cv2_project(pts_3d, view_34, fx, fy, cx, cy):
     return scr, ok
 
 
+def _draw_person_label(img, text, anchor_xy, color, identified=False):
+    """Draw a compact identity pill above one rendered skeleton."""
+    if not text:
+        return
+    x, y = int(anchor_xy[0]), int(anchor_xy[1])
+    text = str(text)[:24]
+    id_put_text, id_text_size = identity_text_helpers()
+    (text_w, text_h), _ = id_text_size(text, 0.52, 1)
+    padding = 7
+    check_width = 16 if identified else 0
+    x0 = x - (text_w + check_width) // 2 - padding
+    x1 = x + (text_w + check_width) // 2 + padding
+    y0, y1 = y - text_h - padding, y + padding - 2
+    cv2.rectangle(img, (x0, y0), (x1, y1), (18, 14, 13), -1)
+    cv2.rectangle(img, (x0, y0), (x1, y1), _shade(color, 0.55), 1, cv2.LINE_AA)
+    id_put_text(img, text, (x0 + padding, y - 2), 0.52, (240, 240, 240), 1)
+    if identified:
+        check_x = x1 - padding - 10
+        check_y = y - text_h // 2
+        points = np.array(
+            [[check_x, check_y + 2], [check_x + 4, check_y + 6],
+             [check_x + 11, check_y - 4]],
+            np.int32,
+        )
+        cv2.polylines(img, [points], False, (120, 255, 150), 2, cv2.LINE_AA)
+
+
 def draw_live_scene_cv2(
     img_w, img_h, dims, tags, extr,
     ball_pt, ball_traj, joints,
@@ -1049,6 +1923,16 @@ def draw_live_scene_cv2(
     metrics=None,
     thumbnails=None,
     recording=False,
+    avatar_body=False,
+    avatar_markers=False,
+    avatar_alpha=0.85,
+    smpl_mesh_vertices=None,
+    smpl_mesh_faces=None,
+    smpl_mesh_alpha=0.45,
+    smpl_mesh_max_faces=1500,
+    extra_people=None,
+    primary_label=None,
+    face_roster=None,
 ):
     """Render the 3D arena scene onto a cv2 BGR image (~1-3 ms)."""
     cine = (theme == "cinematic")
@@ -1157,18 +2041,60 @@ def draw_live_scene_cv2(
             cv2.circle(img, (int(sp[0,0]), int(sp[0,1])), 10, (0, 180, 244), -1, cv2.LINE_AA)
             cv2.circle(img, (int(sp[0,0]), int(sp[0,1])), 11, (255,255,255), 1, cv2.LINE_AA)
 
+    # --- optional SMPL mesh avatar ---
+    if smpl_mesh_vertices is not None and smpl_mesh_faces is not None:
+        ensure_project_src_on_path()
+        from project_cam.avatar.mesh_renderer import draw_mesh_cv2  # noqa: E402
+
+        mesh_vertices_vis = transform_world_point_y(
+            np.asarray(smpl_mesh_vertices, dtype=np.float64),
+            y_max,
+            enabled=world_y_mirror,
+        )
+        draw_mesh_cv2(
+            img,
+            mesh_vertices_vis,
+            smpl_mesh_faces,
+            proj,
+            color_bgr=(224, 224, 218) if cine else (205, 205, 200),
+            edge_bgr=None,
+            alpha=float(smpl_mesh_alpha),
+            max_faces=int(smpl_mesh_max_faces),
+        )
+
     # --- skeleton ---
     if joints is not None:
         jv = transform_world_point_y(np.asarray(joints, dtype=np.float64), y_max, enabled=world_y_mirror)
         sp, sok = proj(jv)
-        if not cine:
+        avatar_enabled = bool(avatar_body or avatar_markers)
+        avatar_draw = None
+        avatar_cfg = None
+        if avatar_enabled:
+            ensure_project_src_on_path()
+            from project_cam.assessment.live_trainer.avatar_renderer import (  # noqa: E402
+                AvatarRenderConfig,
+                draw_avatar_body_cv2,
+            )
+            avatar_draw = draw_avatar_body_cv2
+            avatar_cfg = AvatarRenderConfig(body_alpha=float(avatar_alpha))
+            if avatar_body:
+                avatar_draw(
+                    img,
+                    jv,
+                    proj,
+                    avatar_cfg,
+                    draw_body=True,
+                    draw_markers=False,
+                )
+
+        if not cine and not avatar_body:
             for s, e in CONNECTIONS:
                 if s < len(sok) and e < len(sok) and sok[s] and sok[e]:
                     line(sp[s], sp[e], (30, 30, 30), 2)
             for j in range(min(17, len(sok))):
                 if sok[j]:
                     cv2.circle(img, (int(sp[j,0]), int(sp[j,1])), 4, (50, 50, 50), -1, cv2.LINE_AA)
-        else:
+        elif cine and not avatar_body:
             # camera-space depth per joint -> node size + shading
             jhom = np.hstack([jv, np.ones((jv.shape[0], 1))])
             zc = (view @ jhom.T)[2]
@@ -1226,6 +2152,83 @@ def draw_live_scene_cv2(
                 cv2.circle(img, p, r + 3, _shade(c, 0.30), -1, cv2.LINE_AA)   # halo
                 cv2.circle(img, p, r, (255, 255, 255), -1, cv2.LINE_AA)       # core
                 cv2.circle(img, p, r, c, 1, cv2.LINE_AA)
+
+        if avatar_markers and avatar_draw is not None and avatar_cfg is not None:
+            avatar_draw(
+                img,
+                jv,
+                proj,
+                avatar_cfg,
+                draw_body=False,
+                draw_markers=True,
+            )
+
+        if primary_label:
+            finite = np.isfinite(np.asarray(joints)).all(axis=1)
+            head_indices = [
+                joint for joint in (0, 1, 2, 3, 4, 5, 6)
+                if joint < len(sok) and finite[joint] and sok[joint]
+            ]
+            if head_indices:
+                head_joint = min(head_indices, key=lambda joint: sp[joint, 1])
+                _draw_person_label(
+                    img,
+                    primary_label.get("text", ""),
+                    (int(sp[head_joint, 0]), int(sp[head_joint, 1]) - 20),
+                    tuple(primary_label.get("color", (255, 255, 255))),
+                    identified=bool(primary_label.get("identified")),
+                )
+
+    # Secondary tracks are display-only; the primary alone keeps the legacy
+    # coach/UDP/BLM/SMPL path above.
+    for person in extra_people or ():
+        person_joints = np.asarray(person.get("joints"), dtype=np.float64)
+        if person_joints.shape != (17, 3):
+            continue
+        finite = np.isfinite(person_joints).all(axis=1)
+        if not finite.any():
+            continue
+        color = tuple(person.get("color", MP_PALETTE[0]))
+        transformed = transform_world_point_y(
+            person_joints, y_max, enabled=world_y_mirror
+        )
+        person_screen, person_ok = proj(transformed)
+        if cine:
+            floor = transformed.copy()
+            floor[:, 2] = 0.0
+            floor_screen, floor_ok = proj(floor)
+            for start, end in CONNECTIONS:
+                if finite[start] and finite[end] and floor_ok[start] and floor_ok[end]:
+                    line(floor_screen[start], floor_screen[end], (26, 22, 20), 5)
+        for start, end in CONNECTIONS:
+            if finite[start] and finite[end] and person_ok[start] and person_ok[end]:
+                if cine:
+                    line(person_screen[start], person_screen[end], _shade(color, 0.30), 6)
+                line(person_screen[start], person_screen[end], color, 2)
+        for joint in range(17):
+            if not finite[joint] or not person_ok[joint]:
+                continue
+            point = (int(person_screen[joint, 0]), int(person_screen[joint, 1]))
+            cv2.circle(img, point, 6, _shade(color, 0.30), -1, cv2.LINE_AA)
+            cv2.circle(img, point, 3, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(img, point, 3, color, 1, cv2.LINE_AA)
+        if person.get("label"):
+            head_indices = [
+                joint for joint in (0, 1, 2, 3, 4, 5, 6)
+                if finite[joint] and person_ok[joint]
+            ]
+            if head_indices:
+                head_joint = min(
+                    head_indices, key=lambda joint: person_screen[joint, 1]
+                )
+                _draw_person_label(
+                    img,
+                    person["label"],
+                    (int(person_screen[head_joint, 0]),
+                     int(person_screen[head_joint, 1]) - 20),
+                    color,
+                    identified=bool(person.get("identified")),
+                )
 
     # --- ghost skeleton (predicted position) ---
     if ghost_joints is not None:
@@ -1402,6 +2405,40 @@ def draw_live_scene_cv2(
             cv2.putText(img, "REC", (img_w - 288, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (0, 0, 255), 2, cv2.LINE_AA)
 
+        if face_roster:
+            panel_x = 14
+            panel_y = 84 if limb_heat else 50
+            panel_w = 230
+            panel_h = 26 + 24 * len(face_roster)
+            cv2.rectangle(
+                img,
+                (panel_x - 8, panel_y - 6),
+                (panel_x + panel_w, panel_y + panel_h),
+                (18, 14, 13),
+                -1,
+            )
+            cv2.putText(
+                img, "LOCAL FACE LABELS", (panel_x, panel_y + 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (150, 255, 170), 1, cv2.LINE_AA,
+            )
+            row_y = panel_y + 36
+            id_put_text, _ = identity_text_helpers()
+            for entry in face_roster:
+                color = tuple(entry.get("color", (200, 200, 200)))
+                cv2.circle(img, (panel_x + 5, row_y - 5), 4, color, -1, cv2.LINE_AA)
+                id_put_text(
+                    img, str(entry.get("label", "UNKNOWN"))[:18],
+                    (panel_x + 17, row_y), 0.48, (228, 228, 228), 1,
+                )
+                status = "ID" if entry.get("identified") else "?"
+                cv2.putText(
+                    img, status, (panel_x + panel_w - 35, row_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (120, 255, 150) if entry.get("identified") else (120, 120, 120),
+                    1, cv2.LINE_AA,
+                )
+                row_y += 24
+
         # athlete metrics panel (bottom-left, dynamic height for rep counters)
         if metrics:
             mx = 14
@@ -1409,10 +2446,11 @@ def draw_live_scene_cv2(
                          ("Reach", metrics.get("reach_cm"), "cm"),
                          ("Max spd", metrics.get("max_speed_ms"), "m/s"))
             reps = metrics.get("reps") or {}
-            n_rows = len(base_rows) + (2 if reps else 0)
-            panel_h = 30 + n_rows * 24 + (12 if reps else 6)
+            leg_raise = metrics.get("leg_raise") or {}
+            n_rows = len(base_rows) + (2 if reps else 0) + (3 if leg_raise else 0)
+            panel_h = 30 + n_rows * 24 + (12 if (reps or leg_raise) else 6)
             my = img_h - panel_h
-            cv2.rectangle(img, (mx - 8, my - 6), (mx + 214, img_h - 8), (18, 14, 13), -1)
+            cv2.rectangle(img, (mx - 8, my - 6), (mx + 256, img_h - 8), (18, 14, 13), -1)
             cv2.putText(img, "ATHLETE", (mx, my + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (150, 255, 170), 1, cv2.LINE_AA)
             yy = my + 40
@@ -1430,6 +2468,24 @@ def draw_live_scene_cv2(
                 cv2.putText(img, f"Push-ups {reps.get('push_up', 0)}", (mx, yy),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 40), 2, cv2.LINE_AA)
                 yy += 26
+            if leg_raise:
+                cv2.line(img, (mx, yy - 15), (mx + 242, yy - 15), (60, 60, 60), 1)
+                yy += 4
+                l_ang = leg_raise.get("left_angle_deg")
+                r_ang = leg_raise.get("right_angle_deg")
+                l_txt = "--" if l_ang is None else f"{float(l_ang):4.0f}deg"
+                r_txt = "--" if r_ang is None else f"{float(r_ang):4.0f}deg"
+                cv2.putText(img, f"L leg {l_txt} r{leg_raise.get('left_reps', 0)}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (40, 170, 255), 1, cv2.LINE_AA)
+                yy += 24
+                cv2.putText(img, f"R leg {r_txt} r{leg_raise.get('right_reps', 0)}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 200, 40), 1, cv2.LINE_AA)
+                yy += 24
+                ident = str(leg_raise.get("identity_status", "--"))[:12]
+                swap = " swap" if leg_raise.get("swapped") else ""
+                cv2.putText(img, f"ID {ident}{swap}", (mx, yy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 220, 255), 1, cv2.LINE_AA)
+                yy += 22
 
         # speed heat legend
         if limb_heat:
@@ -1617,6 +2673,220 @@ class JointKalmanFilter:
         return self._initialized
 
 
+# COCO L/R keypoint pairs: eyes, ears, shoulders, elbows, wrists, hips,
+# knees, ankles.
+COCO_LR_PAIRS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
+# Pairs that mirror TOGETHER. A YOLO left/right mistake is a whole-person
+# mirror (camera facing the athlete) or a whole-limb confusion (legs folded
+# in a single-leg stance) — essentially never one joint alone. Deciding per
+# chain lets the unambiguous joints (hips/knees) carry the ambiguous ones
+# (near-coincident ankles), which per-pair decisions could not fix.
+COCO_LR_CHAINS = (
+    ((1, 2), (3, 4)),                     # face: eyes, ears
+    ((5, 6), (7, 8), (9, 10)),            # arms: shoulders, elbows, wrists
+    ((11, 12), (13, 14), (15, 16)),       # legs: hips, knees, ankles
+)
+
+
+def fix_lr_swaps_for_cam(kpts, scores, joints_state, R, tvec, K, D,
+                         min_conf=0.2, margin=0.75, min_advantage_px=6.0,
+                         wholebody_min_sep_px=15.0):
+    """Correct one camera's left/right keypoint swaps against the 3D state.
+
+    YOLO-Pose labels left/right per view, so cameras that face the person
+    (worst when prone/supine) mirror the labels. Triangulating a mixed label
+    set (cam A's left ankle paired with cam B's right ankle) collapses both
+    3D limbs onto their average — the "both legs rise" artifact and the
+    merged-legs single-leg-stance artifact.
+
+    For every L/R pair with a finite previous 3D estimate and confident 2D
+    points, reproject 3D-left/right into this camera and compare the direct
+    vs swapped pixel error.
+
+    A pair whose own evidence is CONCLUSIVE (a clear ratio + absolute
+    advantage one way or the other) decides for itself. Only a pair that
+    cannot tell — reprojections coincident because the 3D state collapsed,
+    so direct == cross — defers to the summed verdict of its conclusive
+    siblings in the same chain (face / arms / legs), which is how overlapping
+    ankles get carried by healthy hips and knees. A chain holding evidence
+    but none of it conclusive stays put; a chain with no measured pairs at
+    all follows the whole-body verdict, because a mirrored camera mirrors
+    everything.
+
+    Deciding per pair rather than by one summed chain vote matters in both
+    directions: a single genuinely mirrored pair must not be outvoted by
+    correctly-labelled siblings (a distal-only wrist confusion would
+    otherwise survive into joints_state and the UDP aim target), and a
+    mirrored majority must not drag a correctly-labelled sibling with it.
+
+    Anti-noise guards (a wrong swap now propagates to a whole chain, so the
+    evidence must be real, not a ratio fluke on tiny costs):
+    - every verdict needs an ABSOLUTE advantage too — (direct - cross) >
+      min_advantage_px per measured pair — so a near-coincident pair with
+      direct 8 px vs cross 5 px cannot mirror a limb by ratio alone;
+    - the whole-body verdict counts only pairs whose reprojected L/R
+      separation exceeds wholebody_min_sep_px (>=2 required): nearly
+      coincident eyes/ears carry no body-mirror evidence, and face noise
+      must never flip arms+legs.
+
+    Swaps only when clearly better (margin) so a noisy frame cannot dither
+    the labels. kpts/scores are modified in place; returns the number of
+    measured pairs inside swapped chains.
+    """
+    pair_cost = {}
+    pair_sep = {}
+    for lj, rj in COCO_LR_PAIRS:
+        pl, pr = joints_state[lj], joints_state[rj]
+        if not (np.isfinite(pl).all() and np.isfinite(pr).all()):
+            continue
+        if scores[lj] < min_conf or scores[rj] < min_conf:
+            continue
+        try:
+            ul = np.asarray(project_world_to_pixel(pl, R, tvec, K, D), dtype=np.float64)
+            ur = np.asarray(project_world_to_pixel(pr, R, tvec, K, D), dtype=np.float64)
+        except Exception:
+            continue
+        if not (np.isfinite(ul).all() and np.isfinite(ur).all()):
+            continue
+        kl = np.asarray(kpts[lj, :2], dtype=np.float64)
+        kr = np.asarray(kpts[rj, :2], dtype=np.float64)
+        direct = np.linalg.norm(kl - ul) + np.linalg.norm(kr - ur)
+        cross = np.linalg.norm(kl - ur) + np.linalg.norm(kr - ul)
+        pair_cost[(lj, rj)] = (direct, cross)
+        pair_sep[(lj, rj)] = float(np.linalg.norm(ul - ur))
+
+    def _swap_verdict(pairs):
+        if not pairs:
+            return False
+        direct = sum(pair_cost[p][0] for p in pairs)
+        cross = sum(pair_cost[p][1] for p in pairs)
+        return (cross < direct * margin
+                and (direct - cross) > min_advantage_px * len(pairs))
+
+    def _pair_verdict(p):
+        """This pair's OWN conclusive verdict, or None when it cannot tell.
+
+        True = swap, False = keep, None = ambiguous. A pair whose two
+        reprojections coincide (collapsed 3D state) has direct == cross and
+        so returns None — it carries no evidence of its own and must defer
+        to its siblings.
+        """
+        direct, cross = pair_cost[p]
+        if cross < direct * margin and (direct - cross) > min_advantage_px:
+            return True
+        if direct < cross * margin and (cross - direct) > min_advantage_px:
+            return False
+        return None
+
+    wb_pairs = [p for p in pair_cost if pair_sep[p] >= wholebody_min_sep_px]
+    whole_body_swap = len(wb_pairs) >= 2 and _swap_verdict(wb_pairs)
+
+    swapped = 0
+    for chain in COCO_LR_CHAINS:
+        measured = [p for p in chain if p in pair_cost]
+        verdicts = {p: _pair_verdict(p) for p in measured}
+        decisive = [p for p in measured if verdicts[p] is not None]
+        if not measured:
+            # No 3D evidence anywhere in this chain: a mirrored camera
+            # mirrors everything, so follow the whole-body verdict.
+            chain_swap = whole_body_swap
+        elif decisive:
+            # Ambiguous pairs follow their unambiguous siblings (collapsed
+            # ankles carried by healthy hips/knees).
+            chain_swap = _swap_verdict(decisive)
+        else:
+            # Has evidence, none of it conclusive: stay put.
+            chain_swap = False
+        for lj, rj in chain:
+            own = verdicts.get((lj, rj))
+            # A pair that can tell for itself decides for itself; only
+            # ambiguous or unmeasured pairs defer to the chain.
+            if not (chain_swap if own is None else own):
+                continue
+            kpts[[lj, rj], :2] = kpts[[rj, lj], :2]
+            scores[lj], scores[rj] = float(scores[rj]), float(scores[lj])
+            if (lj, rj) in pair_cost:
+                swapped += 1
+    return swapped
+
+
+def latency_compensated_point(kf, state_pt, t_ahead_sec, max_uncertainty_mm):
+    """Display-only latency compensation for one joint.
+
+    Returns the KF's short-horizon prediction instead of the smoothed state,
+    so the rendered skeleton cancels capture+inference+smoothing delay. Falls
+    back to the smoothed state whenever the filter is missing, uninitialized,
+    too uncertain at this horizon, or non-finite. Never mutates KF state and
+    never feeds back into joints_state/UDP/triangulation.
+
+    NOTE: kept as a standalone utility; the live display loop now uses
+    compute_display_leads (rigid-core lead) instead — per-joint independent
+    prediction makes displayed bone lengths breathe (sim 2026-07-17: ~2x
+    length-error at rest, 3-4x during a leg swing, 50-124 mm excursions).
+    """
+    if kf is None or t_ahead_sec <= 0.0 or not kf.initialized:
+        return state_pt
+    if kf.prediction_uncertainty(t_ahead_sec) >= float(max_uncertainty_mm):
+        return state_pt
+    pred = kf.predict_ahead(t_ahead_sec)
+    if not np.isfinite(pred).all():
+        return state_pt
+    return pred.astype(np.float32)
+
+
+LATENCY_CORE_JOINTS = (5, 6, 11, 12)  # shoulders + hips: best-conditioned
+
+
+def compute_display_leads(joint_kfs, joints_state, joint_fresh, comp_s,
+                          core_joints=LATENCY_CORE_JOINTS,
+                          max_uncertainty_mm=150.0, max_vel_mm_s=20000.0,
+                          max_lead_mm=250.0, min_core=3):
+    """Display-only latency leads: per-joint KF velocity * horizon, plus a
+    RIGID common-mode lead (component-wise median over the core joints).
+
+    Rendering each joint at its own KF prediction stretches bones — the two
+    ends of a bone get independent noisy velocity leads, refreshed at
+    different instants on the async rig (verified by simulation 2026-07-17;
+    the shared median lead matched raw bone stability exactly while keeping
+    the whole-body latency win). Gates per joint: KF initialized, joint FRESH
+    (a stale joint's covariance is frozen, its velocity may be garbage),
+    finite state, sane velocity, low uncertainty at this horizon. The rigid
+    lead needs >= min_core valid core joints, else it is zero — a corrupted
+    median would lurch the whole skeleton coherently. Never mutates KF state;
+    never feeds joints_state/UDP.
+
+    Returns (leads, rigid_lead): dict j -> lead vector (mm), and the common
+    lead vector (zeros when unavailable).
+    """
+    leads = {}
+    for j in range(17):
+        kf = joint_kfs[j]
+        if kf is None or not kf.initialized or not joint_fresh[j]:
+            continue
+        if not np.isfinite(joints_state[j]).all():
+            continue
+        vel = kf.get_velocity()
+        # Garbage filter, NOT a motion filter: only a diverged KF should trip
+        # this. It must sit far above real athletic speed, because exceeding it
+        # on the core joints drops the whole rigid lead to zero and translates
+        # the entire displayed skeleton in one frame. Magnitude is compared as
+        # a NORM — the old per-component max was anisotropic, rejecting
+        # (2100,0,0) while passing the faster (1900,1900,0).
+        if not np.isfinite(vel).all() or float(np.linalg.norm(vel)) > max_vel_mm_s:
+            continue
+        if kf.prediction_uncertainty(comp_s) >= float(max_uncertainty_mm):
+            continue
+        leads[j] = vel * comp_s
+    core = [leads[j] for j in core_joints if j in leads]
+    if len(core) < int(min_core):
+        return leads, np.zeros(3, dtype=np.float64)
+    rigid = np.median(np.stack(core), axis=0)
+    norm = float(np.linalg.norm(rigid))
+    if norm > max_lead_mm:
+        rigid = rigid * (max_lead_mm / norm)
+    return leads, rigid
+
+
 def make_mosaic(cam_frames, ball_boxes, per_cam_pose, cam_order=None, tile_size=None, copy_frames=False):
     order = list(cam_order) if cam_order is not None else list(CAM_ORDER)
     panels = []
@@ -1678,6 +2948,10 @@ def main():
     ap.add_argument("--extrinsics", default="arena_fixed/cal/extrinsics/extrinsics_fixed.json")
     ap.add_argument("--dimensions", default="arena_fixed/cal/extrinsics/Dimensions_fixed.txt")
     ap.add_argument("--ball-model", default="models/ball/yolo26m-672.engine")
+    ap.add_argument("--ball-max-batch", type=int, default=4,
+                    help="Max frames per ball-inference call. The TRT ball engine is exported "
+                         "with a batch<=4 optimization profile, so a >4-camera rig must chunk "
+                         "(mirrors --pose-max-batch). Raise only after re-exporting the engine.")
     ap.add_argument("--ball-imgsz", type=int, default=672,
                     help="Ball detector input size. 672 = default (engine was exported at this). "
                          "Try 960 for small/distant/bounce balls — dynamic-batch engine handles it, "
@@ -1760,6 +3034,41 @@ def main():
                      help="YOLO-Pose model path (.pt or .engine for TensorRT).")
     ap.add_argument("--pose-max-batch", type=int, default=4,
                     help="Max frames per pose inference call. Keep 4 for TensorRT engines exported with max batch 4.")
+    ap.add_argument("--pose-imgsz", type=int, default=0,
+                    help="Inference size for YOLO-Pose (0 = engine/model default). WARNING: TRT "
+                         "engines only decode correctly at their EXPORT imgsz — off-size calls emit "
+                         "garbage detections (300/frame, NMS stalls). Match the engine or re-export.")
+    ap.add_argument("--pose-min-cams", type=int, default=2,
+                    help="Minimum agreeing camera rays per 3D joint. With 6 cameras, 3 rejects the "
+                         "2-cam wrong-association tangles that appear on crouched/floor poses; a joint "
+                         "seen by fewer cams is dropped (holds last value) instead of flung.")
+    ap.add_argument("--pose-lr-fix", action=argparse.BooleanOptionalAction, default=True,
+                    help="Relabel per-camera left/right keypoints against the 3D state before "
+                         "triangulation (fixes 'both legs rise' when cameras facing the person "
+                         "mirror YOLO's left/right, worst on prone/supine poses).")
+    ap.add_argument("--pose-lr-split", action=argparse.BooleanOptionalAction, default=True,
+                    help="Geometric leg-pair independence: when left/right knees or ankles "
+                         "triangulate merged (< --pose-lr-split-merge-mm apart) while >=2 cameras "
+                         "see two clearly separated 2D points, re-solve the pair by per-camera "
+                         "label-flip consensus (geometry over labels) and re-name via previous "
+                         "state / parent anchors. Recovers a lifted leg that label mixing "
+                         "collapsed onto the stance leg.")
+    ap.add_argument("--pose-lr-split-merge-mm", type=float, default=100.0,
+                    help="3D distance below which an L/R pair counts as merged (and above which "
+                         "recovered points / naming references count as separated).")
+    ap.add_argument("--pose-lr-split-min-sep-px", type=float, default=18.0,
+                    help="Per-camera 2D separation required for that camera to vote in the "
+                         "pair split (cameras that cannot tell the two points apart are left out).")
+    ap.add_argument("--pose-lr-split-trigger-px", type=float, default=12.0,
+                    help="Run the pair split when either joint's mean ray residual over the "
+                         "pair cameras exceeds this (mixed labels leave cameras in strong "
+                         "disagreement even when the pair does NOT merge in 3D — e.g. both "
+                         "ankles landing at mid-height).")
+    ap.add_argument("--parallel-inference", action=argparse.BooleanOptionalAction, default=False,
+                    help="EXPERIMENTAL — known unsafe on torch 2.1 + TensorRT 10.16: concurrent "
+                         "ball+pose inference from two threads races on the CUDA stream and kills "
+                         "pose with 'illegal memory access' (observed live 2026-07-02). Keep off "
+                         "until the ball worker gets a dedicated CUDA stream or process.")
     ap.add_argument("--pose-conf", type=float, default=0.45)
     ap.add_argument("--pose-max-reproj-px", type=float, default=40.0,
                     help="Per-joint robust triangulation: reject camera rays whose "
@@ -1774,6 +3083,42 @@ def main():
         help="Hide triangulated joints if not updated for this many frames (default: pose_every*3).",
     )
     ap.add_argument("--switch-area-ratio", type=float, default=1.6)
+    ap.add_argument(
+        "--multi-person", type=int, default=1, metavar="N",
+        help="Track up to N people across cameras (1-8; 1 keeps the legacy path). "
+             "Only the stable primary feeds coach/UDP/BLM; secondary tracks are display-only.",
+    )
+    ap.add_argument("--mp-gate-px", type=float, default=150.0,
+                    help="Maximum projected-pelvis association distance in pixels.")
+    ap.add_argument("--mp-spawn-reproj-px", type=float, default=60.0,
+                    help="Maximum pair reprojection error for a new multi-camera track.")
+    ap.add_argument("--mp-min-separation-mm", type=float, default=400.0,
+                    help="Minimum 3D pelvis separation between distinct tracks.")
+    ap.add_argument("--mp-max-missed-frames", type=int, default=30,
+                    help="Frames a track may coast before its stable ID expires.")
+    ap.add_argument(
+        "--face-id", action=argparse.BooleanOptionalAction, default=False,
+        help="Enable local YuNet/SFace labels. This is identification convenience, not "
+             "liveness-tested authentication; no images or embeddings leave this computer.",
+    )
+    ap.add_argument("--face-models-dir", default="",
+                    help="YuNet/SFace ONNX directory (default: <repo>/models/face).")
+    ap.add_argument("--face-gallery", default="",
+                    help="Private face gallery .npz (default: XDG data/project-cam/face_gallery.npz).")
+    ap.add_argument("--face-id-every", type=int, default=10,
+                    help="Run Face ID every N frames on one round-robin camera.")
+    ap.add_argument("--face-id-min-score", type=float, default=0.363,
+                    help="Minimum SFace cosine similarity for a gallery vote.")
+    ap.add_argument("--face-id-min-votes", type=int, default=3,
+                    help="Consistent accepted observations required before showing a name.")
+    ap.add_argument("--face-id-max-misses", type=int, default=30,
+                    help="Unmatched Face-ID ticks before a locked name expires.")
+    ap.add_argument("--face-gate-px", type=float, default=140.0,
+                    help="Maximum face-center distance from a projected 3D head.")
+    ap.add_argument("--face-det-width", type=int, default=640,
+                    help="YuNet detection width; SFace crops still use the full frame.")
+    ap.add_argument("--primary-person", default="",
+                    help="Prefer this locked local Face-ID name as coach/UDP/BLM primary.")
     ap.add_argument("--ema-alpha", type=float, default=0.35, help="Smoothing factor for 3D points")
     ap.add_argument(
         "--display-smooth-alpha",
@@ -1831,9 +3176,49 @@ def main():
                          "(for slow USB / deep-hub cameras that take a while to enumerate).")
     ap.add_argument("--camera-open-retry-delay", type=float, default=5.0,
                     help="Seconds between camera-open retries.")
+    ap.add_argument("--camera-preflight-timeout", type=float, default=3.0,
+                    help="Seconds to wait for v4l2-ctl --info before opening a /dev/video* node. 0 disables.")
+    ap.add_argument(
+        "--min-active-cameras",
+        type=int,
+        default=2,
+        help="Minimum cameras that must pass preflight and open (default: 2).",
+    )
     ap.add_argument("--render-theme", choices=["cinematic", "classic"], default="cinematic",
                     help="3D arena visual style (cv2 backend): cinematic dark stage with "
                          "glowing depth-shaded skeleton + floor shadow + motion trails, or classic.")
+    ap.add_argument("--avatar-body", action=argparse.BooleanOptionalAction, default=False,
+                    help="Render a white/gray mannequin body from the live 3D joints.")
+    ap.add_argument("--avatar-markers", action=argparse.BooleanOptionalAction, default=False,
+                    help="Render blue joint and virtual body markers on the 3D avatar.")
+    ap.add_argument("--avatar-alpha", type=float, default=0.85,
+                    help="Mannequin body opacity in the OpenCV 3D view.")
+    ap.add_argument("--smpl-avatar", action=argparse.BooleanOptionalAction, default=False,
+                    help="Fit and render an optional SMPL mesh avatar from live 3D joints.")
+    ap.add_argument("--smpl-model-path", default="",
+                    help="Path to downloaded SMPL model files/directory. Required for --smpl-avatar.")
+    ap.add_argument("--smpl-model-type", default="smpl", choices=["smpl", "smplx"],
+                    help="Parametric body model type for the optional mesh avatar.")
+    ap.add_argument("--smpl-gender", default="neutral", choices=["neutral", "male", "female"],
+                    help="SMPL gender model to load.")
+    ap.add_argument("--smpl-device", default="cpu",
+                    help="Torch device for SMPL fitting. CPU is safest for live YOLO/TensorRT runs.")
+    ap.add_argument("--smpl-fit-every", type=int, default=5,
+                    help="Fit the optional SMPL mesh once every N live frames.")
+    ap.add_argument("--smpl-fit-iters", type=int, default=8,
+                    help="Adam iterations per live SMPL fit.")
+    ap.add_argument("--smpl-shape-calib-frames", type=int, default=30,
+                    help="Reliable SMPL fit frames used to estimate shape betas before locking them.")
+    ap.add_argument("--smpl-mesh-alpha", type=float, default=0.42,
+                    help="Opacity for the rendered SMPL mesh.")
+    ap.add_argument("--smpl-mesh-max-faces", type=int, default=1500,
+                    help="Maximum SMPL faces drawn per frame in the OpenCV renderer.")
+    ap.add_argument("--smpl-async", action=argparse.BooleanOptionalAction, default=True,
+                    help="Run SMPL fitting in a background thread (latest-only queue) so the live "
+                         "loop never blocks on a fit. --no-smpl-async restores the old inline fit.")
+    ap.add_argument("--smpl-anchor-follow", action=argparse.BooleanOptionalAction, default=True,
+                    help="Between fits, translate the last fitted mesh to the current mid-hip so the "
+                         "avatar tracks the person at full frame rate (pose trails, position does not).")
     ap.add_argument("--auto-orbit", action=argparse.BooleanOptionalAction, default=False,
                     help="Slowly rotate the 3D view (cinematic demo fly-around).")
     ap.add_argument("--auto-orbit-speed", type=float, default=8.0,
@@ -1842,14 +3227,28 @@ def main():
                     help="Display smoothing: oneeuro (low-lag adaptive, default) or ema (legacy lerp).")
     ap.add_argument("--oneeuro-mincutoff", type=float, default=1.2,
                     help="One-Euro min cutoff Hz (lower=smoother when still).")
-    ap.add_argument("--oneeuro-beta", type=float, default=0.3,
-                    help="One-Euro speed coefficient (higher=less lag on fast motion).")
+    ap.add_argument("--oneeuro-beta", type=float, default=0.015,
+                    help="One-Euro speed coefficient (higher=less lag on fast motion). Positions "
+                         "are in mm so speeds are mm/s: 0.015 opens the filter at genuinely fast "
+                         "motion (~2 m/s). The old default 0.3 was scaled for meter units and made "
+                         "the filter transparent at noise-level speeds (~100 mm/s) — i.e. no "
+                         "display smoothing at all whenever a joint moved.")
     ap.add_argument("--limb-heat", action=argparse.BooleanOptionalAction, default=False,
                     help="Colour skeleton bones by joint speed (blue=slow -> red=fast) instead of side colours.")
     ap.add_argument("--heat-vmax-mm-s", type=float, default=2500.0,
                     help="Joint speed (mm/s) mapped to the hottest colour.")
     ap.add_argument("--metrics-hud", action=argparse.BooleanOptionalAction, default=True,
                     help="Show live height/reach/speed panel (cinematic theme).")
+    ap.add_argument("--leg-raise-mode", action=argparse.BooleanOptionalAction, default=False,
+                    help="Enable supine leg-raise stabilization: lower-body left/right identity "
+                         "lock before EMA plus leg-angle HUD/log metrics. Off by default.")
+    ap.add_argument("--leg-raise-conf-min", type=float, default=0.25,
+                    help="Minimum 3D joint confidence used by the leg-raise tracker.")
+    ap.add_argument("--leg-raise-calibration-frames", type=int, default=450,
+                    help="Initial live-loop frames used to learn straight-leg segment priors "
+                         "(default 450, about 15 s at ~30 Hz).")
+    ap.add_argument("--leg-raise-log-jsonl", default="",
+                    help="Optional JSONL path for per-frame leg-raise diagnostics.")
     ap.add_argument("--count-reps", action=argparse.BooleanOptionalAction, default=False,
                     help="Run squat + push-up rep counters on the live 3D pose and show "
                          "them in the ATHLETE panel.")
@@ -1906,6 +3305,16 @@ def main():
     ap.add_argument("--udp-target-conf-min", type=float, default=0.35)
     ap.add_argument("--udp-target-cams-min", type=int, default=2)
     ap.add_argument(
+        "--udp-capture-context", action="store_true",
+        help="Attach a capture-context block (opened camera roles + calibration "
+             "fingerprint) to every UDP target packet, and keep sending a "
+             "heartbeat with an empty 'joints' when no joint passes the gates. "
+             "Consumers can then tell 'nobody tracked' from 'viewer dead' and "
+             "compute an honest valid-frame ratio. OFF by default and never for "
+             "the launcher: a packet without a 'safety' block disarms the "
+             "runtime by design, so heartbeats would fight fire control. "
+             "Enable only for view-only consumers (training drill board).")
+    ap.add_argument(
         "--session-id",
         default="",
         help="Optional session identifier. Embedded in --event-log-output records "
@@ -1929,6 +3338,36 @@ def main():
                      help="Show predicted-position ghost skeleton in 3D view (auto-enabled when predict-ahead-ms > 0).")
     ap.add_argument("--predict-max-uncertainty-mm", type=float, default=500.0,
                      help="Max prediction uncertainty (mm) before prediction is discarded.")
+    ap.add_argument("--pose-latency-comp-ms", type=float, default=0.0,
+                     help="Display-only latency compensation horizon (0 = off; try 100-150 at 15 FPS). "
+                          "The skeleton is shifted by ONE rigid common-mode lead (median of the "
+                          "shoulder/hip KF velocity leads) so bone lengths are preserved exactly; "
+                          "per-joint independent prediction is available via "
+                          "--pose-latency-comp-joint-frac. Does NOT change joints_state, UDP "
+                          "packets, or triangulation.")
+    ap.add_argument("--pose-latency-comp-joint-frac", type=float, default=0.0,
+                     help="Fraction (0-1) of each joint's OWN lead blended on top of the rigid "
+                          "common lead. 0 = fully rigid (recommended; per-joint leads make bones "
+                          "breathe), 1 = per-joint leads (diagnostic A/B only). NOTE: 1.0 is NOT a "
+                          "byte-exact restoration of the pre-2026-07-17 path — it leads from the "
+                          "EMA'd joints_state rather than the KF position (~84 mm behind on a "
+                          "walking ankle), and a joint gated out of the per-joint leads keeps the "
+                          "rigid lead instead of its own, so it under-states the old bone "
+                          "breathing by roughly 2x.")
+    ap.add_argument("--pose-bone-consistency", action=argparse.BooleanOptionalAction, default=True,
+                     help="Display-only skeletal rigidity: learn per-athlete bone lengths (running "
+                          "median of confident same-tick triangulations) and softly clamp rendered "
+                          "limb bone lengths into a tolerance band. Inert until lengths lock; never "
+                          "touches joints_state, UDP, scoring, or safety snapshots.")
+    ap.add_argument("--pose-bone-tol", type=float, default=0.13,
+                     help="Bone-length tolerance band (fraction of the learned length) before the "
+                          "display clamp engages.")
+    ap.add_argument("--pose-bone-min-samples", type=int, default=45,
+                     help="Confident samples per bone before its learned length locks (~5 s at 10 Hz).")
+    ap.add_argument("--kalman-measured-dt", action=argparse.BooleanOptionalAction, default=False,
+                     help="Propagate joint KFs by measured wall-clock time between pose updates instead "
+                          "of a fixed 1/fps step. Fixes velocity over-estimation (and predict-ahead "
+                          "overshoot) when the loop runs below --fps or --pose-every > 1.")
 
     # --- BLM Demo Mode ---
     ap.add_argument("--demo-blm", action="store_true", default=False,
@@ -1988,6 +3427,19 @@ def main():
     args.pose_max_batch = max(1, int(args.pose_max_batch))
     args.viz_every = max(1, int(args.viz_every))
     args.mosaic_every = max(1, int(args.mosaic_every))
+    args.multi_person = int(args.multi_person)
+    if not 1 <= args.multi_person <= 8:
+        ap.error("--multi-person must be between 1 and 8")
+    args.face_id_every = max(1, int(args.face_id_every))
+    args.face_id_min_votes = max(1, int(args.face_id_min_votes))
+    args.face_id_max_misses = max(0, int(args.face_id_max_misses))
+    args.face_det_width = max(1, int(args.face_det_width))
+    args.mp_gate_px = max(0.0, float(args.mp_gate_px))
+    args.mp_spawn_reproj_px = max(0.0, float(args.mp_spawn_reproj_px))
+    args.mp_min_separation_mm = max(1.0, float(args.mp_min_separation_mm))
+    args.mp_max_missed_frames = max(0, int(args.mp_max_missed_frames))
+    args.face_gate_px = max(0.0, float(args.face_gate_px))
+    args.face_id_min_score = float(np.clip(args.face_id_min_score, -1.0, 1.0))
     if args.joint_stale_frames is None:
         args.joint_stale_frames = max(3, args.pose_every * 3)
     else:
@@ -2156,6 +3608,119 @@ def main():
         rep_frame_kinematics = _rk_fk
         print("[INFO] Rep counters enabled: squat + push_up  (press 'c' to reset)")
 
+    leg_raise_tracker = None
+    leg_raise_identity_tracker = None
+    leg_raise_apply_identity_lock = None
+    leg_raise_apply_segment_drops = None
+    leg_raise_lower_body_snapshot = None
+    leg_raise_pose2d_snapshot = None
+    leg_raise_segment_lengths_snapshot = None
+    leg_raise_prior_acc = None
+    leg_raise_prior_validator = None
+    leg_raise_priors = None
+    leg_raise_state = None
+    leg_raise_contact_interpreter = None
+    if args.leg_raise_mode:
+        ensure_project_src_on_path()
+        from project_cam.assessment.live_trainer.contact_interpreter import (  # noqa: E402
+            ContactAwarePoseInterpreter as _ContactAwarePoseInterpreter,
+            ContactInterpretationConfig as _ContactInterpretationConfig,
+        )
+        from project_cam.assessment.live_trainer.leg_raise_mode import (  # noqa: E402
+            LegRaiseConfig as _LegRaiseConfig,
+            LegRaiseTracker as _LegRaiseTracker,
+        )
+        from project_cam.assessment.live_trainer.leg_priors import (  # noqa: E402
+            LegChainValidator3D as _LegRaiseLegChainValidator3D,
+            LegPriorAccumulator as _LegRaiseLegPriorAccumulator,
+        )
+        from project_cam.assessment.live_trainer.leg_raise_stabilizer import (  # noqa: E402
+            apply_leg_identity_lock as _apply_leg_identity_lock,
+            apply_leg_segment_drops as _apply_leg_segment_drops,
+            lower_body_pose2d_snapshot as _lower_body_pose2d_snapshot,
+            lower_body_snapshot as _lower_body_snapshot,
+            segment_lengths_snapshot as _segment_lengths_snapshot,
+        )
+        from project_cam.assessment.live_trainer.limb_identity import (  # noqa: E402
+            LimbIdentityTracker as _LimbIdentityTracker,
+        )
+
+        leg_raise_calibration_frames = max(0, int(args.leg_raise_calibration_frames))
+        leg_raise_tracker = _LegRaiseTracker(_LegRaiseConfig(
+            conf_min=float(args.leg_raise_conf_min),
+            max_reproj_px=float(args.pose_max_reproj_px),
+            calibration_frames=leg_raise_calibration_frames,
+        ))
+        leg_raise_identity_tracker = _LimbIdentityTracker()
+        leg_raise_apply_identity_lock = _apply_leg_identity_lock
+        leg_raise_apply_segment_drops = _apply_leg_segment_drops
+        leg_raise_lower_body_snapshot = _lower_body_snapshot
+        leg_raise_pose2d_snapshot = _lower_body_pose2d_snapshot
+        leg_raise_segment_lengths_snapshot = _segment_lengths_snapshot
+        leg_raise_prior_acc = _LegRaiseLegPriorAccumulator(min_frames=8, std_tol_mm=50.0)
+        leg_raise_prior_validator = _LegRaiseLegChainValidator3D
+        leg_raise_contact_interpreter = _ContactAwarePoseInterpreter(
+            _ContactInterpretationConfig(min_confidence=float(args.leg_raise_conf_min))
+        )
+        print(
+            "[INFO] Leg-raise mode enabled: lower-body identity lock + segment gate "
+            f"+ angle/contact diagnostics (calibration_frames={leg_raise_calibration_frames})"
+        )
+
+    smpl_fitter = None
+    smpl_fit_result = None
+    smpl_fit_pelvis = None
+    smpl_async_active = False
+    smpl_pelvis_fn = None
+    if args.smpl_avatar:
+        if not args.smpl_model_path:
+            print("[WARN] --smpl-avatar requested but --smpl-model-path is empty; disabling SMPL mesh.")
+        else:
+            ensure_project_src_on_path()
+            _OptionalAvatarDependencyError = RuntimeError
+            try:
+                from project_cam.avatar import (  # noqa: E402
+                    OptionalAvatarDependencyError as _OptionalAvatarDependencyError,
+                    SmplFitConfig as _SmplFitConfig,
+                    SmplSessionFitter as _SmplSessionFitter,
+                )
+
+                smpl_fitter = _SmplSessionFitter(_SmplFitConfig(
+                    model_path=str(args.smpl_model_path),
+                    model_type=str(args.smpl_model_type),
+                    gender=str(args.smpl_gender),
+                    device=str(args.smpl_device),
+                    max_iters=int(args.smpl_fit_iters),
+                    learning_rate=0.04,
+                    min_confidence=float(args.pose_conf),
+                    include_head=False,
+                    optimize_betas=False,
+                    temporal_weight=1e-3,
+                    floor_z_mm=0.0,
+                    floor_penalty_weight=1e-7,
+                ), shape_calibration_frames=int(args.smpl_shape_calib_frames))
+                from project_cam.avatar import (  # noqa: E402
+                    pelvis_from_coco as _smpl_pelvis_from_coco,
+                )
+                smpl_pelvis_fn = _smpl_pelvis_from_coco
+                if args.smpl_async:
+                    from project_cam.avatar import AsyncSmplFitter as _AsyncSmplFitter  # noqa: E402
+                    smpl_fitter = _AsyncSmplFitter(smpl_fitter)
+                    smpl_async_active = True
+                print(
+                    "[INFO] SMPL mesh avatar enabled "
+                    f"(fit_every={max(1, int(args.smpl_fit_every))}, "
+                    f"shape_calib_frames={max(0, int(args.smpl_shape_calib_frames))}, "
+                    f"device={args.smpl_device}, async={smpl_async_active}, "
+                    f"anchor_follow={bool(args.smpl_anchor_follow)})"
+                )
+            except (_OptionalAvatarDependencyError, FileNotFoundError, ValueError) as exc:
+                print(f"[WARN] SMPL mesh avatar disabled: {exc}")
+                smpl_fitter = None
+            except Exception as exc:
+                print(f"[WARN] SMPL mesh avatar failed to initialize; disabled: {exc}")
+                smpl_fitter = None
+
     # Rising-edge tracker for target_chosen emits. We log a "target_chosen" event
     # every time blm_aim transitions from non-AIM_OK to AIM_OK (or the joint name
     # changes while still AIM_OK), not on every frame.
@@ -2169,7 +3734,15 @@ def main():
             udp_joint_indices_needed.add(JOINT_NAME_TO_IDX["right_hip"])
         elif idx is not None:
             udp_joint_indices_needed.add(idx)
-    triangulated_joint_indices = list(range(17)) if (args.show_3d or args.coach_overlay) else sorted(udp_joint_indices_needed)
+    triangulated_joint_indices = (
+        list(range(17))
+        if (
+            args.show_3d
+            or args.coach_overlay
+            or (args.multi_person > 1 and udp_sock is not None)
+        )
+        else sorted(udp_joint_indices_needed)
+    )
 
     ball_needed = args.track_ball and (args.show_3d or args.show_2d)
     pose_needed = args.show_2d or args.coach_overlay or bool(triangulated_joint_indices)
@@ -2225,6 +3798,32 @@ def main():
             active_cams.append((cam, dev))
     if len(active_cams) < 2:
         raise RuntimeError("Need at least 2 cameras in config.")
+    configured_camera_count = len(active_cams)
+    min_active_cameras = validate_min_active_cameras(
+        args.min_active_cameras, configured_camera_count
+    )
+
+    # Early camera preflight: verify V4L2 devices BEFORE loading CUDA/TensorRT
+    # models. A dead rig (config pointing at the wrong camera setup, unplugged
+    # hub) must fail in seconds with a clear message — not after a ~10 s engine
+    # load that then segfaults in CUDA teardown on exit.
+    preflight_ok = {}
+    for cam, dev in active_cams:
+        ready, ready_reason = v4l2_device_ready(
+            dev,
+            timeout_s=float(args.camera_preflight_timeout),
+        )
+        preflight_ok[cam] = ready
+        if not ready:
+            print(f"[WARN] {cam} preflight failed: {dev} -- {ready_reason}; skipping.")
+    ready_cams = [c for c, _ in active_cams if preflight_ok[c]]
+    require_camera_count(
+        stage="passed preflight",
+        available_count=len(ready_cams),
+        configured_count=configured_camera_count,
+        minimum=min_active_cameras,
+        config_path=args.config,
+    )
 
     intr = {}
     for cam, _ in active_cams:
@@ -2248,6 +3847,14 @@ def main():
     else:
         print("[INFO] Ball detector disabled (no active visualization output).")
     print(f"[INFO] Ball device: {args.ball_device} | Pose device: {args.pose_device}")
+
+    ball_executor = None
+    if args.parallel_inference and ball_model is not None:
+        # Single worker: one in-flight ball batch, overlapped with the pose
+        # stage. Two YOLO objects never share a predictor, so cross-thread
+        # calls are safe; the GPU serializes kernels, the CPU pre/post overlap.
+        ball_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ball-infer")
+        print("[INFO] Parallel inference: ball runs in a worker thread overlapped with pose.")
 
     pose_infer = None
     yolopose_model = None
@@ -2283,6 +3890,9 @@ def main():
     open_retries = int(args.camera_open_retries)
     open_delay = float(args.camera_open_retry_delay)
     for cam, dev in active_cams:
+        if not preflight_ok.get(cam, False):
+            # Already reported by the early preflight above.
+            continue
         cap = None
         for attempt in range(open_retries + 1):
             apply_uvc_low_latency_controls(dev, cam, args, log=False)
@@ -2321,11 +3931,26 @@ def main():
 
     # Drop cameras that failed to open; triangulation needs at least two.
     active_cams = [(c, d) for (c, d) in active_cams if c in caps]
-    if len(active_cams) < 2:
-        raise RuntimeError(
-            f"Only {len(active_cams)} camera(s) opened; need >=2 for 3D. "
-            f"Check USB connections / config device paths.")
+    require_camera_count(
+        stage="opened",
+        available_count=len(active_cams),
+        configured_count=configured_camera_count,
+        minimum=min_active_cameras,
+        config_path=args.config,
+    )
     print(f"[INFO] {len(active_cams)} cameras active: {[c for c, _ in active_cams]}")
+
+    # Built once: roles and calibration cannot change mid-run.
+    capture_context = build_capture_context(
+        args.config, args.intrinsics_dir, args.extrinsics, args.dimensions,
+        configured_roles=[c for c in cam_order if c in cams_cfg],
+        opened_roles=[c for c, _ in active_cams],
+    ) if args.udp_capture_context else None
+    if capture_context is not None:
+        print(f"[INFO] capture context: "
+              f"{len(capture_context['opened_camera_roles'])}/"
+              f"{len(capture_context['configured_camera_roles'])} roles open, "
+              f"{capture_context['calibration_fingerprint'][:19]}...")
 
     fig = None
     ax = None
@@ -2364,7 +3989,126 @@ def main():
     per_cam_pose_state = {}
     pose_lock_active = False
     pose_reacquire_every = max(1, min(args.pose_every, 2))
+    pose_last_error_printed = None
+    pose_last_error_print_t = 0.0
     pose_select_conf = max(0.2, args.pose_conf - 0.10)
+
+    # Optional cross-view people association and local face labels.  The
+    # legacy path remains untouched when --multi-person=1 and --no-face-id.
+    per_cam_all_cands = {}
+    mp_assignments = {}
+    mp_tracker = None
+    mp_states = {}
+    mp_primary_tid = None
+    mp_primary_epoch = 0
+    last_pose_safety_ts = None
+    last_pose_frame = 0
+    safety_unassigned_candidate_count = 0
+    safety_ambiguous_detections = False
+    latest_safety_snapshot = None
+    face_identifier = None
+    face_gallery = None
+    face_voters = {}
+    face_voter_factory = None
+    face_single_track = None
+    face_rr_offset = 0
+    face_last_error_t = 0.0
+    extra_people_render = []
+    primary_label_render = None
+    face_roster_render = []
+
+    def _mp_project_fn(point_mm, cam):
+        if cam not in extr or cam not in intr:
+            return None
+        camera_point = (
+            extr[cam]["R"] @ np.asarray(point_mm, dtype=np.float64).reshape(3, 1)
+            + extr[cam]["tvec"]
+        )
+        if camera_point[2, 0] <= 1.0:
+            return None
+        projected = project_world_to_pixel(
+            point_mm,
+            extr[cam]["R"],
+            extr[cam]["tvec"],
+            intr[cam]["K"],
+            intr[cam]["D"],
+        )
+        return projected if np.isfinite(projected).all() else None
+
+    def _mp_triangulate_fn(cam_a, uv_a, cam_b, uv_b):
+        if cam_a not in intr or cam_b not in intr or cam_a not in proj or cam_b not in proj:
+            return None
+        und_a = undistort_points(tuple(uv_a), intr[cam_a]["K"], intr[cam_a]["D"])
+        und_b = undistort_points(tuple(uv_b), intr[cam_b]["K"], intr[cam_b]["D"])
+        point = triangulate_multi({cam_a: und_a, cam_b: und_b}, proj)
+        if point is None or not np.isfinite(point).all() or not -500.0 <= point[2] <= 4000.0:
+            return None
+        errors = []
+        for cam, observed in ((cam_a, uv_a), (cam_b, uv_b)):
+            projected = project_world_to_pixel(
+                point,
+                extr[cam]["R"],
+                extr[cam]["tvec"],
+                intr[cam]["K"],
+                intr[cam]["D"],
+            )
+            errors.append(float(np.linalg.norm(projected - np.asarray(observed))))
+        error = max(errors)
+        return (point, error) if np.isfinite(error) else None
+
+    if args.multi_person > 1 or args.face_id:
+        ensure_project_src_on_path()
+        from project_cam.tracking import (  # noqa: E402
+            FaceGallery,
+            FaceIdentifier,
+            MultiPersonTracker,
+            NameVoter,
+            PersonTrack,
+            default_face_gallery_path,
+        )
+
+        if args.multi_person > 1:
+            mp_tracker = MultiPersonTracker(
+                max_people=args.multi_person,
+                gate_px=args.mp_gate_px,
+                min_cams_spawn=2,
+                spawn_reproj_px=args.mp_spawn_reproj_px,
+                min_separation_mm=args.mp_min_separation_mm,
+                max_missed_frames=args.mp_max_missed_frames,
+                anchor_min_conf=max(0.2, args.pose_conf - 0.15),
+            )
+            print(f"[INFO] Multi-person association enabled (max={args.multi_person})")
+            if args.viz_backend != "cv2":
+                print("[WARN] Secondary skeletons render only with --viz-backend cv2")
+
+        face_voter_factory = lambda: NameVoter(  # noqa: E731
+            min_votes=args.face_id_min_votes,
+            max_misses=args.face_id_max_misses,
+        )
+        if args.face_id:
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            models_dir = Path(args.face_models_dir) if args.face_models_dir else repo_root / "models" / "face"
+            gallery_path = Path(args.face_gallery) if args.face_gallery else default_face_gallery_path()
+            try:
+                face_gallery = FaceGallery.load(gallery_path)
+                face_identifier = FaceIdentifier(
+                    models_dir, det_width=args.face_det_width
+                )
+                enrolled = face_gallery.people()
+                print(
+                    f"[INFO] Local Face ID enabled; gallery={gallery_path}; "
+                    f"enrolled={', '.join(sorted(enrolled)) if enrolled else 'none'}"
+                )
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                print(f"[WARN] Local Face ID disabled: {exc}")
+                face_identifier = None
+                face_gallery = None
+            if mp_tracker is None and face_identifier is not None:
+                face_single_track = PersonTrack(
+                    tid=0,
+                    pelvis_mm=np.zeros(3, dtype=np.float64),
+                    last_seen_frame=-10_000_000,
+                )
     ball_boxes_state = {}
     ball_state = None
     ball_kf = JointKalmanFilter(
@@ -2379,6 +4123,10 @@ def main():
     ball_frames_since_multicam = 10_000
     ball_flight_state.frames_since_multicam = ball_frames_since_multicam
     joints_state = np.full((17, 3), np.nan, dtype=np.float32)
+    # joints_filtered = display-filter output (OneEuro/EMA); joints_display =
+    # joints_filtered + display-only bone-length clamp. Two buffers so the ema
+    # display branch never interpolates against clamped values.
+    joints_filtered = np.full((17, 3), np.nan, dtype=np.float32)
     joints_display = np.full((17, 3), np.nan, dtype=np.float32)
     joints_predicted = np.full((17, 3), np.nan, dtype=np.float32)
     joints_conf_state = np.zeros((17,), dtype=np.float32)
@@ -2389,6 +4137,26 @@ def main():
     joint_trails = {j: deque(maxlen=max(2, args.trail_len)) for j in TRAIL_JOINTS}
     # One-Euro display filters (one per joint) + speed estimate for heat-colouring
     oneeuro_filters = [OneEuroVec(args.oneeuro_mincutoff, args.oneeuro_beta) for _ in range(17)]
+    # Rigid-core latency-comp common lead (EMA'd across frames, display-only)
+    latency_rigid_lead = np.zeros(3, dtype=np.float64)
+    # Display-only bone-length consistency (learned per-athlete lengths)
+    bone_bank = None
+    stabilize_display_skeleton = None
+    if args.pose_bone_consistency:
+        try:
+            ensure_project_src_on_path()
+            from project_cam.viz.skeleton_stabilize import (  # noqa: E402
+                BoneLengthBank,
+                stabilize_display_skeleton,
+            )
+
+            bone_bank = BoneLengthBank(min_samples=args.pose_bone_min_samples)
+            print("[INFO] Display bone-length consistency ON "
+                  f"(tol {args.pose_bone_tol:.2f}, locks after "
+                  f"{args.pose_bone_min_samples} confident samples/bone)")
+        except Exception as exc:  # pragma: no cover - depends on env
+            bone_bank = None
+            print(f"[WARN] Bone-length consistency unavailable: {exc}")
     joint_speeds = np.zeros((17,), dtype=np.float64)
     prev_speed_pos = np.full((17, 3), np.nan, dtype=np.float64)
     prev_speed_t = None
@@ -2408,6 +4176,8 @@ def main():
         )
         for _ in range(17)
     ]
+    # Wall-clock time of each joint's last KF update (for --kalman-measured-dt).
+    joint_kf_last_update_t = [None] * 17
     coach_prev_camera = None
     coach_lock_hold = 0  # frames the push-up camera stays locked after acquisition loss
     coach_rois = {}
@@ -2441,6 +4211,12 @@ def main():
         ball_log_path.parent.mkdir(parents=True, exist_ok=True)
         ball_log_fh = ball_log_path.open("a", encoding="utf-8")
         print(f"[INFO] Ball JSONL enabled: {ball_log_path}")
+    leg_raise_log_fh = None
+    if args.leg_raise_log_jsonl:
+        leg_raise_log_path = Path(args.leg_raise_log_jsonl)
+        leg_raise_log_path.parent.mkdir(parents=True, exist_ok=True)
+        leg_raise_log_fh = leg_raise_log_path.open("a", encoding="utf-8")
+        print(f"[INFO] Leg-raise JSONL enabled: {leg_raise_log_path}")
 
     stop_hints = []
     if args.coach_overlay:
@@ -2535,26 +4311,394 @@ def main():
             ball_obs = {}
             ball_obs_px = {}
             run_ball = ball_model is not None and (frame_idx % args.ball_every == 0)
+            ball_future = None
+            ball_results = None
             timer.start("ball")
             if run_ball:
-                ball_boxes = {}
-                ball_results = ball_model(
-                    frame_batch,
+                # Chunked like the pose path: the TRT engine profile caps the
+                # batch, so an over-large camera count must split calls.
+                ball_infer_kwargs = dict(
                     conf=args.ball_conf,
                     imgsz=args.ball_imgsz,
                     verbose=False,
                     stream=False,
                     device=args.ball_device,
                 )
+                if ball_executor is not None:
+                    # Overlap ball inference with the pose stage below; results
+                    # are collected in the "ballwait" segment before ball
+                    # triangulation. Saves ~min(ball_ms, pose_ms) per frame.
+                    ball_future = ball_executor.submit(
+                        run_yolopose_batched, ball_model, frame_batch,
+                        args.ball_max_batch, **ball_infer_kwargs)
+                else:
+                    ball_results = run_yolopose_batched(
+                        ball_model, frame_batch, args.ball_max_batch,
+                        **ball_infer_kwargs)
+            timer.stop("ball")
 
+            per_cam_pose = per_cam_pose_state.copy()
+            joints_3d_now = {}
+            mp_measurements_by_tid = {}
+            pose_every_eff = args.pose_every if pose_lock_active else pose_reacquire_every
+            run_pose = (pose_infer is not None or yolopose_model is not None) and (frame_idx % pose_every_eff == 0)
+            pose_inference_succeeded = False
+            per_cam_pose_curr = {}
+            pose_und_by_cam = {}
+            per_cam_all_cands = {}
+            pose_raw_counts = {}
+            pose_error = ""
+            timer.start("pose")
+            if run_pose and use_yolopose and yolopose_model is not None:
+                # YOLO-Pose path: single model for detection + keypoints
+                try:
+                    yp_kwargs = dict(
+                        max_batch_size=args.pose_max_batch,
+                        device=args.pose_device,
+                        verbose=False,
+                        conf=0.15,
+                    )
+                    if int(args.pose_imgsz) > 0:
+                        # Without this, ultralytics letterboxes every frame to
+                        # the engine's default imgsz (1280) — 4x wasted compute
+                        # when the capture is 640x360. Dynamic engines accept
+                        # any size in the profile, so 640 is a pure speedup.
+                        yp_kwargs["imgsz"] = int(args.pose_imgsz)
+                    yp_results = run_yolopose_batched(
+                        yolopose_model,
+                        frame_batch,
+                        **yp_kwargs,
+                    )
+                    pose_inference_succeeded = pose_inference_results_complete(
+                        yp_results,
+                        expected_count=len(frame_batch),
+                        require_dict=False,
+                    )
+                except Exception as exc:
+                    pose_error = repr(exc)
+                    yp_results = [None] * len(frame_batch)
+                    # A permanently-failing pose stage must be loud in the
+                    # terminal, not only a field in the perf JSONL — a CUDA
+                    # error here previously rendered an empty arena with no
+                    # visible hint. Rate-limited to one line per 5 s.
+                    t_perr = time.monotonic()
+                    if (pose_error != pose_last_error_printed
+                            or t_perr - pose_last_error_print_t > 5.0):
+                        print(f"[WARN] pose inference failing: {pose_error}")
+                        pose_last_error_printed = pose_error
+                        pose_last_error_print_t = t_perr
+                for cam, yp_res in zip(batch_order, yp_results):
+                    if yp_res is None or not hasattr(yp_res, "keypoints") or yp_res.keypoints is None:
+                        pose_raw_counts[cam] = 0
+                        pose_state[cam] = None
+                        per_cam_pose_state.pop(cam, None)
+                        continue
+                    kpts_all = yp_res.keypoints.data.cpu().numpy()  # (N, 17, 3) — x, y, conf
+                    pose_raw_counts[cam] = int(len(kpts_all))
+                    if len(kpts_all) == 0:
+                        pose_state[cam] = None
+                        per_cam_pose_state.pop(cam, None)
+                        continue
+                    cands = []
+                    for pi in range(len(kpts_all)):
+                        kpts_17 = kpts_all[pi, :17, :2].astype(np.float32)
+                        scores_17 = kpts_all[pi, :17, 2].astype(np.float32)
+                        person_dict = {"keypoints": kpts_17, "keypoint_scores": scores_17}
+                        cand = extract_person_pose(person_dict)
+                        if cand is not None:
+                            cands.append(cand)
+                    if not cands:
+                        pose_state[cam] = None
+                        per_cam_pose_state.pop(cam, None)
+                        continue
+                    per_cam_all_cands[cam] = cands
+                    if mp_tracker is not None:
+                        continue
+                    selected = select_target_person(
+                        candidates=cands,
+                        prev_state=pose_state[cam],
+                        conf_thresh=pose_select_conf,
+                        switch_area_ratio=args.switch_area_ratio,
+                    )
+                    pose_state[cam] = selected
+                    if selected is not None:
+                        pose_pair = (selected["kpts"], selected["scores"])
+                        per_cam_pose_curr[cam] = pose_pair
+                        per_cam_pose_state[cam] = pose_pair
+                    else:
+                        per_cam_pose_state.pop(cam, None)
+            elif run_pose and pose_infer is not None:
+                # MMPose path (original)
+                try:
+                    res_list = list(pose_infer(frame_batch, return_vis=False, batch_size=len(frame_batch)))
+                    pose_inference_succeeded = pose_inference_results_complete(
+                        res_list,
+                        expected_count=len(frame_batch),
+                        require_dict=True,
+                    )
+                except Exception as exc:
+                    pose_error = repr(exc)
+                    res_list = []
+
+                for cam, res in zip(batch_order, res_list):
+                    preds = res.get("predictions", []) if isinstance(res, dict) else []
+                    persons = flatten_predictions(preds)
+                    pose_raw_counts[cam] = int(len(persons))
+                    cands = []
+                    for p in persons:
+                        cand = extract_person_pose(p)
+                        if cand is not None:
+                            cands.append(cand)
+                    if not cands:
+                        pose_state[cam] = None
+                        per_cam_pose_state.pop(cam, None)
+                        continue
+                    per_cam_all_cands[cam] = cands
+                    if mp_tracker is not None:
+                        continue
+                    selected = select_target_person(
+                        candidates=cands,
+                        prev_state=pose_state[cam],
+                        conf_thresh=pose_select_conf,
+                        switch_area_ratio=args.switch_area_ratio,
+                    )
+                    pose_state[cam] = selected
+                    if selected is not None:
+                        pose_pair = (selected["kpts"], selected["scores"])
+                        per_cam_pose_curr[cam] = pose_pair
+                        per_cam_pose_state[cam] = pose_pair
+                    else:
+                        per_cam_pose_state.pop(cam, None)
+
+            last_pose_safety_ts, last_pose_frame = (
+                update_pose_safety_observation(
+                    inference_succeeded=pose_inference_succeeded,
+                    observation_ts=t_now,
+                    frame_idx=frame_idx,
+                    previous_ts=last_pose_safety_ts,
+                    previous_frame=last_pose_frame,
+                )
+            )
+
+            if pose_inference_succeeded and mp_tracker is not None:
+                mp_assignments = mp_tracker.step(
+                    frame_idx,
+                    per_cam_all_cands,
+                    project_fn=_mp_project_fn,
+                    triangulate_fn=_mp_triangulate_fn,
+                )
+                for removed_tid in mp_tracker.last_pruned_ids:
+                    mp_states.pop(removed_tid, None)
+                    face_voters.pop(removed_tid, None)
+
+                viable_primary_tracks = {
+                    track_id
+                    for track_id, camera_selection in mp_assignments.items()
+                    if len(camera_selection) >= 2
+                }
+                next_primary_tid = choose_primary_track_id(
+                    mp_tracker.tracks,
+                    mp_primary_tid,
+                    args.primary_person,
+                    viable_primary_tracks,
+                )
+                if next_primary_tid != mp_primary_tid:
+                    mp_primary_epoch = advance_primary_epoch(
+                        primary_epoch=mp_primary_epoch,
+                        current_track_id=mp_primary_tid,
+                        next_track_id=next_primary_tid,
+                    )
+                    if mp_primary_tid is not None:
+                        old_state = mp_states.setdefault(
+                            mp_primary_tid, make_secondary_pose_state()
+                        )
+                        old_state["joints"][:] = joints_state
+                        old_state["display"][:] = joints_display
+                        old_state["conf"][:] = joints_conf_state
+                        old_state["cams"][:] = joints_cam_state
+                        old_state["last_seen"][:] = joint_last_seen_frame
+
+                    target_state = mp_states.get(next_primary_tid)
+                    if target_state is None:
+                        joints_state.fill(np.nan)
+                        joints_filtered.fill(np.nan)
+                        joints_display.fill(np.nan)
+                        joints_conf_state.fill(0.0)
+                        joints_cam_state.fill(0)
+                        joint_last_seen_frame.fill(-10_000_000)
+                    else:
+                        joints_state[:] = target_state["joints"]
+                        joints_filtered[:] = target_state["display"]
+                        joints_display[:] = target_state["display"]
+                        joints_conf_state[:] = target_state["conf"]
+                        joints_cam_state[:] = target_state["cams"]
+                        joint_last_seen_frame[:] = target_state["last_seen"]
+                    joints_predicted.fill(np.nan)
+                    oneeuro_filters = [
+                        OneEuroVec(args.oneeuro_mincutoff, args.oneeuro_beta)
+                        for _ in range(17)
+                    ]
+                    latency_rigid_lead = np.zeros(3, dtype=np.float64)
+                    if bone_bank is not None:
+                        # New primary = (possibly) a different physical person
+                        # — their bone lengths must be re-learned from scratch.
+                        bone_bank.reset()
+                    joint_kfs = [
+                        JointKalmanFilter(
+                            process_noise=args.kalman_process_noise,
+                            measurement_noise=args.kalman_measurement_noise,
+                            dt=kalman_dt,
+                        )
+                        for _ in range(17)
+                    ]
+                    joint_kf_last_update_t = [None] * 17
+                    joint_speeds.fill(0.0)
+                    prev_speed_pos.fill(np.nan)
+                    prev_speed_t = None
+                    for trail in joint_trails.values():
+                        trail.clear()
+                    pose_lock_active = False
+                    _prev_aim_status = None
+                    _prev_aim_joint = None
+
+                    # Every object below learns history for one athlete.  A
+                    # primary-track switch must start a fresh session so reps,
+                    # limb identity, body proportions, and avatar shape cannot
+                    # leak from the previous person.
+                    if coach_counter is not None:
+                        coach_counter = _coach_make_counter(
+                            args.coach_exercise, coach_rules
+                        )
+                        coach_state = coach_counter.state
+                        coach_metrics = {}
+                        coach_was_acquired = False
+                        coach_prev_camera = None
+                        coach_lock_hold = 0
+                        coach_rois.clear()
+                        coach_keypoint_stabilizer = _CoachKeypointStabilizer()
+                        if coach_pushup_floor_anchor is not None:
+                            coach_pushup_floor_anchor = _PushupFloorAnchor()
+                    coach_leg_priors = None
+                    if coach_leg_prior_acc is not None:
+                        coach_leg_prior_acc.reset()
+                    coach_ankle_fallback_streak = {15: 0, 16: 0}
+
+                    if leg_raise_tracker is not None:
+                        leg_raise_tracker = type(leg_raise_tracker)(leg_raise_tracker.config)
+                        leg_raise_state = None
+                    if leg_raise_identity_tracker is not None:
+                        leg_raise_identity_tracker.reset()
+                    if leg_raise_prior_acc is not None:
+                        leg_raise_prior_acc.reset()
+                    leg_raise_priors = None
+                    if leg_raise_contact_interpreter is not None:
+                        leg_raise_contact_interpreter.reset()
+
+                    if smpl_fitter is not None and hasattr(smpl_fitter, "reset"):
+                        smpl_fitter.reset()
+                    smpl_fit_result = None
+                    smpl_fit_pelvis = None
+
+                    if rep_counters:
+                        for exercise in list(rep_counters):
+                            rep_counters[exercise] = rep_make_fn(
+                                exercise, rep_rules_map[exercise]
+                            )
+                            rep_count_state[exercise] = 0
+                    mp_primary_tid = next_primary_tid
+
+                primary_selection = mp_assignments.get(mp_primary_tid, {})
+                for cam in batch_order:
+                    candidate_idx = primary_selection.get(cam)
+                    candidates = per_cam_all_cands.get(cam) or []
+                    if candidate_idx is None or candidate_idx >= len(candidates):
+                        pose_state[cam] = None
+                        per_cam_pose_state.pop(cam, None)
+                        continue
+                    selected = candidates[candidate_idx]
+                    pose_state[cam] = selected
+                    pose_pair = (selected["kpts"], selected["scores"])
+                    per_cam_pose_curr[cam] = pose_pair
+                    per_cam_pose_state[cam] = pose_pair
+
+            observed_unassigned_candidate_count = 0
+            if pose_inference_succeeded:
+                observed_unassigned_candidate_count = (
+                    count_unassigned_pose_candidates(
+                        per_cam_all_cands,
+                        mp_assignments,
+                        pose_raw_counts=pose_raw_counts,
+                    )
+                    if mp_tracker is not None
+                    else 0
+                )
+            (
+                safety_unassigned_candidate_count,
+                safety_ambiguous_detections,
+            ) = update_pose_safety_ambiguity(
+                inference_succeeded=pose_inference_succeeded,
+                previous_unassigned_candidate_count=(
+                    safety_unassigned_candidate_count
+                ),
+                observed_unassigned_candidate_count=(
+                    observed_unassigned_candidate_count
+                ),
+            )
+
+            # --- Shared post-processing for both YOLO-Pose and MMPose ---
+            if run_pose:
+                per_cam_pose = per_cam_pose_state.copy()
+                has_pose_lock = len(per_cam_pose_curr) >= 2
+                force_pose_snap = has_pose_lock and not pose_lock_active
+                pose_lock_active = has_pose_lock
+
+                if args.pose_lr_fix:
+                    # Per-camera left/right relabeling against the 3D state.
+                    # Cameras facing the person (worst when lying/prone) mirror
+                    # YOLO's left/right; triangulating mixed labels collapses
+                    # both 3D limbs together ("both legs rise" artifact).
+                    for cam, kdat in per_cam_pose_curr.items():
+                        if cam not in extr or cam not in intr:
+                            continue
+                        fix_lr_swaps_for_cam(
+                            kdat[0], kdat[1], joints_state,
+                            extr[cam]["R"], extr[cam]["tvec"],
+                            intr[cam]["K"], intr[cam]["D"],
+                            min_conf=args.pose_conf)
+
+                for cam, kdat in per_cam_pose_curr.items():
+                    kpts, scores = kdat
+                    j_ids = []
+                    pts = []
+                    for j in triangulated_joint_indices:
+                        if scores[j] >= args.pose_conf:
+                            j_ids.append(j)
+                            pts.append((float(kpts[j, 0]), float(kpts[j, 1])))
+                    und_pts = undistort_points_batch(pts, intr[cam]["K"], intr[cam]["D"])
+                    pose_und_by_cam[cam] = {jid: up for jid, up in zip(j_ids, und_pts)}
+            else:
+                force_pose_snap = False
+            timer.stop("pose")
+
+            # Collect ball detections (submitted before the pose stage when
+            # --parallel-inference is on) and pick per-camera candidates.
+            timer.start("ballwait")
+            if run_ball:
+                if ball_future is not None:
+                    try:
+                        ball_results = ball_future.result()
+                    except Exception as exc:
+                        print(f"[WARN] parallel ball inference failed this frame: {exc}")
+                        ball_results = []
+                ball_boxes = {}
                 kf_pred_3d = None
                 if (args.ball_kf_gate_px > 0.0
                         and ball_kf is not None and ball_kf.initialized):
                     dt_ahead = 1.0 / max(1, args.fps)
                     kf_pred_3d = ball_kf.predict_ahead(dt_ahead)
 
-                for cam, res in zip(batch_order, ball_results):
-                    if res.boxes is None or len(res.boxes) == 0:
+                for cam, res in zip(batch_order, ball_results or []):
+                    if res is None or res.boxes is None or len(res.boxes) == 0:
                         continue
                     xyxy_arr = res.boxes.xyxy.cpu().numpy()
                     conf_arr = res.boxes.conf.cpu().numpy()
@@ -2593,116 +4737,7 @@ def main():
                     ball_obs_px[cam] = np.array([cx, cy], dtype=np.float64)
                     ball_boxes[cam] = (int(x1), int(y1), int(x2), int(y2), conf)
                 ball_boxes_state = ball_boxes
-            timer.stop("ball")
-
-            per_cam_pose = per_cam_pose_state.copy()
-            joints_3d_now = {}
-            pose_every_eff = args.pose_every if pose_lock_active else pose_reacquire_every
-            run_pose = (pose_infer is not None or yolopose_model is not None) and (frame_idx % pose_every_eff == 0)
-            per_cam_pose_curr = {}
-            pose_und_by_cam = {}
-            timer.start("pose")
-            if run_pose and use_yolopose and yolopose_model is not None:
-                # YOLO-Pose path: single model for detection + keypoints
-                try:
-                    yp_results = run_yolopose_batched(
-                        yolopose_model,
-                        frame_batch,
-                        max_batch_size=args.pose_max_batch,
-                        device=args.pose_device,
-                        verbose=False,
-                        conf=0.15,
-                    )
-                except Exception:
-                    yp_results = [None] * len(frame_batch)
-                for cam, yp_res in zip(batch_order, yp_results):
-                    if yp_res is None or not hasattr(yp_res, "keypoints") or yp_res.keypoints is None:
-                        pose_state[cam] = None
-                        per_cam_pose_state.pop(cam, None)
-                        continue
-                    kpts_all = yp_res.keypoints.data.cpu().numpy()  # (N, 17, 3) — x, y, conf
-                    if len(kpts_all) == 0:
-                        pose_state[cam] = None
-                        per_cam_pose_state.pop(cam, None)
-                        continue
-                    cands = []
-                    for pi in range(len(kpts_all)):
-                        kpts_17 = kpts_all[pi, :17, :2].astype(np.float32)
-                        scores_17 = kpts_all[pi, :17, 2].astype(np.float32)
-                        person_dict = {"keypoints": kpts_17, "keypoint_scores": scores_17}
-                        cand = extract_person_pose(person_dict)
-                        if cand is not None:
-                            cands.append(cand)
-                    if not cands:
-                        pose_state[cam] = None
-                        per_cam_pose_state.pop(cam, None)
-                        continue
-                    selected = select_target_person(
-                        candidates=cands,
-                        prev_state=pose_state[cam],
-                        conf_thresh=pose_select_conf,
-                        switch_area_ratio=args.switch_area_ratio,
-                    )
-                    pose_state[cam] = selected
-                    if selected is not None:
-                        pose_pair = (selected["kpts"], selected["scores"])
-                        per_cam_pose_curr[cam] = pose_pair
-                        per_cam_pose_state[cam] = pose_pair
-                    else:
-                        per_cam_pose_state.pop(cam, None)
-            elif run_pose and pose_infer is not None:
-                # MMPose path (original)
-                try:
-                    res_list = list(pose_infer(frame_batch, return_vis=False, batch_size=len(frame_batch)))
-                except Exception:
-                    res_list = []
-
-                for cam, res in zip(batch_order, res_list):
-                    preds = res.get("predictions", []) if isinstance(res, dict) else []
-                    persons = flatten_predictions(preds)
-                    cands = []
-                    for p in persons:
-                        cand = extract_person_pose(p)
-                        if cand is not None:
-                            cands.append(cand)
-                    if not cands:
-                        pose_state[cam] = None
-                        per_cam_pose_state.pop(cam, None)
-                        continue
-                    selected = select_target_person(
-                        candidates=cands,
-                        prev_state=pose_state[cam],
-                        conf_thresh=pose_select_conf,
-                        switch_area_ratio=args.switch_area_ratio,
-                    )
-                    pose_state[cam] = selected
-                    if selected is not None:
-                        pose_pair = (selected["kpts"], selected["scores"])
-                        per_cam_pose_curr[cam] = pose_pair
-                        per_cam_pose_state[cam] = pose_pair
-                    else:
-                        per_cam_pose_state.pop(cam, None)
-
-            # --- Shared post-processing for both YOLO-Pose and MMPose ---
-            if run_pose:
-                per_cam_pose = per_cam_pose_state.copy()
-                has_pose_lock = len(per_cam_pose_curr) >= 2
-                force_pose_snap = has_pose_lock and not pose_lock_active
-                pose_lock_active = has_pose_lock
-
-                for cam, kdat in per_cam_pose_curr.items():
-                    kpts, scores = kdat
-                    j_ids = []
-                    pts = []
-                    for j in triangulated_joint_indices:
-                        if scores[j] >= args.pose_conf:
-                            j_ids.append(j)
-                            pts.append((float(kpts[j, 0]), float(kpts[j, 1])))
-                    und_pts = undistort_points_batch(pts, intr[cam]["K"], intr[cam]["D"])
-                    pose_und_by_cam[cam] = {jid: up for jid, up in zip(j_ids, und_pts)}
-            else:
-                force_pose_snap = False
-            timer.stop("pose")
+            timer.stop("ballwait")
 
             timer.start("triang")
             ball_3d = None
@@ -2887,6 +4922,15 @@ def main():
                 rec["ball_fallback_reject_reason"] = ball_debug_reason
                 ball_log_fh.write(json.dumps(rec) + "\n")
 
+            leg_raise_identity_result = None
+            leg_raise_pose2d_for_log = None
+            leg_raise_raw_joints_for_log = None
+            leg_raise_raw_lengths_for_log = None
+            leg_raise_identity_joints_for_log = None
+            leg_raise_identity_lengths_for_log = None
+            leg_raise_dropped_joints_for_log = []
+            leg_raise_prior_status_for_log = None
+            leg_raise_contact_for_log = None
             if run_pose:
                 for j in triangulated_joint_indices:
                     obs = {}
@@ -2905,7 +4949,8 @@ def main():
                     if len(obs) >= 2:
                         pt, used = robust_triangulate_joint(
                             obs, obs_px, proj, extr, intr,
-                            min_cams=2, max_reproj_px=args.pose_max_reproj_px)
+                            min_cams=max(2, int(args.pose_min_cams)),
+                            max_reproj_px=args.pose_max_reproj_px)
                         if pt is not None:
                             joints_3d_now[j] = pt
                             joint_last_seen_frame[j] = frame_idx
@@ -2917,6 +4962,96 @@ def main():
                     else:
                         joints_cam_state[j] = 0
                         joints_conf_state[j] = 0.0
+
+                # Geometric leg-pair independence (single-leg stance fix).
+                # Mixed per-camera left/right labels triangulate both knees /
+                # ankles onto their average — the lifted leg drags the stance
+                # leg up with it. The state-prior relabeling above cannot help
+                # once joints_state itself merged, so when a pair lands merged
+                # while >=2 cameras clearly see two separate 2D points, re-solve
+                # the pair by label-flip consensus (labels distrusted, geometry
+                # decides) and re-name via previous state / parent anchors.
+                # Knees first so freshly split knees anchor the ankles.
+                lr_split_replaced = set()
+                if args.pose_lr_split:
+                    for (lj, rj), (aj_l, aj_r) in (((13, 14), (11, 12)),
+                                                   ((15, 16), (13, 14))):
+                        pl = joints_3d_now.get(lj)
+                        pr = joints_3d_now.get(rj)
+                        if pl is None or pr is None:
+                            continue
+                        # Transient whole-pair swap guard: clean geometry,
+                        # exchanged names — swap back before it poisons state.
+                        if rename_crossed_lr_pair(
+                                pl, pr, joints_state[lj], joints_state[rj],
+                                min_sep_mm=args.pose_lr_split_merge_mm):
+                            joints_3d_now[lj], joints_3d_now[rj] = pr, pl
+                            joints_conf_state[lj], joints_conf_state[rj] = (
+                                joints_conf_state[rj], joints_conf_state[lj])
+                            joints_cam_state[lj], joints_cam_state[rj] = (
+                                joints_cam_state[rj], joints_cam_state[lj])
+                            lr_split_replaced.update((lj, rj))
+                            pl = joints_3d_now.get(lj)
+                            pr = joints_3d_now.get(rj)
+                        obs_l, opx_l, obs_r, opx_r = {}, {}, {}, {}
+                        pair_scores = []
+                        for cam in batch_order:
+                            um = pose_und_by_cam.get(cam)
+                            if not um or lj not in um or rj not in um:
+                                continue
+                            kc = per_cam_pose_curr[cam][0]
+                            p2l = np.array([float(kc[lj, 0]), float(kc[lj, 1])],
+                                           dtype=np.float64)
+                            p2r = np.array([float(kc[rj, 0]), float(kc[rj, 1])],
+                                           dtype=np.float64)
+                            # A camera that cannot tell the two points apart
+                            # has no vote in the split.
+                            if float(np.linalg.norm(p2l - p2r)) < args.pose_lr_split_min_sep_px:
+                                continue
+                            obs_l[cam], opx_l[cam] = um[lj], p2l
+                            obs_r[cam], opx_r[cam] = um[rj], p2r
+                            pair_scores.append(float(per_cam_pose_curr[cam][1][lj]))
+                            pair_scores.append(float(per_cam_pose_curr[cam][1][rj]))
+                        if len(obs_l) < 2:
+                            continue
+                        # Trigger on EITHER symptom of mixed labels: the pair
+                        # merged in 3D, or the label-trusting result leaves the
+                        # pair cameras in strong disagreement (both ankles at
+                        # mid-height is high-residual but NOT merged).
+                        sep_3d = float(np.linalg.norm(
+                            np.asarray(pl, dtype=np.float64)
+                            - np.asarray(pr, dtype=np.float64)))
+                        resid = max(
+                            _pair_norm_cost_px(pl, obs_l, extr, intr),
+                            _pair_norm_cost_px(pr, obs_r, extr, intr))
+                        if (sep_3d >= args.pose_lr_split_merge_mm
+                                and resid <= args.pose_lr_split_trigger_px):
+                            continue
+                        anchor_l = joints_3d_now.get(aj_l)
+                        anchor_r = joints_3d_now.get(aj_r)
+                        if anchor_l is None and np.isfinite(joints_state[aj_l]).all():
+                            anchor_l = joints_state[aj_l]
+                        if anchor_r is None and np.isfinite(joints_state[aj_r]).all():
+                            anchor_r = joints_state[aj_r]
+                        split = split_merged_lr_pair(
+                            obs_l, opx_l, obs_r, opx_r, proj, extr, intr,
+                            prev_l=joints_state[lj], prev_r=joints_state[rj],
+                            anchor_l=anchor_l, anchor_r=anchor_r,
+                            min_cams=2, max_reproj_px=args.pose_max_reproj_px,
+                            min_sep_mm=args.pose_lr_split_merge_mm)
+                        if split is None:
+                            continue
+                        new_l, new_r, used_l, used_r, _flipped, _renamed = split
+                        joints_3d_now[lj] = np.asarray(new_l, dtype=np.float64)
+                        joints_3d_now[rj] = np.asarray(new_r, dtype=np.float64)
+                        lr_split_replaced.update((lj, rj))
+                        joint_last_seen_frame[lj] = frame_idx
+                        joint_last_seen_frame[rj] = frame_idx
+                        pair_conf = float(np.mean(pair_scores)) if pair_scores else 0.0
+                        joints_conf_state[lj] = pair_conf
+                        joints_conf_state[rj] = pair_conf
+                        joints_cam_state[lj] = int(len(used_l))
+                        joints_cam_state[rj] = int(len(used_r))
 
                 # Per-athlete leg-prior validation: observe stable plank
                 # frames to learn femur/tibia lengths, then drop any
@@ -3010,6 +5145,84 @@ def main():
                         joints_cam_state[_ank_j] = 1
                         coach_ankle_fallback_streak[_ank_j] += 1
 
+                if leg_raise_lower_body_snapshot is not None:
+                    leg_raise_raw_joints_for_log = leg_raise_lower_body_snapshot(joints_3d_now)
+                    leg_raise_raw_lengths_for_log = leg_raise_segment_lengths_snapshot(joints_3d_now)
+                    if leg_raise_pose2d_snapshot is not None:
+                        leg_raise_pose2d_for_log = leg_raise_pose2d_snapshot(
+                            {cam: per_cam_pose_curr.get(cam) for cam in batch_order}
+                        )
+
+                if (
+                    leg_raise_apply_identity_lock is not None
+                    and leg_raise_identity_tracker is not None
+                ):
+                    leg_raise_identity_result = leg_raise_apply_identity_lock(
+                        joints_3d_now,
+                        joints_conf_state,
+                        joints_cam_state,
+                        leg_raise_identity_tracker,
+                    )
+                    for _leg_j in (11, 12, 13, 14, 15, 16):
+                        if _leg_j in joints_3d_now:
+                            joint_last_seen_frame[_leg_j] = frame_idx
+
+                if leg_raise_lower_body_snapshot is not None:
+                    leg_raise_identity_joints_for_log = leg_raise_lower_body_snapshot(joints_3d_now)
+                    leg_raise_identity_lengths_for_log = leg_raise_segment_lengths_snapshot(joints_3d_now)
+
+                if (
+                    leg_raise_prior_acc is not None
+                    and leg_raise_prior_validator is not None
+                    and leg_raise_apply_segment_drops is not None
+                ):
+                    if frame_idx <= int(args.leg_raise_calibration_frames):
+                        leg_raise_prior_status_for_log = "calibrating"
+                        leg_raise_prior_acc.observe(joints_3d_now, joints_cam_state, frame_idx)
+                    elif leg_raise_priors is None:
+                        leg_raise_priors = leg_raise_prior_acc.try_lock()
+                        leg_raise_prior_status_for_log = "locked" if leg_raise_priors is not None else "unlocked"
+                    else:
+                        leg_raise_prior_status_for_log = "locked"
+
+                    if leg_raise_priors is not None:
+                        _drops = leg_raise_prior_validator.filter_drops(
+                            joints_3d_now, leg_raise_priors, tol_pct=0.25
+                        )
+                        if _drops:
+                            _expanded_drops = leg_raise_apply_segment_drops(
+                                joints_3d_now,
+                                joints_conf_state,
+                                joints_cam_state,
+                                _drops,
+                            )
+                            leg_raise_dropped_joints_for_log = sorted(int(j) for j in _expanded_drops)
+                            for _drop_j in _expanded_drops:
+                                joint_last_seen_frame[_drop_j] = -10_000_000
+                                joints_state[_drop_j] = np.nan
+                                joints_filtered[_drop_j] = np.nan
+                                joints_display[_drop_j] = np.nan
+                                joints_predicted[_drop_j] = np.nan
+
+                # Bone-length learning (display-only rigidity, see
+                # project_cam.viz.skeleton_stabilize). Learn from SAME-TICK
+                # triangulations before the EMA merges ticks: skip joints the
+                # L/R split rewrote this frame and joints moving fast vs the
+                # previous state (async-tick skew corrupts lengths in motion);
+                # conf/cams gates + plausibility bounds live in the bank.
+                if bone_bank is not None:
+                    _bone_obs = np.full((17, 3), np.nan, dtype=np.float64)
+                    for j, pt in joints_3d_now.items():
+                        if j in lr_split_replaced:
+                            continue
+                        prev = joints_state[j]
+                        if (np.isfinite(prev).all()
+                                and float(np.linalg.norm(pt - prev)) > 50.0):
+                            continue
+                        _bone_obs[j] = pt
+                    bone_bank.observe(_bone_obs, conf=joints_conf_state,
+                                      cams=joints_cam_state)
+
                 for j, pt in joints_3d_now.items():
                     prev = None if force_pose_snap else (joints_state[j] if np.isfinite(joints_state[j]).all() else None)
                     # Adaptive EMA: snap faster on large movements (jumps, lunges)
@@ -3020,6 +5233,68 @@ def main():
                             alpha_eff = min(1.0, args.ema_alpha * (disp / args.ema_snap_thresh_mm))
                     joints_state[j] = ema_update(prev, pt, alpha=alpha_eff)
 
+                if mp_tracker is not None:
+                    if mp_primary_tid in mp_tracker.tracks:
+                        primary_measurements = {
+                            joint: {
+                                "point": point,
+                                "conf": joints_conf_state[joint],
+                                "cams": joints_cam_state[joint],
+                            }
+                            for joint, point in joints_3d_now.items()
+                        }
+                        pelvis = person_pelvis_point(
+                            {
+                                joint: value["point"]
+                                for joint, value in primary_measurements.items()
+                            }
+                        )
+                        if pelvis is not None:
+                            mp_tracker.update(mp_primary_tid, pelvis, frame_idx)
+
+                    for track_id, camera_selection in mp_assignments.items():
+                        if track_id == mp_primary_tid:
+                            continue
+                        measurements = triangulate_person_assignment(
+                            camera_selection,
+                            per_cam_all_cands,
+                            intr=intr,
+                            proj=proj,
+                            extr=extr,
+                            joint_indices=triangulated_joint_indices,
+                            pose_conf=args.pose_conf,
+                            min_cams=max(2, int(args.pose_min_cams)),
+                            max_reproj_px=args.pose_max_reproj_px,
+                        )
+                        mp_measurements_by_tid[track_id] = measurements
+                        pelvis = person_pelvis_point(
+                            {
+                                joint: value["point"]
+                                for joint, value in measurements.items()
+                            }
+                        )
+                        if pelvis is not None:
+                            mp_tracker.update(track_id, pelvis, frame_idx)
+
+            if mp_tracker is not None:
+                active_track_ids = set(mp_tracker.tracks)
+                for stale_tid in set(mp_states) - active_track_ids:
+                    mp_states.pop(stale_tid, None)
+                    face_voters.pop(stale_tid, None)
+                for track_id in active_track_ids:
+                    if track_id == mp_primary_tid:
+                        continue
+                    state = mp_states.setdefault(track_id, make_secondary_pose_state())
+                    update_secondary_pose_state(
+                        state,
+                        mp_measurements_by_tid.get(track_id, {}),
+                        frame_idx=frame_idx,
+                        stale_frames=args.joint_stale_frames,
+                        ema_alpha=args.ema_alpha,
+                        snap_thresh_mm=args.ema_snap_thresh_mm,
+                        display_alpha=args.display_smooth_alpha,
+                    )
+
             for j in triangulated_joint_indices:
                 if frame_idx - int(joint_last_seen_frame[j]) > args.joint_stale_frames:
                     joints_state[j] = np.nan
@@ -3028,10 +5303,21 @@ def main():
 
             # Kalman filter update and prediction
             if run_pose:
+                t_kf_now = time.perf_counter()
                 for j in triangulated_joint_indices:
                     kf = joint_kfs[j]
                     if j in joints_3d_now:
-                        kf.predict_step()
+                        if args.kalman_measured_dt:
+                            last_t = joint_kf_last_update_t[j]
+                            # Clamp: first update falls back to the nominal step,
+                            # long gaps cap at 0.5 s so a re-acquired joint does
+                            # not inherit a huge covariance blow-up.
+                            dt_meas = (kalman_dt if last_t is None
+                                       else min(0.5, max(1e-3, t_kf_now - last_t)))
+                            kf.predict_step(dt_meas)
+                            joint_kf_last_update_t[j] = t_kf_now
+                        else:
+                            kf.predict_step()
                         kf.update_step(joints_3d_now[j])
             if use_prediction:
                 t_ahead_sec = args.predict_ahead_ms / 1000.0
@@ -3046,19 +5332,39 @@ def main():
                     else:
                         joints_predicted[j] = np.nan
 
-            # Display-only interpolation: smooth joints_display toward joints_state
+            # Display-only interpolation: smooth joints_filtered toward joints_state
             # every frame, regardless of whether pose ran. Does NOT touch joints_state,
             # UDP, or triangulation — purely visual.
             # Uses adaptive alpha: fast movements (jumps) snap instantly.
             d_alpha_base = args.display_smooth_alpha
             snap_thresh = args.ema_snap_thresh_mm
             use_oneeuro = (args.display_filter == "oneeuro")
+            comp_s = max(0.0, float(args.pose_latency_comp_ms)) / 1000.0
+            joint_fresh = (frame_idx - joint_last_seen_frame) <= max(3, int(args.pose_every))
+            lat_leads = {}
+            if comp_s > 0.0:
+                # Rigid-core latency compensation: one common lead for the
+                # whole skeleton (bone lengths preserved exactly), optionally
+                # blended with a fraction of each joint's own lead. Per-joint
+                # independent prediction is what made the skeleton "liquid".
+                lat_leads, lat_rigid = compute_display_leads(
+                    joint_kfs, joints_state, joint_fresh, comp_s)
+                # Median membership changes frame-to-frame; a light EMA keeps
+                # the common lead from stepping (coherent but visible).
+                latency_rigid_lead = 0.5 * latency_rigid_lead + 0.5 * lat_rigid
+            lat_frac = min(1.0, max(0.0, float(args.pose_latency_comp_joint_frac)))
             t_disp = time.perf_counter()
             sdt = None if prev_speed_t is None else max(1e-3, t_disp - prev_speed_t)
             for j in range(17):
                 src = joints_state[j]
+                if comp_s > 0.0 and np.isfinite(src).all():
+                    # Display-only: cancel capture+inference+smoothing delay.
+                    # joints_state, UDP and triangulation are untouched.
+                    src = src + latency_rigid_lead
+                    if lat_frac > 0.0 and j in lat_leads:
+                        src = src + lat_frac * (lat_leads[j] - latency_rigid_lead)
                 if not np.isfinite(src).all():
-                    joints_display[j] = np.nan
+                    joints_filtered[j] = np.nan
                     oneeuro_filters[j].reset()
                     joint_speeds[j] = 0.0
                     prev_speed_pos[j] = np.nan
@@ -3068,19 +5374,128 @@ def main():
                     joint_speeds[j] = float(np.linalg.norm(src - prev_speed_pos[j]) / sdt)
                 prev_speed_pos[j] = src.astype(np.float64)
                 if use_oneeuro:
-                    joints_display[j] = oneeuro_filters[j](src, t_disp).astype(np.float32)
+                    joints_filtered[j] = oneeuro_filters[j](src, t_disp).astype(np.float32)
                 else:
-                    dst = joints_display[j]
+                    dst = joints_filtered[j]
                     if not np.isfinite(dst).all():
-                        joints_display[j] = src.copy()
+                        joints_filtered[j] = src.copy()
                     else:
                         d_alpha = d_alpha_base
                         if snap_thresh > 0:
                             disp = float(np.linalg.norm(src - dst))
                             if disp > snap_thresh:
                                 d_alpha = min(1.0, d_alpha_base * (disp / snap_thresh))
-                        joints_display[j] = dst + d_alpha * (src - dst)
+                        joints_filtered[j] = dst + d_alpha * (src - dst)
             prev_speed_t = t_disp
+            # Final render buffer: filtered joints + display-only bone-length
+            # consistency (learned-median soft clamp; stale/missing endpoints
+            # skipped). joints_filtered stays unclamped so the ema display
+            # branch never interpolates against clamped values.
+            joints_display[:] = joints_filtered
+            if bone_bank is not None:
+                stabilize_display_skeleton(
+                    joints_display, bone_bank, tol=args.pose_bone_tol,
+                    fresh_mask=joint_fresh,
+                    min_pair_sep_mm=args.pose_lr_split_merge_mm)
+
+            if (
+                face_identifier is not None
+                and face_gallery is not None
+                and face_voter_factory is not None
+                and frame_idx % args.face_id_every == 0
+                and batch_order
+            ):
+                face_cam = batch_order[face_rr_offset % len(batch_order)]
+                face_rr_offset += 1
+                face_frame = cam_frames.get(face_cam)
+                if face_frame is not None:
+                    if mp_tracker is not None:
+                        identity_tracks = mp_tracker.tracks
+                        identity_joints = {
+                            track_id: (
+                                joints_display
+                                if track_id == mp_primary_tid
+                                else mp_states.get(track_id, {}).get("display")
+                            )
+                            for track_id in identity_tracks
+                        }
+                    else:
+                        identity_tracks, identity_joints = (
+                            single_person_identity_context(
+                                face_single_track,
+                                joints_state,
+                                joints_display,
+                                frame_idx,
+                            )
+                        )
+                    try:
+                        apply_face_identity_tick(
+                            identifier=face_identifier,
+                            gallery=face_gallery,
+                            voters=face_voters,
+                            tracks=identity_tracks,
+                            track_joints=identity_joints,
+                            frame_bgr=face_frame,
+                            camera_name=face_cam,
+                            project_fn=_mp_project_fn,
+                            gate_px=args.face_gate_px,
+                            min_score=args.face_id_min_score,
+                            voter_factory=face_voter_factory,
+                        )
+                    except Exception as exc:
+                        now = time.monotonic()
+                        if now - face_last_error_t > 5.0:
+                            print(f"[WARN] Face ID tick failed: {exc}")
+                            face_last_error_t = now
+
+            extra_people_render = []
+            primary_label_render = None
+            face_roster_render = []
+            if mp_tracker is not None:
+                for track_id, track in sorted(mp_tracker.tracks.items()):
+                    identified = bool(track.name)
+                    label = track.name or f"Person #{track_id}"
+                    color = MP_PALETTE[track.color_idx % len(MP_PALETTE)]
+                    if track_id == mp_primary_tid:
+                        primary_label_render = {
+                            "text": label,
+                            "identified": identified,
+                            "color": color,
+                        }
+                    else:
+                        state = mp_states.get(track_id)
+                        if state is not None:
+                            extra_people_render.append(
+                                {
+                                    "joints": state["display"].copy(),
+                                    "label": label,
+                                    "identified": identified,
+                                    "color": color,
+                                }
+                            )
+                    if args.face_id:
+                        face_roster_render.append(
+                            {
+                                "label": label,
+                                "identified": identified,
+                                "color": color,
+                            }
+                        )
+            elif face_single_track is not None:
+                identified = bool(face_single_track.name)
+                label = face_single_track.name or "UNKNOWN"
+                primary_label_render = {
+                    "text": label,
+                    "identified": identified,
+                    "color": COL_HEAD,
+                }
+                face_roster_render = [
+                    {
+                        "label": label,
+                        "identified": identified,
+                        "color": COL_HEAD,
+                    }
+                ]
             timer.stop("triang")
 
             timer.start("coach")
@@ -3135,13 +5550,69 @@ def main():
                         "conf": conf,
                         "cams": cams,
                     }
-                if joints_payload:
+                if pose_inference_succeeded:
+                    # Replace the complete cached observation atomically.  A
+                    # failed inference tick leaves this JSON-only snapshot
+                    # untouched, including tracks and ambiguity metadata.
+                    latest_safety_snapshot = None
+                    safety_multi_person = mp_tracker is not None
+                    safety_primary_track_id = (
+                        mp_primary_tid if safety_multi_person else 0
+                    )
+                    safety_tracks = (
+                        mp_tracker.tracks
+                        if safety_multi_person
+                        else {0: {"last_seen_frame": last_pose_frame}}
+                    )
+                    if safety_primary_track_id is not None:
+                        try:
+                            latest_safety_snapshot = build_firing_line_safety_snapshot(
+                                snapshot_ts=last_pose_safety_ts,
+                                frame_idx=last_pose_frame,
+                                y_max_mm=dims["Y"],
+                                y_mirrored=udp_world_y_mirror,
+                                multi_person=safety_multi_person,
+                                primary_track_id=safety_primary_track_id,
+                                primary_epoch=(
+                                    mp_primary_epoch
+                                    if safety_multi_person
+                                    else 0
+                                ),
+                                tracks=safety_tracks,
+                                primary_state={
+                                    "joints": joints_state,
+                                    "conf": joints_conf_state,
+                                    "cams": joints_cam_state,
+                                    "last_seen": joint_last_seen_frame,
+                                },
+                                secondary_states=(
+                                    mp_states if safety_multi_person else {}
+                                ),
+                                ambiguous_detections=(
+                                    safety_ambiguous_detections
+                                ),
+                                unassigned_candidate_count=(
+                                    safety_unassigned_candidate_count
+                                ),
+                            )
+                        except ValueError:
+                            # Missing/invalid safety telemetry cannot authorize
+                            # fire, but it must not terminate the live viewer.
+                            pass
+                # With capture context on we also emit the EMPTY-joints case, so a
+                # view-only consumer can separate "nobody was tracked this frame"
+                # from "the viewer stopped sending". Default path unchanged.
+                if joints_payload or capture_context is not None:
                     pkt = {
                         "type": "joints",
                         "ts": time.time(),
                         "frame": frame_idx,
                         "joints": joints_payload,
                     }
+                    if capture_context is not None:
+                        pkt["capture"] = capture_context
+                    if latest_safety_snapshot is not None:
+                        pkt["safety"] = latest_safety_snapshot
                     # Add predicted positions when prediction is active
                     if use_prediction:
                         pred_payload = {}
@@ -3180,7 +5651,12 @@ def main():
             blm_aim_data = None
             if blm_demo is not None:
                 j_idx = blm_demo["joint_idx"]
-                j_pos = joints_display[j_idx] if joints_display is not None else None
+                # Aim overlay reads joints_state (NOT the display buffer): the
+                # real aim path is UDP -> live_aim_test, which consumes
+                # joints_state, and the display buffer now carries the rigid
+                # latency lead + bone clamp — the drawn aim must match what
+                # the launcher would actually receive.
+                j_pos = joints_state[j_idx] if joints_state is not None else None
                 if j_pos is not None and np.isfinite(j_pos).all():
                     raw_xyz = j_pos.copy()
                     corrected_xyz = _blm_correct(raw_xyz, blm_demo["correction"],
@@ -3265,6 +5741,54 @@ def main():
                     except Exception:
                         pass
 
+            # --- live leg-raise metrics + diagnostics ---
+            if leg_raise_tracker is not None:
+                _lr_frame = joints_array_to_frame(
+                    joints_state, joints_conf_state, joints_cam_state, frame_idx, args.fps)
+                leg_raise_state = leg_raise_tracker.process(_lr_frame)
+                if leg_raise_contact_interpreter is not None:
+                    leg_raise_contact_for_log = (
+                        leg_raise_contact_interpreter.process(_lr_frame).to_dict()
+                    )
+                if leg_raise_log_fh is not None:
+                    _identity_payload = None
+                    if leg_raise_identity_result is not None:
+                        _identity_payload = {
+                            "swapped": bool(leg_raise_identity_result.swapped),
+                            "status": leg_raise_identity_result.status,
+                            "keep_cost": leg_raise_identity_result.keep_cost,
+                            "swap_cost": leg_raise_identity_result.swap_cost,
+                        }
+                    _leg_indices = (11, 12, 13, 14, 15, 16)
+                    _priors_payload = None
+                    if leg_raise_priors is not None:
+                        _priors_payload = {
+                            "femur_l_mm": float(leg_raise_priors.femur_l_mm),
+                            "femur_r_mm": float(leg_raise_priors.femur_r_mm),
+                            "tibia_l_mm": float(leg_raise_priors.tibia_l_mm),
+                            "tibia_r_mm": float(leg_raise_priors.tibia_r_mm),
+                            "sample_count": int(leg_raise_priors.sample_count),
+                            "locked_at_frame": int(leg_raise_priors.locked_at_frame),
+                        }
+                    leg_raise_log_fh.write(json.dumps({
+                        "ts": time.time(),
+                        "frame": int(frame_idx),
+                        "identity": _identity_payload,
+                        "prior_status": leg_raise_prior_status_for_log,
+                        "priors": _priors_payload,
+                        "dropped_joints": leg_raise_dropped_joints_for_log,
+                        "raw_lower_body_3d": leg_raise_raw_joints_for_log,
+                        "raw_segment_lengths_mm": leg_raise_raw_lengths_for_log,
+                        "identity_lower_body_3d": leg_raise_identity_joints_for_log,
+                        "identity_segment_lengths_mm": leg_raise_identity_lengths_for_log,
+                        "pose2d_lower_body": leg_raise_pose2d_for_log,
+                        "state": leg_raise_state.to_dict(),
+                        "contact": leg_raise_contact_for_log,
+                        "joint_conf": {str(i): float(joints_conf_state[i]) for i in _leg_indices},
+                        "joint_cams": {str(i): int(joints_cam_state[i]) for i in _leg_indices},
+                    }, ensure_ascii=True) + "\n")
+                    leg_raise_log_fh.flush()
+
             # --- live athlete metrics (height / arm-span reach / peak joint speed) ---
             metrics_hud = None
             if args.metrics_hud:
@@ -3279,6 +5803,58 @@ def main():
                 metrics_hud["max_speed_ms"] = float(np.nanmax(joint_speeds) / 1000.0)
                 if rep_counters:
                     metrics_hud["reps"] = dict(rep_count_state)
+                if leg_raise_state is not None:
+                    metrics_hud["leg_raise"] = {
+                        "left_angle_deg": leg_raise_state.left.angle_deg,
+                        "right_angle_deg": leg_raise_state.right.angle_deg,
+                        "left_reps": leg_raise_state.left.reps,
+                        "right_reps": leg_raise_state.right.reps,
+                        "identity_status": leg_raise_state.identity_status,
+                        "swapped": leg_raise_state.swapped,
+                    }
+
+            if smpl_fitter is not None and frame_idx % max(1, int(args.smpl_fit_every)) == 0:
+                if smpl_async_active:
+                    # Non-blocking: replaces any pending snapshot; the worker
+                    # thread fits at its own pace and skips stale frames.
+                    smpl_fitter.submit(joints_display, joints_conf_state)
+                else:
+                    try:
+                        smpl_fit_result = smpl_fitter.fit(
+                            joints_display,
+                            joints_conf_state,
+                        )
+                        if smpl_pelvis_fn is not None:
+                            smpl_fit_pelvis = smpl_pelvis_fn(joints_display)
+                    except ValueError:
+                        # Not enough reliable joints this frame; keep the last mesh.
+                        pass
+                    except Exception as exc:
+                        print(f"[WARN] SMPL mesh fit failed; disabling SMPL avatar: {exc}")
+                        smpl_fitter = None
+            if smpl_fitter is not None and smpl_async_active:
+                smpl_err = smpl_fitter.error
+                if smpl_err is not None:
+                    print(f"[WARN] SMPL mesh fit failed; disabling SMPL avatar: {smpl_err}")
+                    smpl_fitter.close()
+                    smpl_fitter = None
+                else:
+                    smpl_snap = smpl_fitter.latest()
+                    if smpl_snap is not None:
+                        smpl_fit_result = smpl_snap.result
+                        smpl_fit_pelvis = smpl_snap.pelvis_mm
+            # Anchor-follow: between (slow) fits, glue the last mesh to the
+            # current mid-hip so the avatar moves at full frame rate.
+            smpl_render_vertices = None
+            if smpl_fit_result is not None:
+                smpl_render_vertices = smpl_fit_result.vertices_mm
+                if (args.smpl_anchor_follow and smpl_fit_pelvis is not None
+                        and smpl_pelvis_fn is not None):
+                    cur_pelvis = smpl_pelvis_fn(joints_display)
+                    if cur_pelvis is not None:
+                        delta = np.asarray(cur_pelvis) - np.asarray(smpl_fit_pelvis)
+                        if np.isfinite(delta).all():
+                            smpl_render_vertices = smpl_fit_result.vertices_mm + delta.reshape(1, 3)
 
             if args.show_3d and (frame_idx % args.viz_every == 0):
                 orbit_azim = (args.view_azim + (time.time() - t_start) * args.auto_orbit_speed
@@ -3315,6 +5891,19 @@ def main():
                         metrics=metrics_hud,
                         thumbnails=thumbs,
                         recording=(rec_writer is not None),
+                        avatar_body=args.avatar_body,
+                        avatar_markers=args.avatar_markers,
+                        avatar_alpha=args.avatar_alpha,
+                        smpl_mesh_vertices=smpl_render_vertices,
+                        smpl_mesh_faces=(
+                            smpl_fit_result.faces
+                            if smpl_fit_result is not None else None
+                        ),
+                        smpl_mesh_alpha=args.smpl_mesh_alpha,
+                        smpl_mesh_max_faces=args.smpl_mesh_max_faces,
+                        extra_people=extra_people_render,
+                        primary_label=primary_label_render,
+                        face_roster=face_roster_render,
                     )
                     cv2.imshow("Live 3D Arena", viz_img)
                     if video_writer_3d is not None:
@@ -3561,7 +6150,6 @@ def main():
                     f" | end_to_end={end_to_end_ms:.1f} | q={queue_depth} | max_age={max_age:.1f}"
                     f" | usable={usable_cam_count} | stale={stale_cam_count}"
                 )
-                print(line)
                 payload["ts"] = time.time()
                 payload["end_to_end_ms"] = float(end_to_end_ms)
                 payload["frame_age_ms_per_cam"] = frame_age_ms_per_cam
@@ -3570,9 +6158,29 @@ def main():
                 payload["usable_cam_count"] = int(usable_cam_count)
                 payload["stale_cam_count"] = int(stale_cam_count)
                 payload["queue_depth"] = int(queue_depth)
+                pose_health = pose_health_payload(
+                    run_pose=run_pose,
+                    pose_error=pose_error,
+                    batch_order=batch_order,
+                    pose_raw_counts=pose_raw_counts,
+                    per_cam_pose_curr=per_cam_pose_curr,
+                    pose_und_by_cam=pose_und_by_cam,
+                    joints_3d_now=joints_3d_now,
+                    joints_display=joints_display,
+                )
+                payload.update(pose_health)
+                line += (
+                    f" | pose_raw={pose_health['pose_raw_person_count']}"
+                    f" | pose_cams={pose_health['pose_selected_cam_count']}"
+                    f" | joints={pose_health['pose_triangulated_joint_count']}"
+                    f" | visible={pose_health['pose_visible_joint_count']}"
+                )
+                if pose_error:
+                    line += f" | pose_error={pose_error}"
                 if perf_fh is not None:
                     perf_fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
                     perf_fh.flush()
+                print(line)
 
     finally:
         if rec_writer is not None:
@@ -3586,6 +6194,10 @@ def main():
             print(f"[REC] Saved 2D mosaic: {args.record_mosaic}")
         for cap in caps.values():
             cap.release()
+        if smpl_fitter is not None and smpl_async_active:
+            smpl_fitter.close()
+        if ball_executor is not None:
+            ball_executor.shutdown(wait=False, cancel_futures=True)
         if udp_sock is not None:
             udp_sock.close()
         if event_logger is not None:
@@ -3604,6 +6216,8 @@ def main():
             perf_fh.close()
         if ball_log_fh is not None:
             ball_log_fh.close()
+        if leg_raise_log_fh is not None:
+            leg_raise_log_fh.close()
         cv2.destroyAllWindows()
         plt.close("all")
         print("[DONE] Live viewer stopped.")
