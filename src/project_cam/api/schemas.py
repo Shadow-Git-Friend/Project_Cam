@@ -116,6 +116,25 @@ class SessionReportRequest(BaseModel):
     exercise: str = "squat"
 
 
+class LicensingResponse(BaseModel):
+    """Three-layer licence record. See ``project_cam.models.registry.Licensing``.
+
+    ``commercial_use`` defaults to ``undeclared`` so an unaudited artifact never
+    reads as permission. ``detected_markers`` lists non-commercial markers found
+    in any layer.
+    """
+
+    code: Optional[str] = None
+    weights: Optional[str] = None
+    training_data: Optional[str] = None
+    commercial_use: str = "undeclared"
+    blocker: Optional[str] = None
+    evidence: Optional[str] = None
+    verified_on: Optional[str] = None
+    undeclared_layers: List[str] = Field(default_factory=list)
+    detected_markers: List[str] = Field(default_factory=list)
+
+
 class ModelRecordResponse(BaseModel):
     model_id: str
     task: str
@@ -130,6 +149,7 @@ class ModelRecordResponse(BaseModel):
     source: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
     notes: Optional[str] = None
+    licensing: LicensingResponse = Field(default_factory=LicensingResponse)
 
 
 class ModelsResponse(BaseModel):

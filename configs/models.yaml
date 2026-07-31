@@ -4,6 +4,15 @@
 # are intentionally optional here: when a SHA-256 is recorded, CI/API can verify
 # it; when it is absent, the registry reports `unregistered` rather than hashing
 # large local artifacts on every request.
+#
+# LICENSING (added 2026-07-30). Every artifact records three layers separately —
+# `code`, `weights`, `training_data` — because they routinely disagree and the
+# third is invisible in a repository badge. That third layer is what hid a real
+# blocker for three months: MMPose is Apache-2.0, yet every published RTMPose
+# checkpoint is pretrained on AI Challenger, which is research-only. `evidence`
+# names WHERE each verdict was checked; `commercial_use` defaults to `undeclared`
+# so an unaudited artifact can never read as permission. The policy is enforced
+# by tests/test_model_licensing.py, not by convention.
 
 registry_version: 1
 
@@ -26,6 +35,23 @@ models:
       jump_01_detection_rate_new: 0.842
       measured_latency_ms: 13.0
     notes: Active live ball detector; dynamic batch export avoids 4-camera batch mismatch.
+    licensing:
+      code: AGPL-3.0 (Ultralytics)
+      weights: >-
+        AGPL-3.0 asserted by Ultralytics for models trained with their code;
+        fine-tuned by us from an Ultralytics-pretrained initialisation
+      training_data: >-
+        project ball dataset ("dataset-main", our own imagery) on top of an
+        Ultralytics COCO-pretrained init
+      commercial_use: blocked
+      blocker: >-
+        ultralytics-agpl — the code layer, not the data layer. Our imagery is
+        ours; the framework licence is the obstacle. This is the HARDER half of
+        the AGPL problem because the ball path has no in-repo Apache alternative
+        (unlike pose, which has RTMO). Candidates: RF-DETR detection retrained on
+        this dataset, or LibreYOLO (MIT).
+      evidence: docs/ball_dataset_remote_2026-07.md; Ultralytics repo LICENSE
+      verified_on: "2026-07-30"
 
   - model_id: ball_yolo26m_672_pt
     task: ball_detection
@@ -38,6 +64,14 @@ models:
     source: yolo26m garage ball detector training artifact
     metrics:
       measured_latency_ms: 8.7
+    licensing:
+      code: AGPL-3.0 (Ultralytics)
+      weights: AGPL-3.0 asserted by Ultralytics; our fine-tune
+      training_data: project ball dataset ("dataset-main") + Ultralytics COCO-pretrained init
+      commercial_use: blocked
+      blocker: ultralytics-agpl
+      evidence: source artifact of ball_yolo26m_672_trt
+      verified_on: "2026-07-30"
 
   - model_id: ball_yolo26s_672_trt
     task: ball_detection
@@ -48,6 +82,14 @@ models:
     input_size: [672, 672]
     status: reference
     source: smaller garage ball detector TensorRT FP16 export
+    licensing:
+      code: AGPL-3.0 (Ultralytics)
+      weights: AGPL-3.0 asserted by Ultralytics; our fine-tune
+      training_data: project ball dataset ("dataset-main") + Ultralytics COCO-pretrained init
+      commercial_use: blocked
+      blocker: ultralytics-agpl
+      evidence: same lineage as ball_yolo26m_672_trt
+      verified_on: "2026-07-30"
 
   - model_id: pose_yolo11m_trt
     task: pose_estimation
@@ -62,3 +104,139 @@ models:
       measured_latency_ms: 6.2
       mmpose_latency_ms: 38.5
     notes: Active real-time pose backend; MMPose remains the slower reference path.
+    licensing:
+      code: AGPL-3.0 (Ultralytics)
+      weights: AGPL-3.0 (Ultralytics-released YOLO11m-pose checkpoint, unmodified)
+      training_data: COCO keypoints (CC-BY-4.0) per Ultralytics
+      commercial_use: blocked
+      blocker: >-
+        ultralytics-agpl — data layer is fine (COCO), code and weights are not.
+        Verified clean replacement target: pose_rtmo_m_coco below.
+      evidence: Ultralytics repo LICENSE
+      verified_on: "2026-07-30"
+
+  # ---------------------------------------------------------------- pose fallback
+  # Registered for the first time on 2026-07-30. It was named in docs/model_card.md
+  # and selectable via `--pose-backend mmpose`, but absent from the machine-readable
+  # registry — which is precisely why its contamination went unnoticed while it was
+  # being described in the plan as our escape from AGPL.
+  - model_id: pose_rtmpose_m_mmpose
+    task: pose_estimation
+    version: "2023-01-27"
+    backend: pytorch
+    artifact_format: pth
+    path: rtmpose-m_simcc-coco_pt-aic-coco_420e-256x192-d8dd5ca4_20230127.pth
+    input_size: [256, 192]
+    status: deprecated
+    source: RTMDet-m + RTMPose-m two-stage MMPose reference path
+    metrics:
+      measured_latency_ms: 38.5
+    notes: >-
+      DO NOT use commercially and do not describe as the AGPL escape route. Kept
+      registered so the blocker stays visible rather than being rediscovered.
+    licensing:
+      code: Apache-2.0 (MMPose)
+      weights: >-
+        Apache-2.0 claimed by the repository, but the checkpoint carries the
+        training-data restriction below — the badge does not cover the weights'
+        data provenance
+      training_data: >-
+        pretrained on AI Challenger + COCO (pt-aic-coco). AI Challenger is owned
+        by Sinovation Ventures and licensed research-only, commercial use
+        prohibited. Applies to EVERY published RTMPose checkpoint (tiny/s/m/l),
+        including the ones named simcc-coco.
+      commercial_use: blocked
+      blocker: ai-challenger-research-only
+      evidence: >-
+        venv mmpose/.mim/configs/body_2d_keypoint/rtmpose/coco/rtmpose_coco.yml
+        (all Weights: URLs contain pt-aic-coco);
+        Parallel_working/scripts/export_models_tensorrt.py:71 pins such a file
+      verified_on: "2026-07-30"
+
+  # ------------------------------------------------------------ clean pose target
+  # Not exported, not benchmarked, not active. Registered as the verified-clean
+  # replacement target so the decision is recorded with its evidence.
+  - model_id: pose_rtmo_m_coco
+    task: pose_estimation
+    version: "2023-12-11"
+    backend: pytorch
+    artifact_format: pth
+    path: rtmo-m_16xb16-600e_coco-640x640-6f4e0306_20231211.pth
+    input_size: [640, 640]
+    status: candidate
+    source: >-
+      RTMO-m one-stage bottom-up multi-person pose; ships in the MMPose already
+      installed in this venv (configs/body_2d_keypoint/rtmo/coco/)
+    metrics:
+      coco_ap: 0.709
+      reported_fps_v100_onnxruntime: 81
+    notes: >-
+      Architecturally better for us as well as cleaner: one-stage removes the
+      RTMDet-m person detector, and bottom-up does not cost per person, which
+      serves --multi-person 1..8. Published FPS is V100 + ONNXRuntime, NOT
+      TensorRT. Use the coco/ configs only — crowdpose/ and body7/ are separate
+      and contaminated families.
+    licensing:
+      code: Apache-2.0 (MMPose) -> Apache-2.0 (MMDetection) -> Apache-2.0 (YOLOX)
+      weights: Apache-2.0, released by OpenMMLab
+      training_data: >-
+        COCO person keypoints only (CC-BY-4.0); CSPDarknet backbone initialised
+        from yolox_s_8x8_300e_coco (MMDetection, COCO)
+      commercial_use: clear
+      evidence: >-
+        read directly in this venv —
+        mmpose/.mim/configs/body_2d_keypoint/rtmo/coco/rtmo-s_8xb32-600e_coco-640x640.py
+        train_dataloader uses CocoDataset/person_keypoints_train2017.json and the
+        backbone init_cfg points at yolox_s_8x8_300e_coco. The coco/*.yml metafile
+        also lists "Dataset: CrowdPose" — that is an EVALUATION row, not training.
+      verified_on: "2026-07-30"
+
+  # ------------------------------------------------------------------ face models
+  # In the live pipeline via --face-id since 2026-07-12, never registered until now.
+  - model_id: face_detect_yunet_2023mar
+    task: face_detection
+    version: "2023-03"
+    backend: onnxruntime
+    artifact_format: onnx
+    path: models/face/face_detection_yunet_2023mar.onnx
+    input_size: [320, 320]
+    status: active
+    source: OpenCV Zoo face_detection_yunet (SHA-256 pinned in download_face_models.py)
+    notes: Identification labels only — never authentication, liveness or fire authorization.
+    licensing:
+      code: Apache-2.0 (OpenCV Zoo repository)
+      weights: >-
+        UNVERIFIED. The OpenCV Zoo README states the repository is Apache-2.0 and
+        that users must "refer to licenses of different models", i.e. per-model
+        weights licences differ from the repo licence.
+      training_data: UNVERIFIED — not stated in the artifact we download
+      commercial_use: unverified
+      blocker: >-
+        must read models/face_detection_yunet/LICENSE in the opencv_zoo repo
+        before any commercial claim. Do not infer it from the repository badge —
+        that inference is exactly the mistake that hid the RTMPose blocker.
+      evidence: Parallel_working/scripts/download_face_models.py:27-33 (pinned URL + SHA-256)
+      verified_on: "2026-07-30"
+
+  - model_id: face_recognize_sface_2021dec
+    task: face_recognition
+    version: "2021-12"
+    backend: onnxruntime
+    artifact_format: onnx
+    path: models/face/face_recognition_sface_2021dec.onnx
+    input_size: [112, 112]
+    status: active
+    source: OpenCV Zoo face_recognition_sface (SHA-256 pinned in download_face_models.py)
+    notes: >-
+      Identification labels only. Biometric data — consent, retention and deletion
+      obligations apply independently of the model licence, especially for minors.
+    licensing:
+      code: Apache-2.0 (OpenCV Zoo repository)
+      weights: UNVERIFIED — per-model licence, not covered by the repository badge
+      training_data: >-
+        UNVERIFIED. Face-recognition training sets are a common source of
+        commercial restrictions, so treat this as the higher-risk of the two.
+      commercial_use: unverified
+      blocker: must read models/face_recognition_sface/LICENSE in the opencv_zoo repo
+      evidence: Parallel_working/scripts/download_face_models.py:36-42 (pinned URL + SHA-256)
+      verified_on: "2026-07-30"
