@@ -3,6 +3,8 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
+import pytest
+import yaml
 
 
 def load_live_module():
@@ -28,6 +30,24 @@ def test_camera_order_from_config_keeps_legacy_order_then_adds_usb_cameras():
         "camUsb01_C920",
         "camUsb02_1080P",
     ]
+
+
+def test_usb6_configs_match_recovered_calibrated_roles():
+    expected = {
+        "camUsb01_C920": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_9718C21F-video-index0",
+        "camUsb02_1080P": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4.1:1.0-video-index0",
+        "camUsb03_C920": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_7B879F0F-video-index0",
+        "camUsb04_1080P": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:6.1.1:1.0-video-index0",
+        "camUsb05_1080P": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:5.1.1:1.0-video-index0",
+        "camUsb06_1080P": "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:11.1.1:1.0-video-index0",
+    }
+    for path in (
+        Path("garage_lab_combined/config/cameras_6usb_test.yaml"),
+        Path("configs/cameras/cameras_6cam_usb.yaml"),
+    ):
+        cameras = yaml.safe_load(path.read_text())["cameras"]
+        actual = {name: info["device"] for name, info in cameras.items()}
+        assert actual == expected
 
 
 def test_make_mosaic_accepts_six_camera_order():
@@ -78,6 +98,14 @@ def test_usb6_launcher_defaults_to_3d_only_low_latency_mode():
     assert "--pose-every 2" in launcher
     assert "--avatar-body" in launcher
     assert "--avatar-markers" in launcher
+
+
+def test_usb6_skeleton_launcher_requires_all_six_cameras():
+    launcher = Path(
+        "Parallel_working/run_live_usb6_mirrored_skeleton.sh"
+    ).read_text()
+
+    assert "--min-active-cameras 6" in launcher
 
 
 def test_usb6_launchers_default_to_usb2_safe_capture_size():
@@ -210,6 +238,36 @@ def test_v4l2_preflight_allows_non_v4l_or_disabled_timeout():
 
     assert live.v4l2_device_ready("rtsp://example", run_fn=failing_runner)[0] is True
     assert live.v4l2_device_ready("/dev/video0", timeout_s=0, run_fn=failing_runner)[0] is True
+
+
+def test_validate_min_active_cameras_rejects_values_outside_configured_range():
+    live = load_live_module()
+
+    assert live.validate_min_active_cameras(2, 6) == 2
+    assert live.validate_min_active_cameras(6, 6) == 6
+    with pytest.raises(ValueError, match="at least 2"):
+        live.validate_min_active_cameras(1, 6)
+    with pytest.raises(ValueError, match="configured camera count 6"):
+        live.validate_min_active_cameras(7, 6)
+
+
+def test_require_camera_count_reports_stage_config_and_counts():
+    live = load_live_module()
+
+    with pytest.raises(RuntimeError) as caught:
+        live.require_camera_count(
+            stage="passed preflight",
+            available_count=2,
+            configured_count=6,
+            minimum=6,
+            config_path="rig.yaml",
+        )
+
+    message = str(caught.value)
+    assert "2/6" in message
+    assert "require >=6" in message
+    assert "passed preflight" in message
+    assert "rig.yaml" in message
 
 
 def test_cv2_renderer_accepts_avatar_switches():
