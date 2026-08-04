@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# =============================================================================
+# DEMO MODE: Full pipeline with BLM aim overlay (no serial/hardware needed)
+# =============================================================================
+# Shows: 4 camera feeds + 3D arena view + predicted skeleton + BLM aim panel
+#
+# The BLM aim panel displays in real-time:
+#   - Target joint position (raw + corrected)
+#   - Computed pitch/yaw angles
+#   - Distance to target
+#   - Serial command that would be sent
+#   - Aim line from launcher to target in the 3D view
+#
+# Usage:
+#   ./Parallel_working/run_demo.sh                          # default: right_hip
+#   ./Parallel_working/run_demo.sh --demo-blm-joint left_shoulder
+#   ./Parallel_working/run_demo.sh --demo-blm-joint right_knee
+#   ./Parallel_working/run_demo.sh --yolopose-model yolo11m-pose.engine  # TRT
+# =============================================================================
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+WIDTH="${PROJECT_CAM_WIDTH:-1920}"
+HEIGHT="${PROJECT_CAM_HEIGHT:-1080}"
+FPS="${PROJECT_CAM_FPS:-30}"
+
+./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_parallel.py \
+  --config garage_lab_combined/config/cameras.yaml \
+  --intrinsics-dir garage_lab_combined/cal/intrinsics \
+  --extrinsics arena_fixed/cal/extrinsics/extrinsics_fixed.json \
+  --dimensions arena_fixed/cal/extrinsics/Dimensions_fixed.txt \
+  --no-world-y-mirror \
+  --invert-y-axis-display \
+  --draw-global-axes \
+  --global-axis-len-mm 900 \
+  --ball-device cuda:0 \
+  --pose-device cuda:0 \
+  --pose-backend yolopose \
+  --yolopose-model yolo11m-pose.pt \
+  --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" \
+  --pose-every 1 \
+  --ball-every 1 \
+  --viz-every 1 \
+  --mosaic-every 2 \
+  --show-2d --show-3d \
+  --viz-backend cv2 \
+  --viz-width 1280 --viz-height 720 \
+  --ema-alpha 0.25 \
+  --ema-snap-thresh-mm 80 \
+  --display-smooth-alpha 0.45 \
+  --joint-stale-frames 8 \
+  --max-frame-age-ms 150 \
+  --predict-ahead-ms 400 \
+  --kalman-process-noise 500 \
+  --kalman-measurement-noise 10 \
+  --show-ghost-skeleton \
+  --demo-blm \
+  --demo-blm-joint right_hip \
+  --demo-blm-launcher-x-mm 600 \
+  --demo-blm-launcher-y-mm 1560 \
+  --demo-blm-launcher-z-mm 500 \
+  --demo-blm-yaw-deg 0 \
+  --demo-blm-speed-mps 10 \
+  --demo-blm-correction-mode linear \
+  "$@"

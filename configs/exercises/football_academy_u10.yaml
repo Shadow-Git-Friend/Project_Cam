@@ -1,0 +1,142 @@
+schema_version: project_cam.exercise_rules.v1
+profile:
+  name: football_academy_u10
+  population: "Boys and girls around age 10 in football academy screening"
+  principle: "Use configurable coaching thresholds and each athlete's own baseline; do not compare children to professional-player templates."
+
+reference_context:
+  - name: FitBack / ALPHA
+    url: https://www.fitbackeurope.eu/en-us/About/FAQ
+    use: "Age/sex physical-fitness reference context for children and adolescents."
+  - name: Eurofit norms
+    url: https://bjsm.bmj.com/content/52/22/1445
+    use: "Large age/sex normative context for 9-17 year-old youth fitness tests."
+  - name: CDC NHANES National Youth Fitness Survey plank
+    url: https://wwwn.cdc.gov/Nchs/Data/Nnyfs/Public/2012/DataFiles/Y_PLX.htm
+    use: "Youth plank/core-endurance protocol context."
+  - name: TGMD-3
+    url: https://www.tgmd3.org/general-information
+    use: "Motor-skill quality framework for children up to 10 years 11 months."
+  - name: MOBAK-5-6
+    url: https://mobak.info/en/mobak/
+    use: "Basic motor-competency context for 10-11 year-old children."
+  - name: FIFA 11+ Kids
+    url: https://pubmed.ncbi.nlm.nih.gov/29273936/
+    use: "Football-specific youth neuromuscular-control and injury-prevention context."
+
+defaults: &defaults
+  thresholds:
+    min_confidence_score: 45
+    max_left_right_angle_asymmetry_deg: 25
+    max_knee_line_deviation_ratio: 0.20
+    # Tuned 2026-05-11 from data/raw/athlete_001_squat_{clean,valgus}.jsonl:
+    # clean max-side max = 0.0121; valgus max-side max = 0.0304. Threshold 0.020
+    # sits 1.65x above clean and 0.66x of valgus, so clean does not fire and
+    # valgus does. See scripts/tune_valgus_threshold.py for the measurement.
+    max_knee_valgus_signed_ratio: 0.020
+  segmentation:
+    min_rom_deg: 25
+  movement_quality:
+    review_flag_severities: ["coaching", "warning"]
+    block_on_unscored_rep: true
+
+exercises:
+  squat:
+    <<: *defaults
+    description: "Bilateral squat movement-quality screen."
+    segmentation:
+      min_pelvis_travel_mm: 150
+      enter_angle_deg: 90
+      exit_angle_deg: 120
+      min_rep_duration_s: 0.3
+      max_rep_duration_s: 8.0
+      max_missing_frame_ratio: 0.30
+      # 1.0 = no smoothing (default). Lower (e.g. 0.6) trades amplitude for
+      # robustness to single-frame triangulation drops; tune to your frame rate.
+      pelvis_ema_alpha: 1.0
+    protocol:
+      min_fps: 15
+      min_reps: 5
+      min_rom_deg: 60
+      min_valid_frame_ratio: 0.60
+    thresholds:
+      min_confidence_score: 45
+      max_left_right_angle_asymmetry_deg: 25
+      max_knee_line_deviation_ratio: 0.20
+      max_knee_valgus_signed_ratio: 0.020
+      bottom_knee_angle_max_deg: 115
+    live_trainer:
+      # Live rep counter (project_cam.assessment.live_trainer). Knee angle:
+      # standing ~165-175 deg, parallel squat ~95-105 deg. Thresholds act on
+      # the EMA-smoothed signal, whose range is a little compressed vs raw, so
+      # top_angle_deg sits below true standing. top MUST stay above descent.
+      descent_angle_deg: 138      # knee bends past this -> a descent is underway
+      bottom_angle_deg: 122       # knee at/below this -> counted as full depth
+      top_angle_deg: 150          # knee straightens past this -> rep cycle closes
+      min_rom_deg: 40             # min knee travel for a valid (deep enough) rep
+      noise_rom_deg: 18           # cycles smaller than this are ignored as jitter
+      smoothing_alpha: 0.6        # EMA on the knee-angle signal (lower = smoother)
+      min_pelvis_travel_mm: 150   # OR-path: this much pelvis drop also = full depth
+      min_cycle_frames: 5         # closed cycles shorter than this are noise, not reps
+      max_signal_asymmetry_deg: 45  # L/R knee gap above this -> frame held (keypoint swap)
+
+  push_up:
+    <<: *defaults
+    description: "Bilateral push-up rep count and trunk-alignment screen."
+    segmentation:
+      enter_angle_deg: 100
+      exit_angle_deg: 150
+      min_rom_deg: 50
+      min_rep_duration_s: 0.3
+      max_rep_duration_s: 8.0
+      max_missing_frame_ratio: 0.30
+    protocol:
+      min_fps: 15
+      min_reps: 5
+      min_rom_deg: 50
+      min_valid_frame_ratio: 0.60
+    thresholds:
+      min_confidence_score: 45
+      max_left_right_angle_asymmetry_deg: 25
+      max_knee_line_deviation_ratio: 0.20
+      max_knee_valgus_signed_ratio: 0.020
+      bottom_elbow_angle_max_deg: 100
+      max_trunk_alignment_error_deg: 20
+    live_trainer:
+      # Live rep counter. Elbow angle: locked-out ~165-180 deg, deep
+      # push-up bottom ~85-100 deg. Thresholds act on the EMA-smoothed
+      # signal; top MUST stay above descent or the state machine ping-pongs.
+      descent_angle_deg: 138      # elbow bends past this -> lowering
+      bottom_angle_deg: 122       # elbow at/below this -> counted as full depth
+      top_angle_deg: 150          # elbow locks out past this -> rep cycle closes
+      min_rom_deg: 45             # min elbow travel for a valid rep
+      noise_rom_deg: 18           # cycles smaller than this are ignored as jitter
+      smoothing_alpha: 0.6        # EMA on the elbow-angle signal (lower = smoother)
+      min_cycle_frames: 5         # closed cycles shorter than this are noise, not reps
+      max_signal_asymmetry_deg: 45  # L/R elbow gap above this -> frame held (keypoint swap)
+      # Push-up acquisition gate: nothing is counted until the athlete is
+      # verified in a plank. The gate is debounced so a transient bend cannot
+      # start a set and a brief tracking dropout cannot drop one. It uses the
+      # shoulder->hip incline + both elbows only -- never the ankles, which are
+      # unreliable in an oblique side view.
+      max_posture_incline_deg: 35    # torso must be at least this horizontal (0=flat, 90=standing)
+      acquire_min_frames: 4          # consecutive clean-plank frames needed to acquire a set
+      release_min_frames: 8          # consecutive lost frames needed to release a set
+
+deferred_exercises:
+  single_leg_squat:
+    reason: "Removed from the active screen - single-leg balance is hard to perform reliably for the demo athlete."
+  plank:
+    reason: "Deferred until Kairat demo scope expands beyond squat screening."
+  countermovement_jump:
+    reason: "Requires validated 30fps capture and jump-specific confidence checks."
+  drop_landing:
+    reason: "Requires landing ground-truth validation before academy reporting."
+  lateral_shuffle:
+    reason: "Requires movement-path protocol and ground truth."
+  cutting:
+    reason: "Requires movement-path protocol and ground truth."
+  slalom_dribble:
+    reason: "Requires ball-skill ground truth and is not part of the Kairat MVP."
+  wall_volley:
+    reason: "Requires ball-contact ground truth and is not part of the Kairat MVP."

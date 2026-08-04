@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install (api + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api,dev]"
+          # cv2 is needed by the geometry module; headless avoids GUI libs.
+          pip install opencv-python-headless
+
+      - name: Import smoke
+        run: |
+          python - <<'PY'
+          import project_cam
+          from project_cam.geometry.triangulation import triangulate_multi  # noqa: F401
+          from project_cam.api import service  # noqa: F401
+          from project_cam.monitoring import METRIC_NAMES
+          from project_cam.models import load_model_registry
+          from project_cam.quality import analyze_frame
+          assert "project_cam_camera_count" in METRIC_NAMES
+          assert load_model_registry().default_model("ball_detection").status == "active"
+          assert analyze_frame(None, camera_id="smoke").status == "bad"
+          print("import ok")
+          PY
+
+      - name: Ruff lint (production surface)
+        run: |
+          ruff check \
+            src/project_cam/api src/project_cam/evaluation src/project_cam/models \
+            src/project_cam/metrics \
+            src/project_cam/monitoring src/project_cam/quality src/project_cam/streaming \
+            src/project_cam/assessment/live_trainer/leg_raise_mode.py \
+            src/project_cam/assessment/live_trainer/limb_identity.py \
+            src/project_cam/assessment/live_trainer/limb_constraints.py \
+            services benchmarks
+
+      - name: Tests (hardware-free)
+        # The full suite (assessment/c3d/live) runs on a dev box with the heavy
+        # CV stack; CI gates the hardware-free core + service + new modules.
+        run: |
+          pytest \
+            tests/test_triangulation.py tests/test_kalman.py \
+            tests/test_safety_gates.py tests/test_event_log.py \
+            tests/test_camera_profiles.py tests/test_monitoring_metrics.py \
+            tests/test_model_registry.py tests/test_frame_quality.py \
+            tests/test_eval_gate_cli.py \
+            tests/test_api_schemas.py tests/test_api_health.py \
+            tests/test_api_session_report.py \
+            tests/test_api_mlops.py \
+            tests/test_api_triangulate.py tests/test_leg_raise_mode.py \
+            tests/test_limb_identity.py tests/test_limb_constraints.py \
+            tests/test_rtsp_source_config.py tests/test_benchmark_dry_run.py \
+            tests/test_academy_metrics.py
+
+      - name: 3D accuracy regression gate
+        run: |
+          python -m project_cam.evaluation.gate \
+            --pairs tests/fixtures/eval_pairs_ball_static.json \
+            --suite ball_static

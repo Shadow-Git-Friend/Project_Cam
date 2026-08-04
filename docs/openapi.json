@@ -1,0 +1,1009 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Project_Cam API",
+    "summary": "Aim-only multi-camera 3D tracking service (triangulation, prediction, reports, metrics).",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Health",
+        "description": "Liveness check. Never touches cameras or GPU.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/system/info": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "System Info",
+        "operationId": "system_info_v1_system_info_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cameras": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Cameras",
+        "operationId": "cameras_v1_cameras_get",
+        "parameters": [
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Profile"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CamerasResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/triangulate": {
+      "post": {
+        "tags": [
+          "geometry"
+        ],
+        "summary": "Triangulate",
+        "operationId": "triangulate_v1_triangulate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriangulateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriangulateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/predict": {
+      "post": {
+        "tags": [
+          "geometry"
+        ],
+        "summary": "Predict",
+        "operationId": "predict_v1_predict_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PredictRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/detect/ball": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Detect Ball",
+        "operationId": "detect_ball_v1_detect_ball_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Detect Ball V1 Detect Ball Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/detect/pose": {
+      "post": {
+        "tags": [
+          "inference"
+        ],
+        "summary": "Detect Pose",
+        "operationId": "detect_pose_v1_detect_pose_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Detect Pose V1 Detect Pose Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/session/report": {
+      "post": {
+        "tags": [
+          "assessment"
+        ],
+        "summary": "Session Report",
+        "operationId": "session_report_v1_session_report_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Session Report V1 Session Report Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "mlops"
+        ],
+        "summary": "Models",
+        "operationId": "models_v1_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/evaluate": {
+      "post": {
+        "tags": [
+          "mlops"
+        ],
+        "summary": "Evaluate",
+        "operationId": "evaluate_v1_evaluate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Metrics",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CameraInfo": {
+        "properties": {
+          "camera_id": {
+            "type": "string",
+            "title": "Camera Id"
+          },
+          "device": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "calibrated": {
+            "type": "boolean",
+            "title": "Calibrated",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "camera_id"
+        ],
+        "title": "CameraInfo"
+      },
+      "CamerasResponse": {
+        "properties": {
+          "profile": {
+            "type": "string",
+            "title": "Profile"
+          },
+          "camera_count": {
+            "type": "integer",
+            "title": "Camera Count"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "validated": {
+            "type": "boolean",
+            "title": "Validated"
+          },
+          "cameras": {
+            "items": {
+              "$ref": "#/components/schemas/CameraInfo"
+            },
+            "type": "array",
+            "title": "Cameras"
+          }
+        },
+        "type": "object",
+        "required": [
+          "profile",
+          "camera_count",
+          "status",
+          "validated",
+          "cameras"
+        ],
+        "title": "CamerasResponse"
+      },
+      "EvaluateRequest": {
+        "properties": {
+          "suite": {
+            "type": "string",
+            "title": "Suite"
+          },
+          "pairs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/EvaluationPairIn"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pairs"
+          },
+          "metrics": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metrics"
+          }
+        },
+        "type": "object",
+        "required": [
+          "suite"
+        ],
+        "title": "EvaluateRequest"
+      },
+      "EvaluateResponse": {
+        "properties": {
+          "passed": {
+            "type": "boolean",
+            "title": "Passed"
+          },
+          "suite": {
+            "type": "string",
+            "title": "Suite"
+          },
+          "failures": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Failures"
+          },
+          "metrics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metrics"
+          },
+          "thresholds": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Thresholds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "passed",
+          "suite",
+          "failures",
+          "metrics",
+          "thresholds"
+        ],
+        "title": "EvaluateResponse"
+      },
+      "EvaluationPairIn": {
+        "properties": {
+          "pred": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Pred"
+          },
+          "gt": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Gt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pred",
+          "gt"
+        ],
+        "title": "EvaluationPairIn"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "ok"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service",
+            "default": "project-cam-api"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "HealthResponse"
+      },
+      "ModelRecordResponse": {
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "task": {
+            "type": "string",
+            "title": "Task"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "backend": {
+            "type": "string",
+            "title": "Backend"
+          },
+          "artifact_format": {
+            "type": "string",
+            "title": "Artifact Format"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "input_size": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Input Size"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "checksum_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checksum Sha256"
+          },
+          "checksum_status": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Checksum Status"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "metrics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metrics"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_id",
+          "task",
+          "version",
+          "backend",
+          "artifact_format",
+          "path",
+          "input_size",
+          "status",
+          "checksum_status"
+        ],
+        "title": "ModelRecordResponse"
+      },
+      "ModelsResponse": {
+        "properties": {
+          "registry_version": {
+            "type": "integer",
+            "title": "Registry Version"
+          },
+          "default_models": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Default Models"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelRecordResponse"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "registry_version",
+          "default_models",
+          "models"
+        ],
+        "title": "ModelsResponse"
+      },
+      "ObservationIn": {
+        "properties": {
+          "x": {
+            "type": "number",
+            "title": "X"
+          },
+          "y": {
+            "type": "number",
+            "title": "Y"
+          },
+          "space": {
+            "type": "string",
+            "const": "normalized",
+            "title": "Space",
+            "default": "normalized"
+          }
+        },
+        "type": "object",
+        "required": [
+          "x",
+          "y"
+        ],
+        "title": "ObservationIn"
+      },
+      "PredictRequest": {
+        "properties": {
+          "track": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Track",
+            "description": "N x [x, y, z] in mm"
+          },
+          "dt": {
+            "type": "number",
+            "title": "Dt",
+            "default": 0.06666666666666667
+          },
+          "process_noise": {
+            "type": "number",
+            "title": "Process Noise",
+            "default": 500.0
+          },
+          "measurement_noise": {
+            "type": "number",
+            "title": "Measurement Noise",
+            "default": 10.0
+          },
+          "predict_ahead_ms": {
+            "type": "number",
+            "title": "Predict Ahead Ms",
+            "default": 400.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "track"
+        ],
+        "title": "PredictRequest"
+      },
+      "PredictResponse": {
+        "properties": {
+          "filtered_position_mm": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Filtered Position Mm"
+          },
+          "velocity_mm_s": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Velocity Mm S"
+          },
+          "predicted_position_mm": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Predicted Position Mm"
+          },
+          "prediction_uncertainty_mm": {
+            "type": "number",
+            "title": "Prediction Uncertainty Mm"
+          },
+          "predict_ahead_ms": {
+            "type": "number",
+            "title": "Predict Ahead Ms"
+          },
+          "samples": {
+            "type": "integer",
+            "title": "Samples"
+          }
+        },
+        "type": "object",
+        "required": [
+          "filtered_position_mm",
+          "velocity_mm_s",
+          "predicted_position_mm",
+          "prediction_uncertainty_mm",
+          "predict_ahead_ms",
+          "samples"
+        ],
+        "title": "PredictResponse"
+      },
+      "SessionReportRequest": {
+        "properties": {
+          "input_path": {
+            "type": "string",
+            "title": "Input Path"
+          },
+          "exercise": {
+            "type": "string",
+            "title": "Exercise",
+            "default": "squat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_path"
+        ],
+        "title": "SessionReportRequest"
+      },
+      "SystemInfoResponse": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "camera_profile": {
+            "type": "string",
+            "title": "Camera Profile"
+          },
+          "camera_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Camera Count"
+          },
+          "fallback_profile": {
+            "type": "string",
+            "title": "Fallback Profile"
+          },
+          "units": {
+            "type": "string",
+            "title": "Units",
+            "default": "mm"
+          },
+          "shooting_enabled": {
+            "type": "boolean",
+            "title": "Shooting Enabled",
+            "default": false
+          },
+          "available_profiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Available Profiles"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "version",
+          "camera_profile",
+          "fallback_profile"
+        ],
+        "title": "SystemInfoResponse"
+      },
+      "TriangulateRequest": {
+        "properties": {
+          "calibration_profile": {
+            "type": "string",
+            "title": "Calibration Profile",
+            "default": "usb6"
+          },
+          "observations": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ObservationIn"
+            },
+            "type": "object",
+            "title": "Observations"
+          },
+          "projection_matrices": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projection Matrices"
+          }
+        },
+        "type": "object",
+        "required": [
+          "observations"
+        ],
+        "title": "TriangulateRequest"
+      },
+      "TriangulateResponse": {
+        "properties": {
+          "point_mm": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Point Mm"
+          },
+          "contributing_cameras": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Contributing Cameras"
+          },
+          "camera_count": {
+            "type": "integer",
+            "title": "Camera Count"
+          },
+          "calibration_profile": {
+            "type": "string",
+            "title": "Calibration Profile"
+          },
+          "latency_ms": {
+            "type": "number",
+            "title": "Latency Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "point_mm",
+          "contributing_cameras",
+          "camera_count",
+          "calibration_profile",
+          "latency_ms"
+        ],
+        "title": "TriangulateResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Project_Cam Athlete Assessment Report</title>
+  <!-- Chart.js powers the report charts. -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
+  <style>
+    body { font-family: Arial, sans-serif; color: #1f2933; margin: 0; background: #f5f7fa; }
+    main { max-width: 1080px; margin: 0 auto; padding: 24px; }
+    section { background: #fff; border: 1px solid #d9e2ec; border-radius: 8px; padding: 18px; margin: 16px 0; }
+    h1, h2 { margin: 0 0 12px; }
+    .disclaimer { background: #fff7e6; border-color: #f0b429; font-weight: 700; }
+    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .summary div { border: 1px solid #e4e7eb; border-radius: 6px; padding: 10px; }
+    .label { color: #52606d; font-size: 12px; text-transform: uppercase; }
+    .verdict { border-width: 2px; }
+    .verdict-usable { border-color: #2e7d32; background: #f1f8f2; }
+    .verdict-re_record { border-color: #f9a825; background: #fff8e1; }
+    .verdict-calibration_failed { border-color: #c62828; background: #fff5f5; }
+    .verdict-line { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    .verdict-label { font-size: 34px; font-weight: 700; }
+    .score { display: flex; align-items: center; gap: 16px; }
+    .gauge { width: 118px; height: 118px; border-radius: 50%; display: grid; place-items: center; color: white; font-size: 28px; font-weight: 700; }
+    .gauge.data-quality { background: {{ data_quality_color }}; }
+    .gauge.movement-quality { background: {{ movement_quality_color }}; font-size: 18px; line-height: 1.1; text-align: center; }
+    .quality-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .quality-card { display: flex; align-items: center; gap: 16px; }
+    .flag { border-left: 4px solid #d64545; padding: 8px 12px; margin: 8px 0; background: #fff5f5; }
+    .flag.info { border-left-color: #2f80ed; background: #f0f7ff; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid #e4e7eb; padding: 8px; text-align: left; vertical-align: top; }
+    th { color: #52606d; font-size: 12px; text-transform: uppercase; }
+    .status-scored, .status-usable, .status-passed { color: #2e7d32; font-weight: 700; }
+    .status-unscored, .status-re_record, .status-not_run { color: #946200; font-weight: 700; }
+    .status-calibration_failed, .status-failed, .status-blocked { color: #c62828; font-weight: 700; }
+    .muted { color: #52606d; }
+    canvas { max-height: 360px; }
+    footer { color: #52606d; font-size: 12px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+<main>
+  <section class="disclaimer">{{ report.disclaimer }}</section>
+
+  <section>
+    <h1>Athlete Movement Assessment</h1>
+    <div class="summary">
+      <div><div class="label">Athlete ID</div>{{ report.session.athlete_id }}</div>
+      <div><div class="label">Exercise</div>{{ report.exercise.replace("_", " ").title() }}</div>
+      <div><div class="label">Age / Sex</div>{{ report.session.age }} / {{ report.session.sex }}</div>
+      <div><div class="label">Frames / FPS</div>{{ report.session.frame_count }} / {{ report.session.fps }}</div>
+      <div><div class="label">Maturity Offset</div>
+        {% if report.maturity %}{{ report.maturity.maturity_offset_years }} years ({{ report.maturity.maturity_status }}){% else %}Not provided{% endif %}
+      </div>
+      <div><div class="label">Compliance</div>{{ report.compliance.status }}</div>
+      <div><div class="label">Demo Verdict</div>{{ report.demo_verdict.label }}</div>
+    </div>
+  </section>
+
+  <section class="verdict verdict-{{ report.demo_verdict.status }}">
+    <h2>Demo Verdict</h2>
+    <div class="verdict-line">
+      <div class="verdict-label">{{ report.demo_verdict.label }}</div>
+      <div>{{ report.demo_verdict.message }}</div>
+    </div>
+    <p class="muted">Calibration gate: <span class="status-{{ report.calibration_gate.status }}">{{ report.calibration_gate.status }}</span>. {{ report.calibration_gate.message }}</p>
+  </section>
+
+  <section>
+    <div class="quality-row">
+      <div class="quality-card">
+        <div class="gauge data-quality">{{ "%.0f"|format(data_quality_score) }}</div>
+        <div>
+          <h2>Data Quality</h2>
+          <p class="muted">Tracking confidence and joint coverage. {{ data_quality_label }}.</p>
+        </div>
+      </div>
+      <div class="quality-card">
+        <div class="gauge movement-quality">{{ movement_quality.label or "n/a" }}</div>
+        <div>
+          <h2>Movement Quality</h2>
+          <p class="muted">
+            {% if movement_quality.coaching_flag_count %}{{ movement_quality.coaching_flag_count }} coaching flag(s){% else %}No coaching flags{% endif %}
+            {% if movement_quality.unscored_rep_count %}, {{ movement_quality.unscored_rep_count }} unscored rep(s){% endif %}.
+            Movement quality is independent of data quality — a high data score with coaching flags still warrants review.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Coaching Flags</h2>
+    {% for flag in report.flags %}
+      <div class="flag {{ flag.severity }}">{{ flag.message }}</div>
+    {% endfor %}
+    {% if report.compliance.status != "ok" %}
+      <div class="flag">Protocol issue: {{ report.compliance.reason }} {{ report.compliance.suggestion }}</div>
+    {% endif %}
+    {% if report.calibration and report.calibration.status != "ok" %}
+      <div class="flag">Calibration warning: {{ report.calibration.warnings|join(" ") }}</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Rep Quality Table</h2>
+    {% if rep_rows %}
+    <table>
+      <thead>
+        <tr>
+          <th>Rep</th>
+          <th>Frames</th>
+          <th>Pelvis Travel</th>
+          <th>Depth (knee min)</th>
+          <th>Knee Asymmetry</th>
+          <th>Knee Drift (mag)</th>
+          <th>Knee Valgus (signed)</th>
+          <th>Confidence</th>
+          <th>Reason Codes</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in rep_rows %}
+        <tr>
+          <td>{{ row.index }}</td>
+          <td>{{ row.frames }}</td>
+          <td>{{ row.pelvis_travel_mm }} mm</td>
+          <td>{{ row.depth_deg }} deg</td>
+          <td>{{ row.knee_asymmetry_deg }} deg</td>
+          <td>{{ row.knee_drift_ratio }}</td>
+          <td>{{ row.knee_valgus_signed }}</td>
+          <td class="status-{{ row.status }}">{{ row.confidence }}</td>
+          <td>{{ row.reason_codes }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p>No valid reps were detected. Re-record the protocol if this was expected to contain squat repetitions.</p>
+    {% endif %}
+  </section>
+
+  {% if report.rejected_reps %}
+  <section>
+    <h2>Rejected Rep Candidates</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Frames</th>
+          <th>Reason Code</th>
+          <th>Message</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for item in report.rejected_reps %}
+        <tr>
+          <td>{{ item.start_frame }} - {{ item.end_frame }}</td>
+          <td>{{ item.reason_code }}</td>
+          <td>{{ item.message }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Metric Confidence</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Status</th>
+          <th>Source</th>
+          <th>Score</th>
+          <th>Valid Frames</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in metric_confidence_rows %}
+        <tr>
+          <td>{{ row.metric }}</td>
+          <td class="status-{{ row.status }}">{{ row.status }}</td>
+          <td>{{ row.source }}</td>
+          <td>{{ row.score }}</td>
+          <td>{{ row.valid_frame_ratio }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Angle Over Time</h2>
+    <canvas id="angleChart"></canvas>
+  </section>
+
+  <section>
+    <h2>Left / Right Symmetry</h2>
+    <canvas id="symmetryChart"></canvas>
+  </section>
+
+  <section>
+    <h2>Reference Context</h2>
+    <footer>
+      {% for ref in report.reference_context %}
+        <p><strong>{{ ref.name }}</strong>: {{ ref.use }}</p>
+      {% endfor %}
+    </footer>
+  </section>
+</main>
+
+<script>
+window.addEventListener("load", () => {
+  const frames = {{ frames_json | safe }};
+  const series = {{ angle_series_json | safe }};
+  const repMarkers = {{ rep_markers_json | safe }};
+  const xAxisLabel = {{ x_axis_label | tojson }};
+
+  const datasets = Object.keys(series).map((name) => ({
+    label: name.replaceAll("_", " "),
+    data: series[name],
+    borderWidth: 2,
+    pointRadius: 0,
+    tension: 0.25
+  }));
+
+  // Plugin: draw vertical lines at rep bottom and shade rep span
+  const repBoundaryPlugin = {
+    id: "repBoundary",
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+      ctx.save();
+      repMarkers.forEach((rep, i) => {
+        if (rep.start_x != null && rep.end_x != null) {
+          const xs = x.getPixelForValue(rep.start_x);
+          const xe = x.getPixelForValue(rep.end_x);
+          ctx.fillStyle = i % 2 === 0 ? "rgba(46,125,50,0.06)" : "rgba(46,125,50,0.10)";
+          ctx.fillRect(xs, top, xe - xs, bottom - top);
+        }
+        if (rep.bottom_x != null) {
+          const xb = x.getPixelForValue(rep.bottom_x);
+          ctx.strokeStyle = "#c62828";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.moveTo(xb, top);
+          ctx.lineTo(xb, bottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = "#c62828";
+          ctx.font = "11px Arial";
+          ctx.textAlign = "center";
+          ctx.fillText("rep " + (rep.index ?? i + 1), xb, top + 12);
+        }
+      });
+      ctx.restore();
+    }
+  };
+
+  new Chart(document.getElementById("angleChart"), {
+    type: "line",
+    data: { labels: frames, datasets },
+    options: {
+      responsive: true,
+      scales: {
+        x: { title: { display: true, text: xAxisLabel } },
+        y: { title: { display: true, text: "Knee angle (deg)" } }
+      }
+    },
+    plugins: [repBoundaryPlugin]
+  });
+
+  new Chart(document.getElementById("symmetryChart"), {
+    type: "bar",
+    data: {
+      labels: {{ symmetry_labels_json | safe }},
+      datasets: [{ label: "Mean asymmetry (deg)", data: {{ symmetry_values_json | safe }} }]
+    },
+    options: { responsive: true, scales: { y: { beginAtZero: true } } }
+  });
+});
+</script>
+</body>
+</html>

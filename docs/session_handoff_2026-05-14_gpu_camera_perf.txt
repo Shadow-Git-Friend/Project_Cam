@@ -1,0 +1,499 @@
+Project_Cam session handoff - 2026-05-14
+Topic: NVIDIA driver recovery, current 4-camera throughput, Path B camera readiness
+
+Context
+-------
+Workspace: /home/hanush/Desktop/Project_Cam
+Machine: HP Z4 G4 Workstation
+OS/kernel during session: Ubuntu 22.04 HWE, kernel 6.8.0-111-generic
+Project focus: 4-camera markerless 3D pose/ball tracking, biomech assessment, BLM launcher integration, possible Path B hardware upgrade.
+
+High-level outcome
+------------------
+1. NVIDIA/CUDA was broken at the start of the session and is now fixed.
+2. Current 4 cameras can stream raw 1280x720@30 and 1920x1080@30 simultaneously with no AI and no disk writes.
+3. After GPU fix, skeleton-only TensorRT compute is fast enough for 30 FPS assessment.
+4. Ball + pose compute is also fast enough without heavy UI.
+5. The old 15-18 FPS ceiling appears mainly when full operator UI is enabled, not from raw cameras or CPU.
+6. Path B is still useful for sync/global shutter/motion blur/validation credibility, not because this computer cannot handle current cameras.
+
+
+1. NVIDIA driver issue and fix
+------------------------------
+Initial symptom:
+  nvidia-smi failed:
+  "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."
+
+Root cause:
+  The machine booted into kernel:
+    6.8.0-111-generic
+
+  But NVIDIA 580 kernel modules were only installed for older kernels, especially:
+    6.8.0-110-generic
+
+  modprobe error before fix:
+    modprobe: FATAL: Module nvidia not found in directory /lib/modules/6.8.0-111-generic
+
+Additional apt issue:
+  sudo apt update failed because ProtonVPN repo key is broken:
+    NO_PUBKEY EDA3E22630349F1C
+    The repository 'https://repo.protonvpn.com/debian stable InRelease' is not signed.
+
+  This did not block direct NVIDIA package install because the required Ubuntu packages were already resolvable.
+
+Command run by user:
+  sudo apt install linux-modules-nvidia-580-6.8.0-111-generic linux-modules-nvidia-580-generic-hwe-22.04 nvidia-driver-580
+
+Install result:
+  20 upgraded, 4 newly installed.
+  Important successful lines:
+    nvidia-drm.ko: OK
+    nvidia-modeset.ko: OK
+    nvidia-peermem.ko: OK
+    nvidia-uvm.ko: OK
+    nvidia.ko: OK
+
+After reboot, user verified:
+  uname -r:
+    6.8.0-111-generic
+
+  modinfo nvidia | head:
+    filename: /lib/modules/6.8.0-111-generic/kernel/nvidia-580/nvidia.ko
+    version: 580.142
+
+  nvidia-smi:
+    Driver Version: 580.142
+    CUDA Version: 13.0
+    GPU 0: NVIDIA GeForce RTX 2080 Ti, 11264 MiB
+    GPU 1: Quadro P400, 2048 MiB
+
+Fresh verification from project venv:
+  torch 2.1.0+cu121
+  cuda_available True
+  device_count 2
+  device0 NVIDIA GeForce RTX 2080 Ti
+
+Conclusion:
+  NVIDIA driver and CUDA access from the project venv are restored.
+  Do not run sudo apt autoremove until the live pipeline has been used successfully for a while.
+  ProtonVPN apt repo key remains a separate cleanup item.
+
+
+2. Current machine inventory
+----------------------------
+CPU:
+  Intel Core i9-7900X
+  10 cores / 20 threads
+  3.30 GHz base, up to 4.50 GHz
+  AVX2 and AVX-512 available
+
+RAM:
+  31 GiB total, around 25 GiB available during later checks.
+
+GPU:
+  RTX 2080 Ti, 11 GB VRAM
+  Quadro P400, 2 GB VRAM
+  CUDA now available after driver fix.
+
+Storage:
+  Samsung MZ7LN256 256 GB SATA SSD
+  Root filesystem /dev/sda2, 234 GB usable, 185 GB used, 37 GB free, 84% full
+  No NVMe detected.
+
+USB topology:
+  Current cameras are on Intel USB controller path 00:14.0.
+  Current cameras negotiate as USB2/480M devices via uvcvideo.
+  Additional controllers exist:
+    Intel chipset xHCI
+    Thunderbolt 3 USB controller
+    NVIDIA TU102 USB 3.1 controller
+
+Conclusion:
+  CPU/RAM/GPU are not the immediate issue for current cameras.
+  Storage is weak for high-FPS recording.
+  For Path B, a PCIe USB3 card and NVMe SSD are still recommended.
+
+
+3. Current camera visibility
+----------------------------
+Config file:
+  garage_lab_combined/config/cameras.yaml
+
+Camera device mappings detected:
+  camNorth -> /dev/v4l/by-path/pci-0000:00:14.0-usb-0:11.1:1.0-video-index0 -> /dev/video0
+  camEast  -> /dev/v4l/by-path/pci-0000:00:14.0-usb-0:13.1:1.0-video-index0 -> /dev/video2
+  camSouth -> /dev/v4l/by-path/pci-0000:00:14.0-usb-0:7.1.1:1.0-video-index0 -> /dev/video6
+  camWest  -> /dev/v4l/by-path/pci-0000:00:14.0-usb-0:5.1.1:1.0-video-index0 -> /dev/video4
+
+v4l2 advertised modes:
+  All 4 cameras advertise:
+    1280x720 MJPG @ 30 FPS
+    1920x1080 MJPG @ 30 FPS
+
+Important:
+  All 4 current cameras are USB2 480M UVC cameras.
+  The active USB3 cables do not turn these cameras into USB3 devices.
+
+
+4. Raw camera tests, no AI, no disk writes
+------------------------------------------
+Goal:
+  Test camera layer only: 4 cameras simultaneously, no YOLO, no triangulation, no UI, no BLM, no recording.
+
+Test A:
+  4 cameras, 1280x720, MJPG, requested 30 FPS.
+
+Result:
+  camNorth count=359, fps=29.75, fails=0
+  camEast  count=360, fps=29.83, fails=0
+  camSouth count=360, fps=29.83, fails=0
+  camWest  count=360, fps=29.83, fails=0
+  PASS_30FPS_ALL=True
+
+Frame timing:
+  Mean inter-frame interval around 33.46 ms.
+  Timestamp spread between latest frames:
+    mean ~19.64 ms
+    p95 ~25.00 ms
+    max ~31.78 ms
+
+Test B:
+  4 cameras, 1920x1080, MJPG, requested 30 FPS.
+
+Result:
+  camNorth count=299, fps=29.73, fails=0
+  camEast  count=300, fps=29.83, fails=0
+  camSouth count=300, fps=29.83, fails=0
+  camWest  count=299, fps=29.73, fails=0
+  PASS_30FPS_ALL=True
+
+Frame timing:
+  Mean inter-frame interval around 33.45 ms.
+  Timestamp spread between latest frames:
+    mean ~23.61 ms
+    p95 ~35.35 ms
+    max ~42.30 ms
+
+CPU load test at 4xFullHD@30 raw:
+  duration_s=20.05
+  process_cpu_s=29.26
+  cpu_percent_one_core_equiv=146.0%
+  cpu_percent_of_20_threads_equiv=7.3%
+
+Conclusion:
+  Current cameras can stream 4xFullHD@30 simultaneously without AI.
+  Raw camera streaming is not the current CPU bottleneck.
+  However, cameras are not hardware-synchronized; inter-camera freshness spread can be 20-40 ms.
+
+
+5. Skeleton-only test: 4 cameras + YOLO-Pose TensorRT, no ball tracking
+-----------------------------------------------------------------------
+Command:
+  ./apps/athlete_assessment/run_live_tracking_for_assessment.sh --max-runtime-sec 25 --no-show-2d --no-show-3d --perf-log-every 30
+
+Runtime notes:
+  Uses:
+    Parallel_working/scripts/live_4cam_arena_view_parallel.py
+    --no-track-ball
+    --pose-backend yolopose
+    --yolopose-model yolo11m-pose.engine
+    --width 1280 --height 720 --fps 15
+    --pose-every 1
+    UDP target stream to 127.0.0.1:5015
+
+TensorRT load:
+  yolo11m-pose.engine loaded successfully.
+
+Perf file:
+  Parallel_working/output/perf_assessment_20260514_133941.jsonl
+
+Important caveat:
+  The loop ran faster than the physical camera FPS, so some iterations may have reprocessed the latest camera frame.
+  Interpret this as compute ceiling, not actual camera FPS.
+
+After warmup (frame >= 120):
+  fps_from_perf ~63.85 processed iterations/sec
+  pose_ms mean 13.67 ms
+  pose_ms p95 15.11 ms
+  pose_ms max 15.39 ms
+  triang_ms mean 1.68 ms
+  udp_ms mean 0.18 ms
+  total_ms mean 15.56 ms
+  total_ms p95 17.74 ms
+  end_to_end_ms mean 15.86 ms
+  frame_age_ms mean 21.48 ms
+  frame_age_ms p95 38.35 ms
+  usable cameras 4/4
+  stale cameras 0
+
+Stability note:
+  This run ended with a segmentation fault on exit:
+    Segmentation fault (core dumped)
+  Runtime perf was collected before the crash.
+  Suspected area: TensorRT/OpenCV cleanup, but this was not debugged further.
+
+Conclusion:
+  Skeleton-only compute is fast enough for 30 FPS assessment.
+  The exit crash needs follow-up if it repeats in normal use.
+
+
+6. Ball + pose compute test, almost no UI render
+------------------------------------------------
+First attempted command used:
+  --no-show-2d --no-show-3d
+
+Finding:
+  In current code, ball detector is disabled when no 2D/3D visualization output is active.
+  Log line:
+    [INFO] Ball detector disabled (no active visualization output).
+
+This is an architecture issue:
+  Ball tracking currently depends on UI visibility flags.
+  Ball tracking should be independently enabled by compute/output needs, not by whether a window is open.
+
+Corrected test:
+  Enabled --show-3d so ball pipeline is active.
+  Set --viz-every 999 and --mosaic-every 999 to avoid heavy rendering.
+
+Command shape:
+  ./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_parallel.py
+    --track-ball default
+    --show-3d
+    --no-show-2d
+    --viz-every 999
+    --mosaic-every 999
+    --ball-device cuda:0
+    --pose-device cuda:0
+    --pose-backend yolopose
+    --yolopose-model yolo11m-pose.engine
+    --max-runtime-sec 20
+
+Perf file:
+  Parallel_working/output/perf_ball_pose_compute_20260514_134535.jsonl
+
+After warmup (frame >= 60):
+  fps_from_perf ~35.02 processed iterations/sec
+  ball_ms mean 13.09 ms
+  ball_ms p95 14.78 ms
+  ball_ms max 15.74 ms
+  pose_ms mean 13.25 ms
+  pose_ms p95 14.43 ms
+  triang_ms mean 1.80 ms
+  udp_ms mean 0.14 ms
+  total_ms mean 28.34 ms
+  total_ms p95 31.64 ms
+  end_to_end_ms mean 28.77 ms
+  end_to_end_ms p95 32.59 ms
+  usable cameras 4/4
+  stale cameras 0
+  dropped frames 0
+
+Conclusion:
+  Ball + pose compute is fast enough for about 30 FPS if UI rendering is mostly removed.
+  Current GPU/AI path is not the main blocker.
+
+
+7. Operator UI test: ball + pose + 2D mosaic + 3D cv2 UI
+--------------------------------------------------------
+Goal:
+  Test the real operator-facing mode with camera streams, ball detection, pose, triangulation, 2D mosaic, and 3D OpenCV visualization.
+
+Command shape:
+  ./venv/bin/python Parallel_working/scripts/live_4cam_arena_view_parallel.py
+    --show-2d --show-3d
+    --viz-backend cv2
+    --viz-width 960 --viz-height 720
+    --pose-every 1
+    --ball-every 1
+    --viz-every 1
+    --mosaic-every 2
+    --max-runtime-sec 25
+
+Perf file:
+  Parallel_working/output/perf_operator_ui_20260514_134837.jsonl
+
+After warmup (frame >= 60):
+  fps_from_perf ~18.67
+  ball_ms mean 21.48 ms
+  ball_ms p95 23.14 ms
+  ball_ms max 26.68 ms
+  pose_ms mean 16.07 ms
+  pose_ms p95 16.58 ms
+  pose_ms max 18.14 ms
+  triang_ms mean 2.48 ms
+  udp_ms mean 0.15 ms
+  viz3d_ms mean 3.22 ms
+  mosaic_ms mean 3.52 ms
+  total_ms mean 54.30 ms
+  total_ms p95 56.59 ms
+  end_to_end_ms mean 62.16 ms
+  end_to_end_ms p95 66.06 ms
+  frame_age_ms mean 19.61 ms
+  frame_age_ms p95 38.43 ms
+  usable cameras 4/4
+  stale cameras 0
+  dropped frames total 11
+
+Conclusion:
+  The historical 15-18 FPS ceiling reappears in full operator UI mode.
+  Current bottleneck is the full live loop with UI/rendering/scheduling, not raw camera capture and not pure AI compute.
+
+
+8. Interpretation for camera purchase / Path B
+-----------------------------------------------
+What was disproven:
+  The computer is not too weak for current 4-camera FullHD streaming.
+  CPU is not the raw camera bottleneck.
+  GPU is now working and can run TensorRT pose/ball fast enough for 30 FPS compute when UI load is reduced.
+
+What remains true:
+  Current cameras are USB2, rolling-shutter, software-synced UVC cameras.
+  They can stream 30 FPS, but not with precise hardware sync.
+  Latest-frame timestamp spread is around 20-40 ms.
+  For slow assessment/MVP this can be acceptable.
+  For fast jumps, cuts, ball motion, and serious validation, this is still a camera-layer limitation.
+
+Path B value:
+  Path B should not be sold as "the computer cannot handle current cameras".
+  Path B should be sold as:
+    hardware synchronization
+    global shutter
+    less motion blur
+    higher reliable capture rate
+    better Z-axis/fast-motion credibility
+    better validation-study credibility
+
+Path B risk:
+  4x120 FPS is realistic with proper USB3/PCIe architecture and NVMe.
+  4x200 FPS should not be promised as the main production mode.
+  For 4 high-speed USB3 cameras, buy/plan proper independent USB channels.
+  A normal 4-port USB hub is not enough if it shares one upstream bottleneck.
+
+Recommended hardware before Path B:
+  1 TB NVMe SSD
+  PCIe USB3 card with independent channels, or a verified controller distribution plan
+  Better lighting
+  Laser distance meter for tag/camera coordinate measurement
+
+Recommended cheaper hardware experiment:
+  Test 2 cheaper 2MP/FullHD 120 FPS global-shutter USB3 cameras before buying 4 FLIR cameras.
+  Validate:
+    Linux support
+    manual exposure/gain lock
+    hardware trigger support
+    real 120 FPS at target resolution
+    timestamps
+    SDK/OpenCV integration
+    lens/FOV suitability
+
+
+9. Camera height / Z-axis discussion
+------------------------------------
+Current camera positions in arena_fixed/cal/extrinsics/Dimensions_fixed.txt:
+  CamNorth = (5, 110, 226) cm
+  CamEast  = (162, 5, 212) cm
+  CamWest  = (160, 297, 217) cm
+  CamSouth = (618, 153, 227) cm
+
+All cameras are roughly in one high band: 212-227 cm.
+
+Known systematic bias from arena_fixed calibration:
+  Ball static bias around X+60, Z-104 mm
+  Joint-touch bias around X+83, Z-125 mm
+
+Interpretation:
+  Trying one camera at a clearly different height, such as mid-wall height, is a reasonable A/B experiment.
+  It may improve vertical geometry and Z-axis observability for knees, hips, and low ball positions.
+  But moving cameras requires full extrinsics recalibration.
+  Changing camera/lens/resolution requires intrinsics recalibration or verified K scaling.
+
+Recommendation:
+  Do not disrupt the current working calibration casually before important tests.
+  Treat camera-height changes as a separate A/B calibration experiment.
+
+
+10. Key commands and files from this session
+-------------------------------------------
+NVIDIA install command:
+  sudo apt install linux-modules-nvidia-580-6.8.0-111-generic linux-modules-nvidia-580-generic-hwe-22.04 nvidia-driver-580
+
+Verification commands:
+  uname -r
+  modinfo nvidia | head
+  nvidia-smi
+
+PyTorch/CUDA verification:
+  cd /home/hanush/Desktop/Project_Cam
+  ./venv/bin/python - <<'PY'
+  import torch
+  print(torch.__version__)
+  print(torch.cuda.is_available())
+  print(torch.cuda.device_count())
+  print(torch.cuda.get_device_name(0))
+  PY
+
+Camera config:
+  garage_lab_combined/config/cameras.yaml
+
+Live pipeline:
+  Parallel_working/scripts/live_4cam_arena_view_parallel.py
+
+Assessment runner:
+  apps/athlete_assessment/run_live_tracking_for_assessment.sh
+
+Perf outputs generated:
+  Parallel_working/output/perf_assessment_20260514_133941.jsonl
+  Parallel_working/output/perf_full_compute_20260514_134342.jsonl
+  Parallel_working/output/perf_ball_pose_compute_20260514_134535.jsonl
+  Parallel_working/output/perf_operator_ui_20260514_134837.jsonl
+
+Important note:
+  perf_full_compute_20260514_134342 was not a true ball test because ball detector was disabled when both UI outputs were off.
+  perf_ball_pose_compute_20260514_134535 is the corrected ball+pose compute test.
+
+
+11. Recommended next work
+-------------------------
+Priority 1:
+  Fix or refactor the live script so ball tracking can run headless, independent of --show-2d/--show-3d.
+
+Priority 2:
+  Create an official "headless compute" profile:
+    4 cameras
+    ball + pose
+    no UI windows
+    UDP/events/logging enabled
+    perf JSONL enabled
+  Target: stable 30 FPS compute.
+
+Priority 3:
+  Decouple operator UI from compute loop.
+  Compute loop can run near 30 FPS.
+  UI can render at 15-20 FPS or consume state via Flask/browser/SSE/WebSocket.
+
+Priority 4:
+  Investigate TensorRT/OpenCV cleanup segmentation fault seen in skeleton-only run.
+  It did not block runtime measurement, but repeated crash-on-exit is not acceptable for demos.
+
+Priority 5:
+  Run one real athlete/garage test:
+    raw 30 FPS
+    skeleton-only assessment
+    ball+pose compute
+    operator UI
+  Save perf logs and compare.
+
+Priority 6:
+  Hardware:
+    Buy laser distance meter and better lighting first.
+    Consider NVMe before high-FPS recording work.
+    Only then test 2 cheap 2MP/120FPS global-shutter USB3 cameras before full FLIR Path B.
+
+
+Bottom line
+-----------
+The computer is stronger than initially feared.
+Current cameras can stream 4xFullHD@30 raw.
+RTX 2080 Ti TensorRT path is restored and fast.
+The main current software bottleneck is the full operator live loop/UI, not the camera ingest or AI compute.
+Path B cameras are still justified for synchronization, global shutter, motion blur reduction, and validation credibility, but should be paired with NVMe, proper USB3 channels, lighting, and recalibration.

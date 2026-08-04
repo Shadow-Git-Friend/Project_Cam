@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Project Cam Control Center
+GenericName=Arena Control Center
+Comment=Multi-camera 3D pose, multi-person tracking, and launcher control (native UI)
+Exec=/home/hanush/Desktop/Project_Cam/project-cam-desktop/src-tauri/target/release/project-cam
+Path=/home/hanush/Desktop/Project_Cam
+Icon=/home/hanush/Desktop/Project_Cam/project-cam-desktop/src-tauri/icons/icon.png
+Terminal=false
+StartupNotify=true
+StartupWMClass=project-cam
+Categories=Science;
+Keywords=camera;pose;arena;tracking;face;launcher;

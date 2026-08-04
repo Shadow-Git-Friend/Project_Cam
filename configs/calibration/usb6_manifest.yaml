@@ -1,0 +1,76 @@
+# 6-camera calibration manifest (Phase 0 promotion tracker).
+#
+# Single place that records WHERE the 6-camera calibration artifacts live and
+# WHICH promotion gates have passed. Fill the `gates` block from real runs of
+# scripts/usb6_capture_gate.py + scripts/solve_extrinsics_usb6.py + the static
+# 3D GT validation. Until every gate is true, status stays `prototype` and the
+# 4-camera profile remains the runtime fallback.
+
+profile: usb6
+units: mm
+status: prototype
+
+resolution: [1280, 720]      # intrinsics MUST be calibrated at the live resolution
+
+artifacts:
+  intrinsics_dir: garage_lab_combined/cal/intrinsics_usb6_1280x720
+  extrinsics: garage_lab_combined/cal/extrinsics_usb6/extrinsics_usb6.json
+  extrinsics_mirrored: garage_lab_combined/cal/extrinsics_usb6/extrinsics_20260623_105831_mirrored.json
+  dimensions: garage_lab_combined/cal/extrinsics_usb6/Dimensions_mirrored_y.txt
+
+# Phase 0 acceptance gates (see PROJECT_IMPROVEMENT_PLAN). All production
+# promotion gates must pass before any 6-camera production accuracy claim.
+gates:
+  # 2026-06-29: frame-health portion passed (all six opened, min fresh FPS
+  # 16.51, max gap 81.11 ms, zero >100 ms gaps), but full capture gate failed
+  # because all cameras still enumerate under one USB controller.
+  capture_gate_passed: false
+  capture_ok: true                 # 30 s gate, no camera drops, max_gap_ms <= 100
+  usb_controller_split_ok: false
+  all_intrinsics_at_runtime_res: true
+  all_extrinsics_solved: true
+  mean_reprojection_px_under_25: true
+  static_3d_gt_mean_mm: null       # blocked: no six-camera static-GT trials found
+  static_3d_gt_p95_mm: null        # blocked: no six-camera static-GT trials found
+  four_cam_fallback_runs: true     # the 4-cam path stays runnable regardless
+
+# Measured numbers go here once the gate scripts have been run (see
+# docs/performance_report.md for the human-readable report).
+measured:
+  capture_gate_report: artifacts_local/phase0_usb6/capture_gate_20260629_133308/report.json
+  intrinsics_gate_report: artifacts_local/phase0_usb6/intrinsics_gate_20260629_133249.json
+  extrinsics_solver_report: artifacts_local/phase0_usb6/extrinsics_20260629_133451.json
+  capture:
+    controller_count: 1
+    min_fresh_fps: 16.50967679209345
+    max_gap_ms: 81.10880599997472
+    gaps_gt_100ms_total: 0
+    per_camera:
+      camUsb01_C920: {fresh_fps: 20.90, max_gap_ms: 75.78, gaps_gt_100ms: 0}
+      camUsb02_1080P: {fresh_fps: 29.94, max_gap_ms: 42.21, gaps_gt_100ms: 0}
+      camUsb03_C920: {fresh_fps: 16.51, max_gap_ms: 81.11, gaps_gt_100ms: 0}
+      camUsb04_1080P: {fresh_fps: 29.93, max_gap_ms: 41.52, gaps_gt_100ms: 0}
+      camUsb05_1080P: {fresh_fps: 29.92, max_gap_ms: 42.12, gaps_gt_100ms: 0}
+      camUsb06_1080P: {fresh_fps: 29.93, max_gap_ms: 41.11, gaps_gt_100ms: 0}
+  intrinsics_reprojection_px:
+    max: 1.1225447660759507
+    per_camera:
+      camUsb01_C920: 1.1225447660759507
+      camUsb02_1080P: 0.5201576844216599
+      camUsb03_C920: 0.9331972275603799
+      camUsb04_1080P: 0.8230051463018199
+      camUsb05_1080P: 0.9352852975658948
+      camUsb06_1080P: 0.6958133731197321
+  reprojection_px:
+    mean_rmse: 2.966454287370046
+    max_rmse: 6.41274881362915
+    per_camera_rmse:
+      camUsb01_C920: 4.352775573730469
+      camUsb02_1080P: 0.9346177577972412
+      camUsb03_C920: 2.576878309249878
+      camUsb04_1080P: 1.369214653968811
+      camUsb05_1080P: 2.1524906158447266
+      camUsb06_1080P: 6.41274881362915
+  static_3d_gt:
+    status: not_run
+    blocker: no six-camera static-GT trial dataset found in repo/artifacts

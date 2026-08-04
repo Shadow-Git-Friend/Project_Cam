@@ -1,0 +1,57 @@
+# 6-camera USB profile — PROTOTYPE / VALIDATION baseline (the target direction).
+#
+# Promoted from garage_lab_combined/config/cameras_6usb_test.yaml. Camera roles
+# are still temporary USB names; they are locked to semantic roles only AFTER the
+# Phase 0 promotion gates pass (capture stability + intrinsics at runtime res +
+# extrinsics + static 3D GT). See docs/performance_report.md and PROJECT_*.md.
+#
+# Do NOT claim production 6-camera accuracy from this profile until status:validated.
+
+profile: usb6
+camera_count: 6
+units: mm
+status: prototype          # capture/calibration/static-GT gates NOT all passed yet
+
+arena_dimensions_mm:
+  x: 6230
+  y: 3050
+  z: 2950
+
+# The 6-USB rig triangulates in a Y-MIRRORED frame (see docs/architecture.md).
+geometry:
+  frame: mirrored_y
+  observation_space: normalized
+  projection: extrinsic_only   # [R|t], NOT K @ [R|t]
+
+# Rebound 2026-07-29 after the USB hubs moved computer ports. Camera bodies
+# stayed mounted; roles were recovered against the 2026-07-01 synchronized
+# footage using static landmarks plus feature-matching inliers.
+cameras:
+  camUsb01_C920:
+    device: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_9718C21F-video-index0
+    calibrated: false
+  camUsb02_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:4.1:1.0-video-index0
+    calibrated: false
+  camUsb03_C920:
+    device: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_7B879F0F-video-index0
+    calibrated: false
+  camUsb04_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:6.1.1:1.0-video-index0
+    calibrated: false
+  camUsb05_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:5.1.1:1.0-video-index0
+    calibrated: false
+  camUsb06_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:11.1.1:1.0-video-index0
+    calibrated: false
+
+calibration:
+  manifest: configs/calibration/usb6_manifest.yaml
+
+# Known prototype constraints (honest disclosure for the portfolio):
+notes:
+  - All six cameras currently enumerate on one USB2 controller -> shared bandwidth
+    ceiling; do not claim full-rate 6-camera production capture until measured.
+  - 1080P units share serial SN0002; by-id is ambiguous, so by-path is used.
+  - --shoot-enabled is NOT permitted on this path until aim is re-validated.

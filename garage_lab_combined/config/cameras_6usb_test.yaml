@@ -1,0 +1,23 @@
+# Temporary capture-only config for the six USB cameras currently attached.
+# C920 devices use stable by-id links. 1080P USB Camera devices use by-path
+# links because several units expose the same generic serial identity.
+# Do not use this as a calibrated camera layout and do not replace cameras.yaml
+# until six-camera intrinsics, extrinsics, and static 3D validation pass.
+#
+# Rebound 2026-07-29 after the USB hubs moved computer ports. Camera bodies
+# stayed mounted; roles were recovered against the 2026-07-01 synchronized
+# footage using static landmarks plus feature-matching inliers.
+
+cameras:
+  camUsb01_C920:
+    device: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_9718C21F-video-index0
+  camUsb02_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:4.1:1.0-video-index0
+  camUsb03_C920:
+    device: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_7B879F0F-video-index0
+  camUsb04_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:6.1.1:1.0-video-index0
+  camUsb05_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:5.1.1:1.0-video-index0
+  camUsb06_1080P:
+    device: /dev/v4l/by-path/pci-0000:00:14.0-usb-0:11.1.1:1.0-video-index0

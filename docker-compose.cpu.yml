@@ -1,0 +1,27 @@
+# CPU stack: aim-only API + Prometheus. No GPU, no cameras.
+#   docker compose -f docker-compose.cpu.yml up --build
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: project-cam-api:cpu
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      - PROJECT_CAM_CAMERA_PROFILE=usb6
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api

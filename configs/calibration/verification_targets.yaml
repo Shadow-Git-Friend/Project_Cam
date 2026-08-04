@@ -1,0 +1,11 @@
+schema_version: project_cam.calibration_verification.v1
+profile:
+  name: assessment_tpose_stability
+  description: "Quick garage assessment calibration check using T-pose distance stability."
+thresholds:
+  max_distance_std_mm: 15
+  max_missing_frame_ratio: 0.30
+measurements:
+  - shoulder_width_mm
+  - left_shoulder_to_wrist_mm
+  - right_shoulder_to_wrist_mm
