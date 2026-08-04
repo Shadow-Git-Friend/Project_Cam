@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Project Cam Arena Control Center
+Comment=Launch multi-camera 3D pose, multi-person tracking, and local face labels
+Exec=@PYTHON@ "@REPO_ROOT@/desktop/arena_control_center.py"
+Path=@REPO_ROOT@
+Icon=@REPO_ROOT@/desktop/project-cam.svg
+Terminal=false
+StartupNotify=true
+StartupWMClass=project-cam
+Categories=Science;
+Keywords=camera;pose;arena;tracking;face;

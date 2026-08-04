@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>PROJECT CAM</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#141414"/>
+      <stop offset="1" stop-color="#050505"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFDE00"/>
+      <stop offset="1" stop-color="#FFF3A0"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="18" y="18" width="476" height="476" rx="104" fill="url(#bg)" stroke="#FFDE00" stroke-width="12"/>
+  <path d="M106 152 256 67 406 152 406 326 256 411 106 326Z" fill="none" stroke="url(#beam)" stroke-width="12" opacity=".88"/>
+  <g fill="#0A0A0B" stroke-width="10" filter="url(#glow)">
+    <circle cx="106" cy="152" r="27" stroke="#FFDE00"/><circle cx="256" cy="67" r="27" stroke="#FFE94D"/>
+    <circle cx="406" cy="152" r="27" stroke="#F7F7F4"/><circle cx="406" cy="326" r="27" stroke="#F7F7F4"/>
+    <circle cx="256" cy="411" r="27" stroke="#FFE94D"/><circle cx="106" cy="326" r="27" stroke="#FFDE00"/>
+  </g>
+  <g stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow)">
+    <circle cx="256" cy="166" r="28" stroke="#F7F7F4" stroke-width="12"/>
+    <path d="M256 196 256 285M256 220 194 254M256 220 318 254M256 285 211 352M256 285 301 352" stroke="url(#beam)" stroke-width="15"/>
+    <path d="M183 370 Q256 405 329 370" stroke="#FFDE00" stroke-width="9" opacity=".8"/>
+  </g>
+  <circle cx="354" cy="106" r="13" fill="#FFDE00" filter="url(#glow)"/>
+  <text x="256" y="462" text-anchor="middle" fill="#F7F7F4" font-family="DejaVu Sans Mono,monospace" font-size="27" font-weight="700" letter-spacing="5">PROJECT CAM</text>
+</svg>

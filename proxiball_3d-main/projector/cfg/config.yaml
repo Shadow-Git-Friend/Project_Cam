@@ -1,0 +1,32 @@
+# Goal detector config (south wall, camNorth)
+
+model: "projector/model/best.pt"
+
+conf: 0.4
+imgsz: 832
+classes: [0]           # class 0 = ball in the custom y26s model
+
+# PersistentTrackerV3
+jitter_thresh: 3.0     # px/frame — moves smaller than this count as stationary
+reid_gate_px: 200      # max px distance to re-associate a detection to a track
+max_missed_frames: 8   # frames a track survives without a detection
+
+# Velocity / impact detection (Tracker3D-style EMA)
+alpha_vel: 0.6         # EMA smoothing for velocity (higher = more smoothing)
+history_len: 30        # positions to keep per track
+
+# Impact thresholds
+min_flight_speed: 6.0  # px/frame — ball must reach this before impact can fire
+decel_ratio: 0.30      # speed must drop to < this fraction of recent peak
+impact_cooldown: 0.8   # seconds between registered impacts
+
+# Wall mapping (south wall, camNorth view)
+# The camera sees the full south wall — adjust if it only captures part of it
+wall_u_min: 0.0        # east edge in mm
+wall_u_max: 3050.0     # west edge in mm
+wall_v_min: 0.0        # floor in mm
+wall_v_max: 2950.0     # ceiling in mm
+
+# UDP
+udp_host: "127.0.0.1"
+udp_port: 5005

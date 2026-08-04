@@ -1,4 +1,18 @@
-# Project_Cam — Claude Code Guide
+# Project Cam — Claude Code Guide
+
+> **This tree is the project (since 2026-08-04).** It lives at
+> `~/Desktop/ProjectCam/`. The previous 51 GB tree is
+> `~/Desktop/Project_Cam_ARCHIVE_20260804/` — reference only; do not work there
+> and do not run its tests (its editable install now points here).
+>
+> **Before hunting for a file, recording or calibration that seems missing, read
+> [`docs/WHAT_IS_NOT_HERE.md`](docs/WHAT_IS_NOT_HERE.md)** — every deliberate
+> exclusion is listed there with its reason. The move happened because a retired
+> 4-camera recording sat beside the current 6-camera rig and looked equally
+> current: a pose benchmark got run against the wrong calibration before anyone
+> noticed. **Every recording and calibration in this tree belongs to the 6-USB
+> rig.** If you bring anything back from the archive, state which rig it came
+> from in the same commit.
 
 ## Project
 - **Title**: Pose-Guided Predictive Ballistics with Multi-Camera 3D Tracking
