@@ -104,3 +104,11 @@ def test_faster_wheels_must_fit_to_a_faster_ball(fitter):
     model = fitter.fit(points, G, 0.52, "linear")
     assert model["model"] == "linear_rpm_to_mps"
     assert model["a"] > 0.0
+
+
+def test_operator_facing_fit_help_is_reload_first():
+    source = FIT.read_text(encoding="utf-8")
+    procedure = source[source.index("MEASUREMENT (per RPM"):source.index("Usage:")]
+    assert procedure.index("reload") < procedure.index("set 0 0 <rpm> <rpm>")
+    assert "reload stops the wheel targets" in procedure
+    assert "set 0 0 <rpm> <rpm>; reload; shoot" not in source

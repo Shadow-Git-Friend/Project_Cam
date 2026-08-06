@@ -473,3 +473,34 @@ def test_the_rpm_protocol_uses_the_live_ball_profile_that_matches_this_rig():
     assert "--ball-imgsz 960" not in commands
     assert "blm_interactive.py" not in protocol, (
         "calibration must use the gated desktop console rather than raw serial")
+
+
+def fixed_yaw_500_section() -> str:
+    protocol = RPM_PROTOCOL.read_text(encoding="utf-8")
+    heading = "#### Fixed-YAW 500 RPM speed-only pass"
+    assert heading in protocol
+    return protocol[
+        protocol.index(heading):protocol.index("### Method B, per RPM")
+    ]
+
+
+def test_the_fixed_yaw_500_rpm_pass_is_reload_first():
+    section = fixed_yaw_500_section()
+    # Firmware RELOAD zeros the wheel targets, so spinning first is not merely
+    # inefficient: it leaves the UI, bridge state and physical sequence apart.
+    assert section.index("Press **RELOAD**") < section.index("Command **500 RPM**")
+
+
+def test_the_fixed_yaw_500_rpm_pass_pins_gates_and_claim_boundary():
+    section = fixed_yaw_500_section()
+    for required in (
+        "`Ball=LOW`",
+        "three polls spanning at least two seconds",
+        "within 75 RPM",
+        "below 50 RPM",
+        "±25 cm",
+        "do not use **YAW**, **CENTER**, or **SET ZERO**",
+        "does not validate aiming accuracy",
+        "automatic firing at a person",
+    ):
+        assert required in section, required

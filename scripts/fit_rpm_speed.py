@@ -8,11 +8,13 @@ shots into a v(RPM) model that the launcher then uses.
 
 MEASUREMENT (per RPM, no fancy gear):
   1. Measure the barrel exit height H above the floor once (metres).
-  2. Aim the BLM horizontal: `set 0 0 <rpm> <rpm>` then `reload` + `shoot`
-     (use blm_interactive.py; the firmware enforces the >=400 RPM gate).
-  3. Measure the horizontal distance d (metres) from the point directly BELOW
+  2. With wheel command zero, `reload` and verify feeder IDLE / ball loaded.
+     Firmware reload stops the wheel targets, so reload must happen before spin-up.
+  3. Aim horizontal, command `set 0 0 <rpm> <rpm>`, wait for stable measured
+     wheel RPM, then arm/shoot through the gated desktop LAUNCHER.
+  4. Measure the horizontal distance d (metres) from the point directly BELOW
      the barrel to where the ball first hits the floor.
-  4. Enter "<rpm> <d>" here. Exit speed (drag ignored): v = d * sqrt(g / (2H)).
+  5. Enter "<rpm> <d>" here. Exit speed (drag ignored): v = d * sqrt(g / (2H)).
 
 This is self-consistent with the solver (which also ignores drag), so it is
 accurate for targets near the calibration distances. Re-fit with more points
@@ -130,7 +132,10 @@ def main():
             pts.append((float(r), v))
             print(f"  RPM {float(r):.0f}: d={float(d):.2f} m -> v={v:.2f} m/s")
     else:
-        print("\nFire HORIZONTAL (set 0 0 <rpm> <rpm>; reload; shoot) and measure landing distance.")
+        print(
+            "\nRELOAD with wheels stopped, then command horizontal RPM, wait for "
+            "stable telemetry, and shoot through LAUNCHER."
+        )
         print("Enter '<rpm> <distance_m>' per shot. Blank line or 'done' to fit.\n")
         while True:
             line = input("  rpm distance_m > ").strip()

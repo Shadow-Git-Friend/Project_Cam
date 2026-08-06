@@ -133,18 +133,46 @@ Use the desktop **LAUNCHER** view rather than the raw serial terminal. The app
 passively identifies the CP2102 launcher and selects its stable `/dev/serial/by-id`
 link, so USB re-enumeration from `ttyUSB0` to `ttyUSB1` does not change the choice.
 
-1. Complete the no-fire gate above. Close the aim-only console, enable **ENABLE
-   FIRE CONTROL**, and reopen it. Recheck logical pitch/yaw `0/0` visually.
-2. Select the first protocol preset, **500 RPM**, and wait until both measured
-   wheel values have settled near the command.
-3. Press **RELOAD**, then **POLL FIRMWARE**. Require feeder `IDLE` and confirm the
-   ball-present input has changed to its loaded state.
-4. Re-check the controlled landing area, tick the room-clear acknowledgement,
-   press **ARM**, then deliberately hold **HOLD TO FIRE**. One shot consumes the
-   arm; every following shot requires a fresh room check and arm.
-5. Measure `d` from the point directly below the barrel exit to the **first floor
-   contact**. Enter it in **LANDING DISTANCE** and press **RECORD SHOT**. Repeat
-   without changing the zero or barrel height.
+#### Fixed-YAW 500 RPM speed-only pass
+
+This temporary pass is allowed with the current horizontal backlash only because
+YAW is physically fixed before the serial link opens. Mark the fixed base and
+rotating platform, keep the observed flight corridor clear by at least ±25 cm,
+and do not use **YAW**, **CENTER**, or **SET ZERO** during the session. This pass
+does not validate aiming accuracy and cannot authorize pose-guided, human-adjacent,
+or automatic firing at a person.
+
+Complete the no-fire gate above. Close the aim-only console, enable **ENABLE FIRE
+CONTROL**, reopen it, and confirm logical pitch/yaw `0/0` without moving either
+aim control.
+
+For each of five shots with the same ball:
+
+1. Press **RELOAD** with wheel command zero and the ball in the vertical lift.
+2. Press **POLL FIRMWARE**. Require feeder `IDLE`, `Ball=LOW`, logical aim `0/0`,
+   and unchanged physical YAW marks. Any visible aim motion fails the session.
+3. Command **500 RPM**. Allow at most 15 seconds for spin-up. Once both measured
+   wheels are between 450 and 550 RPM, require three polls spanning at least two seconds;
+   both wheels must remain in that band and within 75 RPM of each other.
+   Do not arm during spin-up.
+4. Start side-view slow-motion video with the barrel exit, ruler scale, flight
+   region, and first floor contact visible. Recheck the empty controlled area and
+   YAW marks, tick room-clear, press **ARM**, then deliberately hold **HOLD TO
+   FIRE**. One arm permits one shot.
+5. After the feeder returns to `IDLE`, command wheel RPM zero. Nobody enters the
+   controlled area until both measured values are below 50 RPM.
+6. Measure from the point directly below the barrel exit to the first floor
+   contact. Enter the distance and press **RECORD SHOT**. Retain the video filename,
+   the three stable left/right RPM polls, the YAW-mark check, and any anomaly note.
+
+Press **STOP** and reject the shot if a person enters, a YAW mark moves, `RELOAD`
+moves an aim axis, spin-up misses its deadline or stability window, `Ball=LOW` or
+feeder `IDLE` is absent, the video misses first contact, or any unexpected contact,
+motion, noise, or smell occurs. Repeat only after understanding the cause and
+rerunning every gate.
+
+Five valid 500 RPM shots establish only the fixed-direction speed sample and its
+spread; do not press **WRITE v(RPM) MODEL** yet.
 
 After the required 500/800/650 passes, enter the measured barrel height, leave
 the model kind at `linear`, and press **WRITE v(RPM) MODEL**. The console appends
