@@ -122,3 +122,6 @@ models/ball/
 
 # The venv is a symlink to the archive tree, not project content.
 venv
+
+# Isolated implementation workspaces created by the Superpowers workflow.
+.worktrees/
