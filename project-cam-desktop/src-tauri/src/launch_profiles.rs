@@ -11,7 +11,7 @@
 //! launch context are all produced here. There is no variant that can express
 //! "run this program".
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::session::{LaunchContext, LaunchKind};
@@ -309,6 +309,264 @@ pub enum LaunchRequest {
         camera: String,
     },
     FaceModelsDownload {},
+    /// The operator console for the ball launcher — the ONLY profile that opens
+    /// the serial link, and the only one with a writable stdin.
+    ///
+    /// It does not receive a fire-control ARGUMENT: `--allow-fire` merely makes
+    /// the arm/fire intents exist in the bridge's protocol, and every shot still
+    /// needs a fresh arm inside a live session. Serial writes stay in
+    /// `blm_bridge.py`, which is where the clamps, the ESTOP latch and the
+    /// stop-only exit path already live (`center` is deliberately opt-in).
+    BlmConsole {
+        /// A device node chosen from `list_serial_ports`, never free-form text.
+        serial_port: String,
+        #[serde(default)]
+        allow_fire: bool,
+    },
+}
+
+/// Device nodes an ESP32 enumerates as. Anything else is not a launcher link.
+const SERIAL_PREFIXES: [&str; 2] = ["/dev/ttyUSB", "/dev/ttyACM"];
+
+/// Stable per-device symlinks. `/dev/ttyUSB<n>` is assigned in plug order, so it
+/// MOVES: the launcher was ttyUSB0 and came back as ttyUSB1 after one USB
+/// re-enumeration on 2026-08-06. Selecting the by-id path instead survives that,
+/// the same reason the camera config uses by-id links.
+const SERIAL_BY_ID_DIR: &str = "/dev/serial/by-id";
+
+/// USB-serial bridges that an ESP32 control board appears as. `10c4:ea60` is the
+/// CP2102 on this rig's launcher; the rest are the other common bridges, listed
+/// so a board swap does not silently stop being detected. `303a` is Espressif's
+/// own VID, used when an ESP32-S2/S3 exposes USB directly.
+const USB_SERIAL_BRIDGES: [&str; 6] = [
+    "10c4:ea60", // Silicon Labs CP210x
+    "1a86:7523", // WCH CH340
+    "1a86:55d4", // WCH CH9102
+    "0403:6001", // FTDI FT232R
+    "0403:6015", // FTDI FT231X
+    "067b:2303", // Prolific PL2303
+];
+
+/// A serial device offered to the operator, with the evidence for what it is.
+///
+/// Detection is passive — USB identity read from sysfs, no port opened — so it
+/// can say "this is the adapter a launcher uses" and never "this is the
+/// launcher". Only opening the console and polling the firmware proves that, and
+/// the UI says so rather than implying the label is a verification.
+#[derive(Clone, Debug, Serialize)]
+pub struct SerialDevice {
+    /// What to launch with: the stable by-id path when one exists.
+    pub path: String,
+    /// The kernel node it currently resolves to, shown so a moving number is
+    /// visible rather than surprising.
+    pub node: String,
+    pub label: String,
+    pub usb_id: String,
+    pub likely_launcher: bool,
+    pub reason: String,
+}
+
+/// Read `idVendor`/`idProduct`/`manufacturer`/`product` for a tty node by walking
+/// up from its sysfs device link to the owning USB device.
+fn sysfs_identity(node: &str) -> (String, String, String) {
+    let unknown = (String::new(), String::new(), String::new());
+    let Some(name) = Path::new(node).file_name() else {
+        return unknown;
+    };
+    let link = Path::new("/sys/class/tty").join(name).join("device");
+    let Ok(mut dir) = link.canonicalize() else {
+        return unknown;
+    };
+    let read = |base: &Path, file: &str| {
+        std::fs::read_to_string(base.join(file))
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
+    };
+    // A tty sits one or two interface levels below the USB device that carries
+    // the identity files, so walk up a bounded number of parents.
+    for _ in 0..6 {
+        if dir.join("idVendor").is_file() {
+            let vendor = read(&dir, "idVendor");
+            let product_id = read(&dir, "idProduct");
+            let usb_id = if vendor.is_empty() || product_id.is_empty() {
+                String::new()
+            } else {
+                format!("{vendor}:{product_id}")
+            };
+            return (usb_id, read(&dir, "manufacturer"), read(&dir, "product"));
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    unknown
+}
+
+/// Classify passively. Returns (likely_launcher, reason).
+fn classify(usb_id: &str, manufacturer: &str, product: &str) -> (bool, String) {
+    let described = format!("{manufacturer} {product}").to_ascii_lowercase();
+    // A webcam exposing a CDC-ACM interface is exactly the trap here: both
+    // /dev/ttyACM nodes on this rig are `2bdf:0289 1080P USB Camera`. Never offer
+    // one as a launcher, whatever else matches.
+    for exclude in ["camera", "webcam", "video"] {
+        if described.contains(exclude) {
+            return (
+                false,
+                format!("USB video device ({product}) — not a launcher"),
+            );
+        }
+    }
+    if USB_SERIAL_BRIDGES.contains(&usb_id) {
+        return (
+            true,
+            format!("{product} — the USB-serial bridge a launcher board uses"),
+        );
+    }
+    if usb_id.starts_with("303a:") {
+        return (
+            true,
+            format!("{product} — Espressif native USB")
+                .trim()
+                .to_string(),
+        );
+    }
+    if usb_id.is_empty() {
+        return (false, "no USB identity available".to_string());
+    }
+    (false, format!("unrecognised device {usb_id}"))
+}
+
+/// Serial devices currently present, each with its passive identification, most
+/// likely launcher first. The console's picker reads this, so a port is always a
+/// selection from evidence rather than typed text.
+pub fn enumerate_serial_devices() -> Vec<SerialDevice> {
+    let mut devices: Vec<SerialDevice> = Vec::new();
+    let mut seen_nodes: Vec<String> = Vec::new();
+
+    let mut push = |path: String, label_hint: Option<String>| {
+        let Ok(node) = validated_serial_port(&path) else {
+            return;
+        };
+        if seen_nodes.contains(&node) {
+            return;
+        }
+        seen_nodes.push(node.clone());
+        let (usb_id, manufacturer, product) = sysfs_identity(&node);
+        let (likely_launcher, reason) = classify(&usb_id, &manufacturer, &product);
+        let label = if !product.is_empty() {
+            if manufacturer.is_empty() {
+                product.clone()
+            } else {
+                format!("{product} ({manufacturer})")
+            }
+        } else {
+            label_hint.unwrap_or_else(|| node.clone())
+        };
+        devices.push(SerialDevice {
+            path,
+            node,
+            label,
+            usb_id,
+            likely_launcher,
+            reason,
+        });
+    };
+
+    // by-id first, so its stable path is the one offered when both are visible.
+    let mut by_id: Vec<PathBuf> = std::fs::read_dir(SERIAL_BY_ID_DIR)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    by_id.sort();
+    for link in by_id {
+        let hint = link
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        push(link.to_string_lossy().into_owned(), hint);
+    }
+
+    // Then raw nodes, catching anything without a by-id link.
+    let mut nodes: Vec<PathBuf> = std::fs::read_dir("/dev")
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    nodes.sort();
+    for node in nodes {
+        push(node.to_string_lossy().into_owned(), None);
+    }
+
+    // Stable order, launchers first. `sort_by_key` is stable, so the by-id/alpha
+    // ordering above is preserved inside each group.
+    devices.sort_by_key(|device| !device.likely_launcher);
+    devices
+}
+
+/// The shape half of serial-port validation, kept separate from presence so it
+/// is testable on a machine with no launcher attached.
+///
+/// This is not a path the operator composes: it must be one of the two known
+/// families and digits only. `AppPaths::script`'s containment rule cannot help
+/// here (a device node is outside the repo by definition), so the shape check IS
+/// the boundary.
+pub fn serial_port_shape(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    let describe = || {
+        format!(
+            "serial_port must be /dev/ttyUSB<n>, /dev/ttyACM<n> or a \
+             {SERIAL_BY_ID_DIR}/<name> link, got {trimmed:?}"
+        )
+    };
+    if let Some(name) = trimmed.strip_prefix(&format!("{SERIAL_BY_ID_DIR}/")) {
+        // One path segment of ordinary characters. The link's TARGET is checked
+        // by validated_serial_port, which canonicalizes first — so this only has
+        // to refuse a name that could climb out of the directory.
+        if name.is_empty()
+            || name.len() > 200
+            || name.contains('/')
+            || name == "."
+            || name == ".."
+            || name.chars().any(char::is_control)
+        {
+            return Err(describe());
+        }
+        return Ok(trimmed.to_string());
+    }
+    let index = SERIAL_PREFIXES
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        .ok_or_else(describe)?;
+    if index.is_empty()
+        || index.len() > 3
+        || !index.chars().all(|character| character.is_ascii_digit())
+    {
+        return Err(describe());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Accept a serial device that is present, returning the kernel node it resolves
+/// to. Fail-closed: a console for an absent port would open nothing and then look
+/// connected.
+///
+/// A by-id link is canonicalized FIRST and its target re-checked against the node
+/// shape — the same discipline `AppPaths::script` uses, so a symlink pointing at
+/// something that is not a serial node cannot get through by having a tidy name.
+pub fn validated_serial_port(value: &str) -> Result<String, String> {
+    let port = serial_port_shape(value)?;
+    let resolved = Path::new(&port)
+        .canonicalize()
+        .map_err(|_| format!("{port} is not present — is the launcher plugged in?"))?;
+    let node = resolved.to_string_lossy().into_owned();
+    if port.starts_with(SERIAL_BY_ID_DIR) {
+        // Re-run the node half of the shape check on the resolved target.
+        let index = SERIAL_PREFIXES
+            .iter()
+            .find_map(|prefix| node.strip_prefix(prefix))
+            .ok_or_else(|| format!("{port} does not resolve to a serial device node"))?;
+        if index.is_empty() || !index.chars().all(|character| character.is_ascii_digit()) {
+            return Err(format!("{port} does not resolve to a serial device node"));
+        }
+    }
+    Ok(node)
 }
 
 /// A launch the backend has approved. Fields are private so no caller can build
@@ -320,6 +578,11 @@ pub struct ResolvedLaunch {
     cwd: PathBuf,
     label: String,
     context: LaunchContext,
+    /// Whether this child gets a writable stdin. Stated per profile rather than
+    /// derived, because it is the difference between a process the operator can
+    /// only start and stop and one they can keep sending intents to. Exactly one
+    /// profile sets it, and a test pins that.
+    stdin_writable: bool,
 }
 
 impl ResolvedLaunch {
@@ -337,6 +600,9 @@ impl ResolvedLaunch {
     }
     pub fn context(&self) -> &LaunchContext {
         &self.context
+    }
+    pub fn stdin_writable(&self) -> bool {
+        self.stdin_writable
     }
 
     /// Display-only command string for the MISSION LOG, repo-relative so the
@@ -435,6 +701,7 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                     args
                 },
                 cwd,
+                stdin_writable: false,
                 label: "6-CAMERA CINEMATIC ARENA".into(),
                 context: LaunchContext {
                     athlete: viewer.athlete()?,
@@ -457,6 +724,7 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                     args
                 },
                 cwd,
+                stdin_writable: false,
                 label: "6-CAMERA + BLM AIM OVERLAY".into(),
                 context: LaunchContext {
                     athlete: viewer.athlete()?,
@@ -476,6 +744,7 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                     args
                 },
                 cwd,
+                stdin_writable: false,
                 label: "4-CAMERA YOLO-POSE".into(),
                 context: LaunchContext {
                     athlete: viewer.athlete()?,
@@ -495,6 +764,7 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                     args
                 },
                 cwd,
+                stdin_writable: false,
                 label: "RECORD 3D SESSION".into(),
                 context: LaunchContext {
                     athlete: viewer.athlete()?,
@@ -541,6 +811,7 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                 program: bash,
                 args,
                 cwd,
+                stdin_writable: false,
                 label: format!("DRILL · {}", drill_id.to_uppercase()),
                 context: LaunchContext {
                     athlete,
@@ -565,6 +836,7 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                     "--replace".into(),
                 ],
                 cwd,
+                stdin_writable: false,
                 label: format!("SCAN FACE · {athlete}"),
                 context: LaunchContext {
                     athlete: Some(athlete),
@@ -600,6 +872,7 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                     "--replace".into(),
                 ],
                 cwd,
+                stdin_writable: false,
                 label: format!("SCAN FACE (1 cam) · {athlete}"),
                 context: LaunchContext {
                     athlete: Some(athlete),
@@ -615,11 +888,57 @@ pub fn resolve_launch(paths: &AppPaths, request: LaunchRequest) -> Result<Resolv
                 program: paths.python().to_path_buf(),
                 args: vec![script.to_string_lossy().into_owned()],
                 cwd,
+                stdin_writable: false,
                 label: "FACE MODEL SETUP".into(),
                 context: LaunchContext {
                     athlete: None,
                     athlete_id: None,
                     launch_kind: LaunchKind::Maintenance,
+                    drill: None,
+                },
+            }
+        }
+        LaunchRequest::BlmConsole {
+            serial_port,
+            allow_fire,
+        } => {
+            // Launch with the path the operator selected — a by-id link when one
+            // exists, because the kernel node moves on re-enumeration. Validation
+            // proves it is present and resolves to a real serial node; the
+            // resolved node itself is only used for identification and logging.
+            let port = serial_port_shape(&serial_port)?;
+            let node = validated_serial_port(&serial_port)?;
+            let script = paths.script("garage_lab_combined/scripts/blm_bridge.py")?;
+            let mut args = vec![
+                script.to_string_lossy().into_owned(),
+                "--serial-port".into(),
+                port.clone(),
+            ];
+            if allow_fire {
+                args.push("--allow-fire".into());
+            }
+            ResolvedLaunch {
+                program: paths.python().to_path_buf(),
+                args,
+                cwd,
+                // The one profile with a live channel: the console exists to keep
+                // taking intents, unlike a viewer that is only started and stopped.
+                stdin_writable: true,
+                // The label names the node, not the by-id link: a 60-character
+                // stable path is unreadable in a footer, and the node is what a
+                // person cross-checks against `ls /dev`.
+                label: format!(
+                    "BLM CONSOLE · {} · {node}",
+                    if allow_fire {
+                        "FIRE ENABLED"
+                    } else {
+                        "AIM ONLY"
+                    }
+                ),
+                context: LaunchContext {
+                    athlete: None,
+                    athlete_id: None,
+                    launch_kind: LaunchKind::Launcher,
                     drill: None,
                 },
             }
@@ -1152,9 +1471,10 @@ mod tests {
         assert!(matches!(launch.context().launch_kind, LaunchKind::Viewer));
     }
 
-    #[test]
-    fn no_profile_can_emit_a_fire_control_argument() {
-        let every = [
+    /// Every profile EXCEPT the launcher console. Kept as a named list so adding
+    /// a profile is a deliberate decision about which side of this line it is on.
+    fn non_console_requests() -> Vec<serde_json::Value> {
+        vec![
             serde_json::json!({"profile_id": "free_view_usb6"}),
             serde_json::json!({"profile_id": "blm_overlay_usb6"}),
             serde_json::json!({"profile_id": "yolo_pose_4cam"}),
@@ -1165,12 +1485,212 @@ mod tests {
                                "drill": {"drill": "reaction_zones", "rounds": 10,
                                          "projector": true}}),
             serde_json::json!({"profile_id": "face_models_download"}),
-        ];
-        for request in every {
+        ]
+    }
+
+    #[test]
+    fn only_the_console_may_name_a_serial_port_and_nothing_may_name_shoot_enabled() {
+        // NARROWED 2026-08-04, deliberately. Until the BLM console profile landed
+        // this asserted that NO profile could name a serial port, and that was the
+        // tripwire guarding "the desktop app does not write launcher serial". The
+        // console crosses that line on purpose; every other profile must not, and
+        // `--shoot-enabled` stays unreachable from ALL of them, console included —
+        // firing is a runtime intent the bridge gates, never a launch argument.
+        for request in non_console_requests() {
             let launch = resolve(request.clone()).unwrap();
             let rendered = launch.args().join(" ");
             assert!(!rendered.contains("--shoot-enabled"), "{request:?}");
             assert!(!rendered.contains("/dev/tty"), "{request:?}");
+            assert!(
+                !launch.stdin_writable(),
+                "{request:?} must not get a command channel"
+            );
+        }
+
+        // The console itself: a serial port yes, a fire-control flag never.
+        let Some(port) = enumerate_serial_devices()
+            .into_iter()
+            .map(|device| device.path)
+            .next()
+        else {
+            // No launcher attached (CI, or unplugged): the profile must then fail
+            // closed rather than resolve to a console for an absent device.
+            let refused = resolve(serde_json::json!({
+                "profile_id": "blm_console", "serial_port": "/dev/ttyUSB0",
+                "allow_fire": true
+            }))
+            .unwrap_err();
+            assert!(refused.contains("not present"), "{refused}");
+            return;
+        };
+        let launch = resolve(serde_json::json!({
+            "profile_id": "blm_console", "serial_port": port, "allow_fire": true
+        }))
+        .unwrap();
+        let rendered = launch.args().join(" ");
+        assert!(rendered.contains(&port), "{rendered}");
+        assert!(rendered.contains("--allow-fire"), "{rendered}");
+        assert!(!rendered.contains("--shoot-enabled"), "{rendered}");
+        assert!(launch.args()[0].ends_with("blm_bridge.py"), "{rendered}");
+        assert_eq!(launch.program(), paths().python());
+        assert!(launch.stdin_writable());
+        assert!(matches!(launch.context().launch_kind, LaunchKind::Launcher));
+
+        // Fire control is opt-in per launch, and absent by default.
+        let aim_only = resolve(serde_json::json!({
+            "profile_id": "blm_console", "serial_port": port
+        }))
+        .unwrap();
+        assert!(!aim_only.args().join(" ").contains("--allow-fire"));
+        assert!(
+            aim_only.label().contains("AIM ONLY"),
+            "{}",
+            aim_only.label()
+        );
+    }
+
+    #[test]
+    fn a_serial_port_must_be_a_device_node_of_a_known_family() {
+        for good in [
+            "/dev/ttyUSB0",
+            "/dev/ttyACM0",
+            "/dev/ttyUSB12",
+            " /dev/ttyACM3 ",
+        ] {
+            assert_eq!(serial_port_shape(good).unwrap(), good.trim(), "{good:?}");
+        }
+        for bad in [
+            "",
+            "/dev/ttyUSB",     // no index
+            "/dev/ttyUSBx",    // not a number
+            "/dev/ttyUSB0000", // implausibly long, so probably crafted
+            "/dev/ttyS0",      // a real port family, but not an ESP32 link
+            "/dev/video0",
+            "/dev/ttyUSB0; rm -rf /",
+            "/dev/ttyUSB0 --allow-fire",
+            "/dev/ttyUSB0\nshoot",
+            "../../dev/ttyUSB0",
+            "/dev/../dev/ttyUSB0", // resolves to a valid node but is not the shape
+            "/etc/passwd",
+        ] {
+            assert!(serial_port_shape(bad).is_err(), "accepted port {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_stable_by_id_link_is_an_acceptable_port_but_cannot_climb_out_of_its_directory() {
+        // The kernel node moves: the launcher was ttyUSB0 and came back as
+        // ttyUSB1 after one re-enumeration, which is why the by-id form exists.
+        assert_eq!(
+            serial_port_shape("/dev/serial/by-id/usb-Silicon_Labs_CP2102_0001-if00-port0").unwrap(),
+            "/dev/serial/by-id/usb-Silicon_Labs_CP2102_0001-if00-port0"
+        );
+        for bad in [
+            "/dev/serial/by-id/",
+            "/dev/serial/by-id/.",
+            "/dev/serial/by-id/..",
+            "/dev/serial/by-id/../../etc/passwd",
+            "/dev/serial/by-id/sub/dir",
+            "/dev/serial/by-id/name\nshoot",
+            "/dev/serial/by-path/pci-0000:00:14.0-usb-0:11.1.1:1.0-port0",
+        ] {
+            assert!(serial_port_shape(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_by_id_link_must_resolve_to_a_serial_node() {
+        // Presence and target are checked by canonicalizing FIRST, so a tidy name
+        // pointing somewhere else cannot get through.
+        let dir = std::env::temp_dir().join(format!(
+            "project-cam-serial-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let decoy = dir.join("not-a-tty");
+        std::fs::write(&decoy, b"x").unwrap();
+        // Cannot write into /dev in a test, so exercise the resolution rule via
+        // the real directory when a device is attached, and the shape rule always.
+        assert!(validated_serial_port("/dev/serial/by-id/definitely-absent-link").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for device in enumerate_serial_devices() {
+            // Whatever is offered must resolve to a node of a known family.
+            assert!(
+                device.node.starts_with("/dev/ttyUSB") || device.node.starts_with("/dev/ttyACM"),
+                "{device:?}"
+            );
+            assert!(validated_serial_port(&device.path).is_ok(), "{device:?}");
+            assert!(!device.label.is_empty(), "{device:?}");
+            assert!(!device.reason.is_empty(), "{device:?}");
+        }
+    }
+
+    #[test]
+    fn a_usb_video_device_is_never_offered_as_a_launcher() {
+        // Both /dev/ttyACM nodes on this rig are `2bdf:0289 1080P USB Camera`: a
+        // webcam that exposes a CDC-ACM interface. Offering one as the launcher is
+        // the exact trap this classifier exists to close.
+        let (likely, reason) = classify("2bdf:0289", "SN0002", "1080P USB Camera");
+        assert!(!likely, "{reason}");
+        assert!(reason.contains("video"), "{reason}");
+        // Even a bridge VID must lose to a camera description.
+        let (likely, _) = classify("10c4:ea60", "SN0002", "USB Camera");
+        assert!(!likely);
+    }
+
+    #[test]
+    fn a_usb_serial_bridge_is_offered_as_the_likely_launcher_without_claiming_certainty() {
+        let (likely, reason) = classify(
+            "10c4:ea60",
+            "Silicon Labs",
+            "CP2102 USB to UART Bridge Controller",
+        );
+        assert!(likely);
+        assert!(reason.contains("CP2102"), "{reason}");
+        // The wording must stay evidential: this is the adapter a launcher uses,
+        // not a verified launcher. Only polling the firmware proves that.
+        assert!(
+            !reason.to_lowercase().contains("is the launcher"),
+            "{reason}"
+        );
+
+        for bridge in ["1a86:7523", "0403:6001", "303a:1001"] {
+            assert!(classify(bridge, "", "board").0, "{bridge} not recognised");
+        }
+        for other in ["", "1234:5678"] {
+            assert!(!classify(other, "", "").0, "{other} wrongly recognised");
+        }
+    }
+
+    #[test]
+    fn the_likely_launcher_sorts_first_so_the_ui_can_preselect_it() {
+        let devices = enumerate_serial_devices();
+        let first_other = devices.iter().position(|device| !device.likely_launcher);
+        let last_launcher = devices.iter().rposition(|device| device.likely_launcher);
+        if let (Some(other), Some(launcher)) = (first_other, last_launcher) {
+            assert!(
+                launcher < other,
+                "a likely launcher must not sort after an unrecognised device: {devices:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_console_cannot_be_asked_to_run_something_else() {
+        for smuggled in [
+            serde_json::json!({"profile_id": "blm_console", "serial_port": "/dev/ttyUSB0",
+                               "program": "/bin/sh"}),
+            serde_json::json!({"profile_id": "blm_console", "serial_port": "/dev/ttyUSB0",
+                               "args": ["--shoot-enabled"]}),
+            serde_json::json!({"profile_id": "blm_console", "serial_port": "/dev/ttyUSB0",
+                               "baud": 9600}),
+            serde_json::json!({"profile_id": "blm_console", "serial_port": "/dev/ttyUSB0",
+                               "arm_timeout_s": 100000}),
+            // The port is required: no default may quietly pick a device.
+            serde_json::json!({"profile_id": "blm_console"}),
+        ] {
+            assert!(parse(smuggled.clone()).is_err(), "accepted {smuggled:?}");
         }
     }
 

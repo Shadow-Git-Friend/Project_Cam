@@ -4,9 +4,11 @@ import Topbar from "./components/Topbar";
 import Sidebar, { type ViewId } from "./components/Sidebar";
 import ControlView from "./views/ControlView";
 import TrainingView from "./views/TrainingView";
+import LauncherView from "./views/LauncherView";
 import SessionsView from "./views/SessionsView";
 import ShotsView from "./views/ShotsView";
 import type { LaunchRequest, LaunchReceipt } from "./launch";
+import { parseStatusLine, type ConsoleCommand, type ConsoleStatus } from "./blm";
 
 export type LogLine = { t: string; msg: string; tone: "sys" | "cmd" | "dim" | "out" | "err" };
 export type ProcessState = "idle" | "starting" | "running" | "stopping" | "faulted";
@@ -82,6 +84,10 @@ export default function App() {
   // Athlete name is shared between CONTROL and TRAINING so the identity
   // follows the user across views (enrollment, Face ID, session logs).
   const [name, setName] = useState("");
+  // Launcher telemetry arrives on the same stdout stream as the log, tagged so
+  // it can be routed out of it. Null whenever no console is publishing, which is
+  // what every gate in the LAUNCHER view reads as "not live".
+  const [blmStatus, setBlmStatus] = useState<ConsoleStatus | null>(null);
   const [log, setLog] = useState<LogLine[]>([
     { t: nowClock(), msg: "Project Cam control center ready", tone: "sys" },
     { t: nowClock(), msg: "launches resolve to backend profiles", tone: "dim" },
@@ -131,10 +137,19 @@ export default function App() {
       const { listen } = await import("@tauri-apps/api/event");
       unlistenLog = await listen<{ line: string; stream: string }>("pipeline-log", (e) => {
         const { line, stream } = e.payload;
+        // A tagged status line is telemetry, not log text: showing raw JSON in
+        // the mission log would bury the operator's own messages.
+        const status = parseStatusLine(line);
+        if (status) {
+          setBlmStatus(status);
+          return;
+        }
         append(line, stream === "err" ? "err" : stream === "sys" ? "sys" : "out");
       });
       unlistenExit = await listen<{ code: number; label: string }>("pipeline-exit", (e) => {
         const { code, label } = e.payload;
+        // The console is gone, so its last status must not linger as a live one.
+        setBlmStatus(null);
         append(
           `${label} exited with code ${code}`,
           code === 0 || code === 130 || code === -2 ? "sys" : "err"
@@ -188,6 +203,24 @@ export default function App() {
     })();
   };
 
+  // One typed intent to the running launcher console. The UI cannot write serial
+  // and cannot write the bridge's protocol text: Rust renders the line and the
+  // bridge applies the gates (arm expiry, auto-disarm after a shot, ESTOP latch).
+  const sendLauncher = (command: ConsoleCommand) => {
+    if (!inTauri()) {
+      append(`(browser preview — ${command.command} not sent)`, "dim");
+      return;
+    }
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke<string>("send_launcher_command", { command });
+      } catch (err) {
+        append(String(err), "err");
+      }
+    })();
+  };
+
   const stop = () => {
     if (!busy) return;
     if (!inTauri()) {
@@ -225,7 +258,9 @@ export default function App() {
             panels scroll); the data views scroll as whole pages. */}
         <main
           className={`flex-1 min-w-0 bg-arena-bg ${
-            view === "CONTROL" || view === "TRAINING" ? "overflow-hidden" : "overflow-y-auto"
+            view === "CONTROL" || view === "TRAINING" || view === "LAUNCHER"
+              ? "overflow-hidden"
+              : "overflow-y-auto"
           }`}
         >
           {view === "CONTROL" && (
@@ -233,6 +268,15 @@ export default function App() {
           )}
           {view === "TRAINING" && (
             <TrainingView run={run} running={busy} log={log} name={name} setName={setName} />
+          )}
+          {view === "LAUNCHER" && (
+            <LauncherView
+              run={run}
+              processState={processState}
+              status={blmStatus}
+              send={sendLauncher}
+              log={log}
+            />
           )}
           {view === "SESSIONS" && (
             <SessionsView athlete={name} evidenceRevision={evidenceRevision} />

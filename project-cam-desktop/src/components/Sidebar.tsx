@@ -3,14 +3,18 @@ import {
   Dumbbell,
   History,
   Crosshair,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 
-export type ViewId = "CONTROL" | "TRAINING" | "SESSIONS" | "SHOTS";
+export type ViewId = "CONTROL" | "TRAINING" | "LAUNCHER" | "SESSIONS" | "SHOTS";
 
 const NAV: { id: ViewId; Icon: LucideIcon }[] = [
   { id: "CONTROL", Icon: SlidersHorizontal },
   { id: "TRAINING", Icon: Dumbbell },
+  // The only view that holds the launcher's serial link. Deliberately separate
+  // from TRAINING, which is view-only by construction.
+  { id: "LAUNCHER", Icon: Zap },
   { id: "SESSIONS", Icon: History },
   { id: "SHOTS", Icon: Crosshair },
 ];

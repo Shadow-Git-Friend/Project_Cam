@@ -3,8 +3,9 @@
 **Roadmap item A6** (the desk half of blocker **B1**). One operator, one session,
 no assistant required. Read it once end to end before firing anything.
 
-Everything below was checked against the code on 2026-08-03; the tools named
-here exist in the main tree and their flags are quoted verbatim.
+Everything below was re-checked against the code and the connected five-camera
+rig on 2026-08-06; the tools named here exist in the tree and their flags are
+quoted verbatim.
 
 ---
 
@@ -26,16 +27,46 @@ presets, and do not run pose-guided firing at a person.
 - [ ] S0–S4 passed (they did, 2026-04-09). If firmware or wheels changed since,
       re-run S0–S3 first — see `.claude/rules/workflow.md`.
 - [ ] Room clear of people for the whole measurement. Nobody downrange, ever,
-      including you: every shot in this procedure is fired at a wall or net.
+      including you. The controlled landing area must terminate in a wall, net
+      or other rated backstop.
+- [ ] Computer, cameras and cables removed from the predicted first-contact and
+      rebound area, or protected by a rigid barrier. Method A is invalid if the
+      first floor contact cannot be seen and measured safely; "being careful"
+      is not a substitute for clearing the physical trajectory.
 - [ ] ESTOP reachable from where you stand. `stop` latches until `clear`.
 - [ ] Same ball for every shot, and the same one you will train with. Ball mass
       and surface change the exit speed; a mixed set makes the fit meaningless.
 - [ ] Barrel exit height above the floor measured once with a tape, in metres.
       Write it down — method A is proportional to `sqrt(1/H)`, so a 2 cm error in
       H is about a 2 % error in every speed.
-- [ ] **Check that pitch 0 is truly horizontal with a level.** A mechanical tilt
-      at the zero position biases method A directly, and it is the single largest
-      error source in it.
+- [ ] **Before opening the console, check that the barrel is horizontal with a
+      level.** Opening the serial link resets the ESP32 and adopts the barrel's
+      current physical position as logical `0/0`. A tilt biases method A directly
+      and is its single largest error source.
+
+### No-fire commissioning gate after any zero/limit change
+
+Complete this once before enabling fire control. It proves the operator tool and
+the declared mechanical envelope without spinning the flywheels:
+
+1. Open the desktop **LAUNCHER** view. Leave **ENABLE FIRE CONTROL** unchecked,
+   confirm the detected CP2102/by-id device, and press **OPEN CONSOLE**.
+2. Press **POLL FIRMWARE**. Require wheels `0/0`, feeder `IDLE`, and visually
+   confirm the barrel is in the intended zero position. Telemetry angles are
+   commanded values, not position feedback.
+3. Press **SET ZERO**. If the barrel was moved by hand, do not reuse stale travel
+   numbers: with drive power removed, measure the unobstructed pitch travel from
+   this zero, restore the mechanism, and enter it as **TRAVEL DOWN / UP → APPLY
+   TRAVEL**. Never force a powered open-loop axis by hand.
+4. With RPM still `0`, command only `+5°`, `0°`, and (only if the declared lower
+   limit permits it) `−5°`; visually verify each move. Repeat YAW at `±5°`.
+5. Press **CENTER** and visually require return to the position adopted by
+   **SET ZERO**. Close the console and require **no aim movement**: shutdown sends
+   `stop` only and deliberately does not center.
+
+Any unexpected motion, no motion, contact with the feeder, or flywheel movement
+is a failed gate. Press **STOP**, remove drive power, and do not continue to a
+shot matrix.
 
 ## 3. Two methods, and why you run both
 
@@ -43,7 +74,7 @@ presets, and do not run pose-guided firing at a person.
 |---|---|---|
 | Tool | `scripts/fit_rpm_speed.py` | `garage_lab_combined/scripts/calibrate_ball_rpm.py` |
 | Measures | where the ball first hits the floor | 3D ball displacement between frames |
-| Needs | tape measure, level | the 6-camera viewer running with `--ball-log-jsonl` |
+| Needs | tape measure, level | at least 5 live calibrated cameras; `run_live_lowlag.sh` with `--ball-log-jsonl` |
 | Blind to | aerodynamic drag; biased by any tilt at pitch 0 | nothing about the launcher — but see below |
 | Fails when | the floor is not flat, or the first bounce is missed | the ball is not detected in **consecutive** frames |
 
@@ -59,13 +90,21 @@ detected pairs, and the measured detection rate on fast recordings is only
 **46–52 %** at the default settings. So a single shot can easily yield one usable
 pair or none.
 
-Mitigations, all already available:
+Use the ball-critical live profile. These values are constraints of the current
+rig, not optional quality tuning:
 
 ```
---ball-imgsz 960          # the dominant lever: camNorth bounce 58% -> 98%
---ball-conf 0.25          # safe with the KF gate on (default 150 px)
+TRACK_BALL=1              # stock mirrored-skeleton wrapper disables the detector
+BALL_EVERY=1              # run ball inference every loop for the short flight
+BALL_IMGSZ=672            # must match yolo26m-672.engine export size
+--min-active-cameras 5    # current rig has 5 live cameras, not 6
 --ball-single-cam-fallback
 ```
+
+Do **not** substitute `--ball-imgsz 960` while using
+`models/ball/yolo26m-672.engine`: the TensorRT optimization profile is dynamic in
+batch, but its spatial decode must match the 672 export. Off-size inference can
+produce garbage detections instead of extra detail.
 
 Fire **at least 5 shots per RPM** for method B and check the per-shot pair count
 in the tool's output before trusting the p95.
@@ -90,17 +129,31 @@ that catches a mistake cheaply.
 
 ### Method A, per RPM
 
-```bash
-# Terminal 1 — raw serial, no cameras needed.
-./venv/bin/python garage_lab_combined/scripts/blm_interactive.py --port /dev/ttyUSB0
-#   set 0 0 800 800      -> horizontal, wheels to 800 RPM (firmware gates <400)
-#   reload
-#   shoot
-# Measure d = floor distance from the point directly BELOW the barrel to the
-# FIRST floor contact. Repeat 5x without changing anything.
-```
+Use the desktop **LAUNCHER** view rather than the raw serial terminal. The app
+passively identifies the CP2102 launcher and selects its stable `/dev/serial/by-id`
+link, so USB re-enumeration from `ttyUSB0` to `ttyUSB1` does not change the choice.
 
-Then fit, entering every individual shot (same-RPM shots are averaged for you):
+1. Complete the no-fire gate above. Close the aim-only console, enable **ENABLE
+   FIRE CONTROL**, and reopen it. Recheck logical pitch/yaw `0/0` visually.
+2. Select the first protocol preset, **500 RPM**, and wait until both measured
+   wheel values have settled near the command.
+3. Press **RELOAD**, then **POLL FIRMWARE**. Require feeder `IDLE` and confirm the
+   ball-present input has changed to its loaded state.
+4. Re-check the controlled landing area, tick the room-clear acknowledgement,
+   press **ARM**, then deliberately hold **HOLD TO FIRE**. One shot consumes the
+   arm; every following shot requires a fresh room check and arm.
+5. Measure `d` from the point directly below the barrel exit to the **first floor
+   contact**. Enter it in **LANDING DISTANCE** and press **RECORD SHOT**. Repeat
+   without changing the zero or barrel height.
+
+After the required 500/800/650 passes, enter the measured barrel height, leave
+the model kind at `linear`, and press **WRITE v(RPM) MODEL**. The console appends
+every measurement to
+`garage_lab_combined/cal/blm/rpm_speed_shots.jsonl` and calls the same tested
+fitter that writes `garage_lab_combined/cal/blm/rpm_speed_model.json`.
+
+The command-line fitter remains a reproducible cross-check, entering every
+individual shot (same-RPM shots are averaged for you):
 
 ```bash
 ./venv/bin/python scripts/fit_rpm_speed.py \
@@ -112,11 +165,13 @@ Then fit, entering every individual shot (same-RPM shots are averaged for you):
 
 ```bash
 # Terminal 1 — viewer, view-only, writing the ball log.
-./Parallel_working/run_live_usb6_mirrored_skeleton.sh \
-    --ball-imgsz 960 --ball-conf 0.25 --ball-single-cam-fallback \
+TRACK_BALL=1 BALL_EVERY=1 BALL_IMGSZ=672 \
+./Parallel_working/run_live_lowlag.sh \
+    --min-active-cameras 5 \
     --ball-log-jsonl Parallel_working/output/ball_logs/rpm800.jsonl
-# Terminal 2 — blm_interactive.py as above. Fire 5 shots. Then quit the viewer
-# with `q` (never SIGKILL — see .claude/rules/perf.md on MP4 finalisation).
+# In the desktop LAUNCHER view, run the same 800 RPM pass and fire 5 shots.
+# Then quit the viewer with `q` (never SIGKILL — see .claude/rules/perf.md on
+# MP4 finalisation).
 
 ./venv/bin/python garage_lab_combined/scripts/calibrate_ball_rpm.py \
     --log Parallel_working/output/ball_logs/rpm800.jsonl --rpm 800
@@ -140,6 +195,9 @@ cannot inform a clearance margin.
 
 ## 7. Acceptance
 
+- [ ] The no-fire commissioning gate passes: small PITCH/YAW moves are visible,
+      CENTER returns to the new SET ZERO position, wheels remain at zero, and
+      closing the console produces no aim movement.
 - [ ] `garage_lab_combined/cal/blm/rpm_speed_model.json` exists and contains
       `fit_rmse_mps` and `n_shots`.
 - [ ] Method A and method B agree within 10 % at 800 RPM.

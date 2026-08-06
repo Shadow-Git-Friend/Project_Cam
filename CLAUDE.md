@@ -33,6 +33,7 @@
 - Test recording: `Parallel_working/scripts/record_test_sequence.py`
 - EMA ablation: `Parallel_working/scripts/ablation_ema_adaptive.py`
 - Desktop control center (native app): `project-cam-desktop/` (Tauri+React; launch via the `Project Cam Control Center` desktop icon or `project-cam-desktop/run.sh`)
+- BLM operator console (desktop LAUNCHER view, the only desktop path that opens serial): `garage_lab_combined/scripts/blm_bridge.py` — typed intents in, gated serial out, with the v(RPM) measure/fit helper. Gates in `.claude/rules/safety.md` → "Desktop launcher console"
 - Pose-trace replay (turn a live session into a test): `src/project_cam/training/replay.py`, recorded by `training_drill.py --record-packets`
 - Training drills (GK + field player, **9 in the registry**): `Parallel_working/run_training_drill.sh <drill> [--layout split|swap|none]` — spawns viewer (UDP broadcast) + athlete scoreboard, both opening together tiled on the two screen halves; drill state machines in `src/project_cam/training/drills.py`, board in `garage_lab_combined/scripts/training_drill.py`, catalog in the desktop TRAINING view. Ids: `balance`, `shuttle`, `line_hops`, `gk_save`, `gk_updown`, `reaction_zones`, `cmj`, `hop_symmetry`, `reactive_cut`
 

@@ -34,7 +34,12 @@ export type LaunchRequest =
     }
   | { profile_id: "face_enroll_arena"; athlete: string }
   | { profile_id: "face_enroll_single"; athlete: string; camera: string }
-  | { profile_id: "face_models_download" };
+  | { profile_id: "face_models_download" }
+  /** The launcher console — the only profile that opens the serial link and the
+   *  only one with a live command channel. `serial_port` must be a node chosen
+   *  from `list_serial_ports`; `allow_fire` only makes the arm/fire intents
+   *  exist, and every shot still needs a fresh arm inside the session. */
+  | { profile_id: "blm_console"; serial_port: string; allow_fire?: boolean };
 
 export type ProfileId = LaunchRequest["profile_id"];
 

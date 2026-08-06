@@ -89,13 +89,27 @@ def test_app_paths_discovery_is_fail_closed_before_tauri_starts():
         assert forbidden not in discovery
 
 
-def test_launcher_enum_variant_is_removed_but_legacy_evidence_string_remains():
-    """No launch profile can produce a launcher session. Historical BLM rows
-    still use the plain string and must remain readable evidence."""
+def test_launcher_kind_belongs_to_the_console_profile_alone():
+    """CHANGED DELIBERATELY 2026-08-04, with the BLM console profile.
+
+    This test previously asserted `LaunchKind::Launcher` did NOT exist, because
+    no profile could actuate the launcher at all. The console does, so the
+    variant is back — but exactly one profile may produce it, and it must still
+    serialize as the same `"launcher"` string historical BLM shot logs carry, so
+    the evidence reader keeps merging desktop consoles with legacy rows.
+    """
     session = SESSION_RS.read_text(encoding="utf-8")
     enum_block = session[session.index("pub enum LaunchKind {"):]
     enum_block = enum_block[:enum_block.index("\n}")]
-    assert not re.search(r"^\s*Launcher,\s*$", enum_block, re.MULTILINE)
+    assert re.search(r"^\s*Launcher,\s*$", enum_block, re.MULTILINE)
+
+    profiles = PROFILES_RS.read_text(encoding="utf-8")
+    resolver = profiles[profiles.index("pub fn resolve_launch("):profiles.index("#[cfg(test)]")]
+    assert resolver.count("LaunchKind::Launcher") == 1, (
+        "exactly one profile may produce a launcher session")
+    console_arm = resolver[resolver.index("LaunchRequest::BlmConsole {"):]
+    assert "LaunchKind::Launcher" in console_arm, (
+        "the launcher kind must belong to the console arm")
 
     evidence = EVIDENCE_RS.read_text(encoding="utf-8")
     assert 'let launch_kind = string_value(record, "launch_kind");' in evidence
@@ -301,12 +315,40 @@ def test_seed_is_not_expressible_in_a_launch_request():
 
 # --------------------------------- safety -----------------------------------
 
-def test_no_profile_can_name_a_fire_control_or_serial_argument():
+def test_only_the_console_arm_may_reach_a_serial_port():
+    """NARROWED DELIBERATELY 2026-08-04, with the BLM console profile.
+
+    Until then this asserted that the resolver could not name a serial port at
+    all. It kept passing after the console landed only because the port literals
+    live above `resolve_launch` — i.e. it would have passed for the wrong reason,
+    which is worse than failing. What still holds, and is what actually matters:
+
+      * `--shoot-enabled` is unreachable from EVERY profile, console included.
+        Firing is a runtime intent the bridge gates, never a launch argument.
+      * the three actuating scripts stay unreachable — the console runs the
+        bridge, which is the only serial writer the desktop app may start.
+      * only the console arm resolves a serial port, and only via the validator.
+    """
     text = PROFILES_RS.read_text(encoding="utf-8")
     resolver = text[text.index("pub fn resolve_launch("):text.index("#[cfg(test)]")]
-    for forbidden in ("--shoot-enabled", "/dev/ttyUSB", "live_aim_test.py",
-                      "blm_follow.py", "launcher_runtime_from_udp.py", "--wheel-rpm"):
+    for forbidden in ("--shoot-enabled", "live_aim_test.py", "blm_follow.py",
+                      "launcher_runtime_from_udp.py", "--wheel-rpm"):
         assert forbidden not in resolver, forbidden
+
+    # Split the resolver at the console arm: no other arm may mention serial.
+    console_at = resolver.index("LaunchRequest::BlmConsole {")
+    others, console = resolver[:console_at], resolver[console_at:]
+    for forbidden in ("/dev/tty", "serial_port", "validated_serial_port"):
+        assert forbidden not in others, (
+            f"{forbidden} reachable outside the console arm")
+    assert "validated_serial_port(&serial_port)?" in console, (
+        "the console must resolve its port through the validator, not raw text")
+    assert "blm_bridge.py" in console
+
+    # And the validator itself never hands back an unchecked string.
+    shape = text[text.index("pub fn serial_port_shape("):text.index("pub fn validated_serial_port(")]
+    assert "SERIAL_PREFIXES" in shape
+    assert "is_ascii_digit" in shape
 
 
 def test_training_profile_does_not_lower_the_camera_floor():

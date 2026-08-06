@@ -16,6 +16,13 @@ pub enum LaunchKind {
     Training,
     Viewer,
     Recording,
+    /// An operator console that holds the launcher's serial link. Added
+    /// deliberately on 2026-08-04 with the BLM console profile: before that no
+    /// profile could actuate the launcher at all, and a test asserted this
+    /// variant's absence. It serializes as `"launcher"`, the same string
+    /// historical BLM shot logs already carry, so the evidence reader merges
+    /// desktop consoles and legacy rows into one concept.
+    Launcher,
     #[default]
     Maintenance,
 }

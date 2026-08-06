@@ -1,14 +1,15 @@
 // Prevents an extra console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod blm;
 mod evidence;
 mod launch_profiles;
 mod session;
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
@@ -17,7 +18,10 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
-use launch_profiles::{resolve_launch, AppPaths, LaunchRequest, ResolvedLaunch};
+use blm::ConsoleCommand;
+use launch_profiles::{
+    enumerate_serial_devices, resolve_launch, AppPaths, LaunchRequest, ResolvedLaunch, SerialDevice,
+};
 use session::{append_lifecycle, create_session, LaunchReceipt, SessionHandle};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -79,6 +83,11 @@ struct PipelineState {
     stopping: AtomicBool,
     exit_after_stop: Mutex<Option<i32>>,
     allow_exit: AtomicBool,
+    /// Writable stdin, present only while a profile that declared
+    /// `stdin_writable` is running. Dropping it closes the pipe, which the BLM
+    /// bridge reads as EOF and answers with `stop` only. Blind centering is not
+    /// part of shutdown, so this handle going away is a safe state, not a leak.
+    child_stdin: Mutex<Option<ChildStdin>>,
 }
 
 impl PipelineState {
@@ -183,6 +192,7 @@ fn spawn_resolved(
     let cwd = resolved.cwd().to_path_buf();
     let label = resolved.label().to_string();
     let context = resolved.context().clone();
+    let wants_stdin = resolved.stdin_writable();
     {
         let guard = state.pgid.lock().unwrap();
         if let Some(pg) = *guard {
@@ -206,7 +216,13 @@ fn spawn_resolved(
         .env("PROJECT_CAM_SESSION_ID", &session.session_id)
         .env("PROJECT_CAM_SESSION_DIR", &session.session_dir)
         .env("PROJECT_CAM_EVENT_LOG_OUTPUT", session.event_log_path())
-        .stdin(Stdio::null())
+        // Only a profile that declared it gets a channel back in. Everything
+        // else keeps /dev/null, so there is nothing to write to even by mistake.
+        .stdin(if wants_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -242,6 +258,7 @@ fn spawn_resolved(
         *g
     };
     *state.pgid.lock().unwrap() = Some(pid);
+    *state.child_stdin.lock().unwrap() = child.stdin.take();
     *state.current_session.lock().unwrap() = Some(session.clone());
     state.transition(ProcessFact::Spawned);
     // A fresh process gets a fresh stop-escalation slot.
@@ -320,6 +337,7 @@ fn spawn_resolved(
             let gen_now = st.generation.lock().unwrap();
             if *gen_now == generation {
                 *st.pgid.lock().unwrap() = None;
+                *st.child_stdin.lock().unwrap() = None;
                 *st.current_session.lock().unwrap() = None;
                 st.transition(ProcessFact::Exited(code));
             }
@@ -507,6 +525,66 @@ fn request_stop(app: &AppHandle, state: &PipelineState, reason: StopReason) -> b
 #[tauri::command]
 fn stop_process(app: AppHandle, state: State<PipelineState>) -> Result<bool, String> {
     Ok(request_stop(&app, &state, StopReason::User))
+}
+
+/// Serial devices currently present, each with its passive identification and the
+/// most likely launcher first. The console's picker reads this, so a port reaches
+/// the backend as a selection rather than as typed text — and the operator does
+/// not have to know which `/dev/ttyUSB<n>` the launcher landed on this time.
+///
+/// Passive by design: identity comes from sysfs, no port is opened. So the field
+/// is `likely_launcher`, not `is_launcher` — only opening the console and polling
+/// the firmware proves what is on the other end.
+#[tauri::command]
+fn list_serial_ports() -> Vec<SerialDevice> {
+    enumerate_serial_devices()
+}
+
+/// Send one typed intent to the running launcher console.
+///
+/// The frontend cannot write serial and cannot write the bridge's protocol text
+/// either: it names a [`ConsoleCommand`] and the backend renders the line. The
+/// bridge then re-validates and applies the operator gates (arm expiry,
+/// auto-disarm after a shot, the ESTOP latch), so this command is a transport,
+/// not an authority — it can deliver `fire`, but it cannot make a shot happen
+/// that the bridge's own state does not permit.
+#[tauri::command]
+fn send_launcher_command(
+    app: AppHandle,
+    state: State<PipelineState>,
+    command: ConsoleCommand,
+) -> Result<String, String> {
+    // Render (and therefore validate) before looking at process state, so an
+    // out-of-range request is refused identically whether or not one is running.
+    let line = command.render()?;
+    if !matches!(
+        observed_process_state(&state),
+        ProcessState::Starting | ProcessState::Running
+    ) {
+        return Err("no launcher console is running".into());
+    }
+    {
+        let mut guard = state
+            .child_stdin
+            .lock()
+            .map_err(|_| "console channel poisoned".to_string())?;
+        let stdin = guard
+            .as_mut()
+            .ok_or_else(|| "the running process has no command channel".to_string())?;
+        // A write that fails must be reported as a refusal, never swallowed: the
+        // operator would otherwise believe a stop or an aim had been delivered.
+        writeln!(stdin, "{line}")
+            .and_then(|()| stdin.flush())
+            .map_err(|error| format!("console write failed: {error}"))?;
+    }
+    let session = state.current_session.lock().unwrap().clone();
+    append_lifecycle_or_log(
+        &app,
+        session.as_ref(),
+        "launcher_command",
+        serde_json::json!({"command": line, "actuating": command.is_actuating()}),
+    );
+    Ok(line)
 }
 
 fn observed_process_state(state: &PipelineState) -> ProcessState {
@@ -806,7 +884,9 @@ fn main() {
             pipeline_running,
             check_readiness,
             face_list_names,
-            load_session_evidence
+            load_session_evidence,
+            list_serial_ports,
+            send_launcher_command
         ])
         .build(tauri::generate_context!())
         .expect("error while building Project Cam");
