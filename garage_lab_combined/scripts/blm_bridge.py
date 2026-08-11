@@ -145,7 +145,8 @@ SHOT_ACK_TIMEOUT_S = 5.0
 RPM_BAND_FRAC = 0.10          # +/-10 % of the commanded RPM ...
 RPM_BAND_FLOOR = 50.0         # ... and never tighter than +/-50 (the 450-550 at 500)
 RPM_SPREAD_MAX = 75.0         # max |L - R|; a bigger split is not one delivery speed
-WHEELS_STABLE_S = 2.0         # the protocol's "three polls spanning >= 2 s"
+WHEELS_STABLE_S = 2.0         # the protocol's "three polls spanning >= 2 s" ...
+WHEELS_STABLE_MIN_SAMPLES = 3  # ... and the "three polls" half of it, separately.
 
 # Telemetry older than this is not evidence of anything. The firmware suppresses
 # telemetry while the pusher moves, and a dead reader thread leaves the LAST
@@ -386,6 +387,13 @@ class ConsoleState:
     # means they are not in it. Reset by any command that changes the target, so a
     # stability timer can never be inherited from a different RPM.
     rpm_band_since: Optional[float] = None
+    # The window is described by ARRIVALS, not by elapsed wall time. The old form
+    # stored only `rpm_band_since` and compared it to the clock, so ONE reading
+    # followed by two seconds of silence read as two seconds of proven stability
+    # — and on `control_12` that silence is the normal state, because the
+    # continuous stream is BLE-only and nothing arrives unless someone polls.
+    rpm_band_last_sample_at: Optional[float] = None
+    rpm_band_sample_count: int = 0
     # Whether a ball has been loaded since the last shot. Bookkeeping the console
     # is entitled to: it sent the `reload` and it sent the `shoot`. Without it a
     # second `arm`+`fire` with no reload is a dry cycle that still gets recorded
@@ -503,7 +511,10 @@ class BlmController:
         self.expire_arm()
         if not self.state.armed:
             return
-        reason = self.wheels_unconfirmed_reason()
+        # The FULL predicate, so a sample arriving after a stale gap clears the
+        # arm instead of preserving it: that reading restarts the window, and one
+        # fresh-but-unproven value is not what the arm was granted on.
+        reason = self.wheels_stable_reason()
         if reason is not None:
             self.state.armed = False
             self.state.arm_expires_at = 0.0
@@ -556,20 +567,36 @@ class BlmController:
         one implementation of "the wheels agree with the command".
         """
         with self._state_lock:
+            # The gap is measured against the PREVIOUS sample, so this has to be
+            # computed before `telemetry_at` is overwritten.
             now = self._now()
+            last = self.state.rpm_band_last_sample_at
+            if self._rpm_in_band(left, right):
+                if (self.state.rpm_band_since is None or last is None
+                        or now - last > TELEMETRY_MAX_AGE_S):
+                    # Either the first in-band sample, or the first after a
+                    # silence longer than a reading stays evidence. Two readings
+                    # either side of a gap do not describe the gap.
+                    self.state.rpm_band_since = now
+                    self.state.rpm_band_last_sample_at = now
+                    self.state.rpm_band_sample_count = 1
+                elif now > last:
+                    # Same instant means one arrival, not two: a burst must not
+                    # be able to buy a count it did not earn.
+                    self.state.rpm_band_last_sample_at = now
+                    self.state.rpm_band_sample_count += 1
+            else:
+                self._reset_wheel_band()
             self.state.rpm_left = left
             self.state.rpm_right = right
             self.state.telemetry_at = now
-            if self._rpm_in_band(left, right):
-                if self.state.rpm_band_since is None:
-                    self.state.rpm_band_since = now
-            else:
-                self.state.rpm_band_since = None
             self.refresh_arm()
 
     def _reset_wheel_band(self) -> None:
-        """Forget the stability timer. Any change of target invalidates it."""
+        """Forget the stability window. Any change of target invalidates it."""
         self.state.rpm_band_since = None
+        self.state.rpm_band_last_sample_at = None
+        self.state.rpm_band_sample_count = 0
 
     def rpm_band(self) -> float:
         """Half-width of the acceptance band around the commanded RPM."""
@@ -615,9 +642,37 @@ class BlmController:
         return None
 
     def wheels_in_band_s(self) -> float:
-        if self.state.rpm_band_since is None:
+        """The span the SAMPLES cover, not the time since the first one.
+
+        Advancing the clock without a new reading must never grow this number:
+        silence is the absence of evidence, and the whole point of the window is
+        that it is made of arrivals.
+        """
+        first = self.state.rpm_band_since
+        last = self.state.rpm_band_last_sample_at
+        if first is None or last is None:
             return 0.0
-        return max(0.0, self._now() - self.state.rpm_band_since)
+        return max(0.0, last - first)
+
+    def wheels_stable_reason(self) -> Optional[str]:
+        """None when the wheels are confirmed AND proven steady; else why not.
+
+        The full arm predicate: agreement with the command, then enough separate
+        arrivals, then enough span between them. One implementation, used by
+        `arm`, by the redundant pre-send check in `fire`, and by the heartbeat —
+        so a console can never display a readiness its own gate would refuse.
+        """
+        reason = self.wheels_unconfirmed_reason()
+        if reason is not None:
+            return reason
+        count = self.state.rpm_band_sample_count
+        if count < WHEELS_STABLE_MIN_SAMPLES:
+            return (f"only {count}/{WHEELS_STABLE_MIN_SAMPLES} separate in-band "
+                    "samples have arrived")
+        span = self.wheels_in_band_s()
+        if span < WHEELS_STABLE_S:
+            return f"the in-band samples span {span:.1f}/{WHEELS_STABLE_S:.1f} s"
+        return None
 
     def safe_to_approach(self) -> bool:
         """Whether the machine itself says the flywheels are stopped.
@@ -938,16 +993,9 @@ class BlmController:
             self._refuse(
                 "no ball has been loaded since the last shot — send reload first"
             )
-        reason = self.wheels_unconfirmed_reason()
+        reason = self.wheels_stable_reason()
         if reason is not None:
             self._refuse(f"the flywheels are not confirmed: {reason}")
-        stable_s = self.wheels_in_band_s()
-        if stable_s < WHEELS_STABLE_S:
-            self._refuse(
-                f"the flywheels have held {self.state.wheel_rpm:.0f} "
-                f"+/-{self.rpm_band():.0f} RPM for only {stable_s:.1f} s — "
-                f"{WHEELS_STABLE_S:.1f} s required"
-            )
         self.state.armed = True
         self.state.arm_expires_at = self._now() + self._arm_timeout_s
         self._log(f"ARMED for {self._arm_timeout_s:.0f} s — one shot, then re-arm")
@@ -973,7 +1021,7 @@ class BlmController:
         # loop — so a fire landing between heartbeats must not depend on the
         # heartbeat having noticed. The commanded value is not evidence: it is what
         # was asked for, and this is the only check on what happened.
-        reason = self.wheels_unconfirmed_reason()
+        reason = self.wheels_stable_reason()
         if reason is not None:
             self._refuse(f"the flywheels are not confirmed: {reason}")
         if self.state.fire_request is not None:
@@ -1251,6 +1299,7 @@ class BlmController:
         state = self.state
         telemetry_age = self.telemetry_age_s()
         unconfirmed = self.wheels_unconfirmed_reason()
+        unstable = self.wheels_stable_reason()
         info_age = self.info_age_s()
         return {
             "schema": SCHEMA,
@@ -1278,6 +1327,13 @@ class BlmController:
             # of one safety rule is one implementation too many.
             "wheels_confirmed": unconfirmed is None,
             "wheels_unconfirmed_reason": unconfirmed or "",
+            # The FULL arm predicate, published separately: agreement with the
+            # command is necessary but not sufficient, and a panel that showed
+            # only `wheels_confirmed` would look ready while ARM refuses.
+            "wheels_stable": unstable is None,
+            "wheels_unstable_reason": unstable or "",
+            "wheels_sample_count": state.rpm_band_sample_count,
+            "wheels_stable_min_samples": WHEELS_STABLE_MIN_SAMPLES,
             "wheels_in_band_s": round(self.wheels_in_band_s(), 1),
             "wheels_band_rpm": round(self.rpm_band(), 1),
             "wheels_stable_required_s": WHEELS_STABLE_S,

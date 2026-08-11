@@ -117,9 +117,17 @@ def spin_up(controller, clock, rpm, *, hold_s=2.5, spread=0.0):
     Every firing test has to do this, which is the point: before 2026-08-07 the
     gates read the commanded RPM only, so a test could arm a launcher whose wheels
     had never reported spinning — exactly what the live console allowed.
+
+    THREE arrivals, because two endpoints two seconds apart say nothing about
+    what happened in between — and on `control_12` the only source of a measured
+    RPM is a manual poll, so "the operator polled twice" is a real possibility
+    the gate has to reject. This mirrors the protocol's "three polls spanning at
+    least two seconds".
     """
     controller.note_telemetry(rpm, rpm + spread)
-    clock.advance(hold_s)
+    clock.advance(hold_s / 2.0)
+    controller.note_telemetry(rpm, rpm + spread)
+    clock.advance(hold_s / 2.0)
     controller.note_telemetry(rpm, rpm + spread)
 
 
@@ -458,13 +466,19 @@ def test_arming_needs_the_measured_wheels_not_just_the_commanded_ones(bridge):
     with pytest.raises(bridge.CommandError, match="wheels disagree"):
         send(bridge, controller, "arm")
 
-    # In band, but not yet for long enough to call stable.
+    # In band, but one arrival says nothing about duration.
     controller.note_telemetry(498.0, 505.0)
     clock.advance(0.5)
-    with pytest.raises(bridge.CommandError, match="for only 0.5 s"):
+    with pytest.raises(bridge.CommandError,
+                       match="1/3 separate in-band samples"):
         send(bridge, controller, "arm")
 
-    clock.advance(2.0)
+    # Three arrivals, none separated by more than the freshness limit, together
+    # spanning the required two seconds. Two readings either side of a silence
+    # would NOT do — they describe their own instants, not the gap between them.
+    clock.advance(1.0)
+    controller.note_telemetry(501.0, 497.0)
+    clock.advance(1.0)
     controller.note_telemetry(502.0, 499.0)
     send(bridge, controller, "arm")
     assert controller.state.armed
@@ -491,6 +505,111 @@ def test_a_stale_reading_is_not_confirmation_and_it_disarms(bridge):
     # And it cannot be re-armed on the stale reading either.
     with pytest.raises(bridge.CommandError, match="s old"):
         send(bridge, controller, "arm")
+
+
+def test_waiting_after_one_sample_never_manufactures_a_stability_window(bridge):
+    """The old timer stored only WHEN the wheels entered the band and compared it
+    to the clock, so a single reading plus two seconds of silence read as two
+    seconds of proven stability. On `control_12` that silence is the normal
+    state: the continuous stream is BLE-only, so nothing arrives unless the
+    operator polls."""
+    controller, _, _, clock = make(bridge)
+    send(bridge, controller, "reload")
+    send(bridge, controller, "aim 0 0 500")
+    controller.note_telemetry(500, 500)
+    clock.advance(2.0)
+    with pytest.raises(bridge.CommandError, match="1/3 separate in-band samples"):
+        send(bridge, controller, "arm")
+
+
+def test_three_samples_in_30ms_do_not_satisfy_two_seconds(bridge):
+    """Count alone is not evidence of duration — a burst is one instant seen
+    three times."""
+    controller, _, _, clock = make(bridge)
+    send(bridge, controller, "reload")
+    send(bridge, controller, "aim 0 0 500")
+    for _ in range(3):
+        controller.note_telemetry(500, 500)
+        clock.advance(0.01)
+    with pytest.raises(bridge.CommandError, match=r"0\.0/2\.0 s"):
+        send(bridge, controller, "arm")
+
+
+def test_a_burst_of_polls_plus_waiting_is_not_a_two_second_window(bridge):
+    """The distinction the whole window rests on: span is what the SAMPLES
+    cover, never how long ago the first one was.
+
+    Constructed so nothing else can refuse it — four in-band arrivals, none
+    separated by more than the freshness limit, and the last one still fresh.
+    Only the span is short. Measuring from the clock instead would arm here.
+    """
+    controller, _, _, clock = make(bridge)
+    send(bridge, controller, "reload")
+    send(bridge, controller, "aim 0 0 500")
+    for _ in range(3):
+        controller.note_telemetry(500, 500)
+        clock.advance(0.01)
+    clock.advance(1.87)
+    controller.note_telemetry(500, 500)
+    clock.advance(0.6)
+
+    assert controller.state.rpm_band_sample_count == 4
+    assert controller.telemetry_age_s() < bridge.TELEMETRY_MAX_AGE_S
+    assert controller.wheels_in_band_s() == pytest.approx(1.9)
+    with pytest.raises(bridge.CommandError, match=r"span 1\.9/2\.0 s"):
+        send(bridge, controller, "arm")
+
+
+def test_a_fresh_sample_after_a_silence_clears_an_existing_arm(bridge):
+    """The reading agrees with the command and is perfectly fresh — and it is
+    the FIRST of a restarted window, so it no longer supports the arm that was
+    granted on the old one. Checking only agreement would keep the arm alive
+    across a silence on a single unproven value."""
+    controller, _, _, clock = make(bridge)
+    arm_and_aim(bridge, controller, clock, rpm=500)
+    assert controller.state.armed
+
+    clock.advance(bridge.TELEMETRY_MAX_AGE_S + 0.5)
+    controller.note_telemetry(500, 500)
+    assert controller.state.rpm_band_sample_count == 1
+    assert not controller.state.armed
+
+
+def test_a_gap_over_the_freshness_limit_restarts_count_and_span(bridge):
+    """Two readings either side of a silence do not describe the silence. The
+    window starts again rather than spanning across it."""
+    controller, _, _, clock = make(bridge)
+    send(bridge, controller, "reload")
+    send(bridge, controller, "aim 0 0 500")
+    controller.note_telemetry(500, 500)
+    clock.advance(bridge.TELEMETRY_MAX_AGE_S + 0.1)
+    controller.note_telemetry(500, 500)
+    assert controller.state.rpm_band_sample_count == 1
+    assert controller.wheels_in_band_s() == 0.0
+
+
+def test_three_samples_spanning_two_seconds_pass(bridge):
+    controller, _, _, clock = make(bridge)
+    ready_to_arm(bridge, controller, clock, rpm=500)
+    send(bridge, controller, "arm")
+    assert controller.state.armed
+    assert controller.state.rpm_band_sample_count == 3
+    assert controller.wheels_in_band_s() >= 2.0
+
+
+def test_identical_values_count_when_they_are_separate_arrivals(bridge):
+    """A stable machine answers three polls with identical text, so requiring
+    the numbers to CHANGE would mean the steadier the rig the harder it is to
+    arm. Separate arrivals are what count — but two lines read at the same
+    instant are one arrival, not two."""
+    controller, _, _, clock = make(bridge)
+    send(bridge, controller, "aim 0 0 500")
+    controller.note_telemetry(500, 500)
+    controller.note_telemetry(500, 500)
+    assert controller.state.rpm_band_sample_count == 1
+    clock.advance(0.1)
+    controller.note_telemetry(500, 500)
+    assert controller.state.rpm_band_sample_count == 2
 
 
 def test_a_second_shot_needs_another_reload(bridge, fitter, tmp_path):
@@ -545,7 +664,7 @@ def test_changing_the_target_rpm_restarts_the_stability_clock(bridge):
     # from the first in-band reading at the NEW command, not from the old one.
     controller.note_telemetry(800.0, 795.0)
     assert controller.wheels_in_band_s() == 0.0
-    with pytest.raises(bridge.CommandError, match="for only 0.0 s"):
+    with pytest.raises(bridge.CommandError, match="1/3 separate in-band samples"):
         send(bridge, controller, "arm")
 
 
