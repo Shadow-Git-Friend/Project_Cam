@@ -74,7 +74,7 @@ def bridge_verbs(bridge) -> set:
     samples = {
         "aim": "aim 0 0 800",
         "wheels": "wheels 800",
-        "measure": "measure 800 3.9",
+        "measure": "measure 3.9",
         "fit": "fit 0.52",
         "limits": "limits -20 30",
     }
@@ -109,6 +109,134 @@ def test_the_bridge_accepts_nothing_the_ui_cannot_express(bridge):
     by hand. Anything else would be a channel the typed layers do not cover."""
     extra = bridge_verbs(bridge) - rust_console_variants()
     assert extra == {"quit"}, f"undeclared bridge verbs: {extra}"
+
+
+def test_no_layer_can_attach_an_rpm_to_a_landing_distance(bridge):
+    """Found 2026-08-07, before the first calibration pass.
+
+    RECORD SHOT sent the RPM control's current value, and the protocol requires
+    the wheels commanded to zero and read below 50 RPM before anyone may walk
+    downrange to the ball — so every measurement in the pass would have been
+    logged as `rpm: 0` while Task 5 requires 500. The RPM must come from the
+    shot, captured when it was fired, and no layer may offer an alternative
+    route: an optional override is exactly how a wrong value gets in.
+    """
+    rust = BLM_RS.read_text(encoding="utf-8")
+    ts = BLM_TS.read_text(encoding="utf-8")
+
+    measure_rs = rust[rust.index("Measure {"):]
+    measure_rs = measure_rs[:measure_rs.index("}")]
+    assert "rpm" not in measure_rs, f"Rust Measure regained an rpm: {measure_rs!r}"
+
+    measure_ts = ts[ts.index('command: "measure"'):]
+    measure_ts = measure_ts[:measure_ts.index("\n")]
+    assert "rpm" not in measure_ts, f"TS measure regained an rpm: {measure_ts!r}"
+
+    # Python refuses the two-argument form outright rather than ignoring the
+    # extra token, so a stale caller fails loudly instead of silently.
+    with pytest.raises(bridge.CommandError):
+        bridge.parse_command("measure 500 3.9")
+    assert bridge.parse_command("measure 3.9").args == (3.9,)
+
+
+def test_the_status_record_matches_between_the_bridge_and_typescript(bridge):
+    """The status object IS the UI's whole view of the machine, and until now
+    nothing checked that the two descriptions of it agreed. A field the bridge
+    added would be invisible to the panel; a field TypeScript declared and the
+    bridge never sent would read as `undefined` — which for a boolean gate is
+    silently falsy, i.e. a safety condition that never fires.
+    """
+    controller = bridge.BlmController(lambda _line: None, lambda _message: None)
+    python_fields = set(controller.status())
+
+    ts = BLM_TS.read_text(encoding="utf-8")
+    block = ts[ts.index("export type ConsoleStatus = {"):]
+    block = block[:block.index("\n};")]
+    ts_fields = set(re.findall(r"^  (\w+)\??:", block, re.MULTILINE))
+
+    assert python_fields == ts_fields, (
+        f"only in the bridge {sorted(python_fields - ts_fields)}, "
+        f"only in TypeScript {sorted(ts_fields - python_fields)}")
+
+
+def test_the_ui_reads_the_wheel_verdicts_instead_of_recomputing_them(bridge):
+    """Added 2026-08-07 with the measured-wheel gates.
+
+    `arm`/`fire` now require the MEASURED flywheel RPM to agree with the command,
+    freshly and for long enough to be stable. Those predicates live in the bridge
+    because they are the same ones the gates use, and one safety rule must have one
+    implementation — a panel that decided "confirmed" for itself could show a green
+    ARM the bridge refuses, or worse, the reverse.
+    """
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+    blm = BLM_TS.read_text(encoding="utf-8")
+
+    # The verdicts are consumed, not derived: no threshold arithmetic in the view.
+    # (Optional chaining varies by call site, so match the field, not the prefix.)
+    for verdict in ("wheels_confirmed", "safe_to_approach", "loaded",
+                    "wheels_in_band_s", "wheels_unconfirmed_reason"):
+        assert verdict in view, verdict
+    for recomputed in ("RPM_SPREAD_MAX", "RPM_BAND_FRAC", "RPM_SAFE_APPROACH",
+                       "WHEELS_STABLE_S"):
+        assert recomputed not in view, (
+            f"{recomputed} in the view means the rule is implemented twice")
+        assert recomputed not in blm, recomputed
+
+    # The arm button mirrors the bridge's gate, including the two conditions a
+    # commanded RPM cannot express.
+    can_arm = view[view.index("const canArm ="):view.index("const safeToApproach")]
+    for condition in ("status.loaded", "status.wheels_confirmed",
+                      "status.wheels_in_band_s >= status.wheels_stable_required_s",
+                      "status.aim_established"):
+        assert condition in can_arm, condition
+
+    fire_blockers = blm[blm.index("export function fireBlockers("):
+                        blm.index("export type CycleStep")]
+    for condition in ("status.loaded", "status.wheels_confirmed",
+                      "status.aim_established"):
+        assert condition in fire_blockers, condition
+
+
+def test_a_measured_rpm_is_never_displayed_once_its_reading_is_stale():
+    """The number an operator reads before walking downrange. The firmware stops
+    sending while the pusher moves and a dead reader leaves the last values in
+    place forever, so a frozen "0 / 0" would read as a stopped machine."""
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+    assert "const telemetryFresh =" in view
+    assert "status.telemetry_age_s <= status.telemetry_max_age_s" in view
+    # Both measured rows are gated on freshness, and they blank rather than lying.
+    for wheel in ("rpm_left", "rpm_right"):
+        assert f'telemetryFresh ? fmt(status?.{wheel}) : "—"' in view, wheel
+    # And the age itself is on screen, not merely used internally.
+    assert "telemetry_age_s.toFixed(1)" in view
+    assert "DO NOT APPROACH" in view
+
+
+def test_the_per_shot_cycle_is_named_on_screen(bridge):
+    """Firmware `reload` homes BOTH aim axes and zeroes the wheel targets, and a
+    shot consumes the arm — so the RPM and the arm genuinely have to be
+    re-established for every single shot. That is correct behaviour which surprised
+    the operator mid-pass, so the sequence belongs on the panel rather than on a
+    printed sheet.
+    """
+    blm = BLM_TS.read_text(encoding="utf-8")
+    step = blm[blm.index("export function cycleStep("):]
+    # Every branch reads a bridge-computed field; the function orders and names
+    # them and decides no safety question of its own.
+    for field in ("estop_latched", "pending_shot", "safe_to_approach", "loaded",
+                  "aim_established", "wheels_confirmed", "wheels_in_band_s",
+                  "allow_fire", "armed"):
+        assert field in step, field
+
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+    assert "cycleStep(" in view
+    assert "step.title" in view and "step.detail" in view
+
+    # The bridge is what makes the cycle mandatory rather than advisory.
+    controller = bridge.BlmController(lambda _line: None, lambda _message: None,
+                                      allow_fire=True)
+    assert controller.state.loaded is False, (
+        "a console must not assume a ball is already in the chamber")
 
 
 def test_the_limits_agree_across_the_layers(bridge):
@@ -224,9 +352,15 @@ def test_a_shot_needs_a_sustained_hold_and_a_confirmed_room():
     assert "if (!live) setRoomClear(false);" in view
 
     blm = BLM_TS.read_text(encoding="utf-8")
-    fire_blockers = blm[blm.index("export function fireBlockers("):]
+    fire_blockers = blm[blm.index("export function fireBlockers("):
+                        blm.index("export type CycleStep")]
     for condition in ("estop_latched", "allow_fire", "armed", "roomClear",
-                      "RPM_MIN_FIRE", "pitch_deg"):
+                      "RPM_MIN_FIRE",
+                      # Was `pitch_deg` until 2026-08-07. That field is also filled
+                      # in by an RPM-only change, because the firmware takes one
+                      # combined `set v h wl wr` — so it was satisfied by touching
+                      # only the RPM control, with an angle nobody chose.
+                      "aim_established"):
         assert condition in fire_blockers, condition
 
 

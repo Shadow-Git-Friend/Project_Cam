@@ -101,8 +101,12 @@ pub enum ConsoleCommand {
     },
     Info {},
     /// Record a method-A landing distance for the v(RPM) fit.
+    ///
+    /// Deliberately carries NO rpm. The distance can only be measured after the
+    /// wheels are commanded to zero and confirmed stopped, so any rpm the UI
+    /// could supply here would be 0 rather than the RPM that was fired. The
+    /// bridge takes it from the shot itself.
     Measure {
-        rpm: f64,
         landing_distance_m: f64,
     },
     Undo {},
@@ -203,17 +207,14 @@ impl ConsoleCommand {
                 format!("limits {low:.0} {high:.0}")
             }
             Self::Info {} => "info".into(),
-            Self::Measure {
-                rpm: shot_rpm,
-                landing_distance_m,
-            } => {
+            Self::Measure { landing_distance_m } => {
                 let distance = finite(*landing_distance_m, "landing_distance_m")?;
                 if distance <= 0.0 || distance > 60.0 {
                     return Err(format!(
                         "landing_distance_m must be between 0 and 60, got {distance}"
                     ));
                 }
-                format!("measure {:.0} {:.4}", rpm(*shot_rpm)?, distance)
+                format!("measure {distance:.4}")
             }
             Self::Undo {} => "undo".into(),
             Self::Fit { height_m, kind } => {
@@ -283,9 +284,9 @@ mod tests {
             ),
             (serde_json::json!({"command": "info"}), "info"),
             (
-                serde_json::json!({"command": "measure", "rpm": 800,
+                serde_json::json!({"command": "measure",
                                    "landing_distance_m": 3.945}),
-                "measure 800 3.9450",
+                "measure 3.9450",
             ),
             (serde_json::json!({"command": "undo"}), "undo"),
             (
@@ -326,10 +327,13 @@ mod tests {
             serde_json::json!({"command": "aim", "pitch_deg": 0.0,
                                "yaw_deg": 0.0, "wheel_rpm": -1}),
             serde_json::json!({"command": "wheels", "wheel_rpm": 1201}),
-            serde_json::json!({"command": "measure", "rpm": 800,
-                               "landing_distance_m": 0.0}),
-            serde_json::json!({"command": "measure", "rpm": 800,
-                               "landing_distance_m": 61.0}),
+            serde_json::json!({"command": "measure", "landing_distance_m": 0.0}),
+            serde_json::json!({"command": "measure", "landing_distance_m": 61.0}),
+            // An rpm on a measurement is the defect this vocabulary removed: the
+            // wheels are stopped by the time a distance exists, so a supplied
+            // value would be 0. `deny_unknown_fields` must reject it outright.
+            serde_json::json!({"command": "measure", "rpm": 500,
+                               "landing_distance_m": 3.9}),
             serde_json::json!({"command": "fit", "height_m": 0.0, "kind": "linear"}),
             serde_json::json!({"command": "fit", "height_m": 6.0, "kind": "linear"}),
         ] {
@@ -450,8 +454,7 @@ mod tests {
             serde_json::json!({"command": "limits", "pitch_min_deg": -30.0,
                                "pitch_max_deg": 30.0}),
             serde_json::json!({"command": "info"}),
-            serde_json::json!({"command": "measure", "rpm": 500,
-                               "landing_distance_m": 2.4}),
+            serde_json::json!({"command": "measure", "landing_distance_m": 2.4}),
             serde_json::json!({"command": "undo"}),
             serde_json::json!({"command": "fit", "height_m": 0.52,
                                "kind": "interp"}),
@@ -491,8 +494,7 @@ mod tests {
             serde_json::json!({"command": "limits", "pitch_min_deg": 0.0,
                                "pitch_max_deg": 30.0}),
             serde_json::json!({"command": "info"}),
-            serde_json::json!({"command": "measure", "rpm": 800,
-                               "landing_distance_m": 3.9}),
+            serde_json::json!({"command": "measure", "landing_distance_m": 3.9}),
             serde_json::json!({"command": "undo"}),
             serde_json::json!({"command": "fit", "height_m": 0.52,
                                "kind": "linear"}),

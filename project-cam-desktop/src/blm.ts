@@ -43,7 +43,9 @@ export type ConsoleCommand =
   /** Declare the pitch travel measured from the current zero. */
   | { command: "limits"; pitch_min_deg: number; pitch_max_deg: number }
   | { command: "info" }
-  | { command: "measure"; rpm: number; landing_distance_m: number }
+  /** No rpm by design: the wheels are stopped before a distance can be measured,
+   *  so the bridge takes the RPM from the shot that was actually fired. */
+  | { command: "measure"; landing_distance_m: number }
   | { command: "undo" }
   | { command: "fit"; height_m: number; kind: FitKind };
 
@@ -93,9 +95,47 @@ export type ConsoleStatus = {
   arm_timeout_s: number;
   pitch_deg: number | null;
   yaw_deg: number | null;
+  /** An aim the operator actually established. `pitch_deg` alone is not that: an
+   *  RPM-only change also has to state the angles, because the firmware takes one
+   *  combined `set v h wl wr`. */
+  aim_established: boolean;
   wheel_rpm: number;
+  /** MEASURED flywheel RPM, and how old the reading is. The age is not optional
+   *  decoration: the firmware stops sending while the pusher moves and a dead
+   *  reader leaves the last numbers in place forever, so a frozen "0 / 0" would
+   *  read as "the wheels are stopped, it is safe to walk out". `null` age means no
+   *  reading has ever arrived. */
   rpm_left: number | null;
   rpm_right: number | null;
+  telemetry_age_s: number | null;
+  telemetry_max_age_s: number;
+  /** The bridge's verdicts, NOT recomputed here. These are the same predicates its
+   *  arm and fire gates use, and one safety rule must have one implementation. */
+  wheels_confirmed: boolean;
+  wheels_unconfirmed_reason: string;
+  /** The FULL arm predicate: agreement with the command, then enough separate
+   *  arrivals, then enough span between them. `wheels_confirmed` alone is
+   *  necessary but not sufficient — a panel showing only that would look ready
+   *  while ARM refuses. `wheels_in_band_s` is the span the SAMPLES cover, so it
+   *  never grows while nothing is arriving. */
+  wheels_stable: boolean;
+  wheels_unstable_reason: string;
+  wheels_sample_count: number;
+  wheels_stable_min_samples: number;
+  wheels_in_band_s: number;
+  wheels_band_rpm: number;
+  wheels_stable_required_s: number;
+  rpm_spread_max: number;
+  /** Whether the MACHINE says the flywheels are stopped: commanded zero, a fresh
+   *  reading, and both wheels under the threshold. */
+  safe_to_approach: boolean;
+  rpm_safe_approach: number;
+  /** A reload since the last shot — bookkeeping the console is entitled to. */
+  loaded: boolean;
+  /** What the last poll's ball switch said. Inferred polarity, so it informs and
+   *  never gates; `null` until a poll has been seen. */
+  ball_present: boolean | null;
+  info_age_s: number | null;
   rpm_min_fire: number;
   angle_limit_deg: number;
   /** The live envelope, in the current zero's frame. */
@@ -104,10 +144,42 @@ export type ConsoleStatus = {
   pitch_default_min_deg: number;
   pitch_default_max_deg: number;
   yaw_limit_deg: number;
+  /** Shots the FIRMWARE confirmed, not `shoot` commands written. */
   shots_fired: number;
+  shot_ack_timeout_s: number;
+  /** A `shoot` that reached the port and has not yet been acknowledged by the
+   *  firmware's front limit. While this is non-null the outcome is unknown: no
+   *  shot exists, no distance may be recorded, and every command that could
+   *  change the physical outcome is refused. `timed_out` means the bridge gave
+   *  up and latched STOP — that state is not clearable from the panel. */
+  fire_request: {
+    request_seq: number;
+    rpm: number;
+    rpm_left_pre_fire: number;
+    rpm_right_pre_fire: number;
+    rpm_pre_fire_sample_age_s: number;
+    confirmation_age_s: number;
+    timed_out: boolean;
+  } | null;
+  /** The CONFIRMED shot waiting for its landing distance, carrying the RPM
+   *  commanded when it was taken. Null when nothing is outstanding, which is
+   *  when RECORD SHOT has nothing to attach to.
+   *
+   *  The RPM pair says `pre_fire` because that is what it is: the firmware gates
+   *  telemetry on STATE_IDLE and is in STATE_SHOOTING for the whole
+   *  acknowledgement window, so no reading contemporaneous with the shot can
+   *  exist. Its age travels with it for the same reason. */
+  pending_shot: {
+    rpm: number;
+    seq: number;
+    request_seq: number;
+    rpm_left_pre_fire: number;
+    rpm_right_pre_fire: number;
+    rpm_pre_fire_sample_age_s: number;
+  } | null;
   last_refusal: string;
   info_lines: string[];
-  measurements: { rpm: number; distance_m: number }[];
+  measurements: { rpm: number; distance_m: number; shot_seq: number }[];
   model_path: string;
   model_summary: string;
 };
@@ -142,9 +214,146 @@ export function fireBlockers(
   if (!status.allow_fire) blockers.push("console was opened without fire control");
   if (status.estop_latched) blockers.push("ESTOP latched — release it first");
   if (!roomClear) blockers.push("room-clear not confirmed");
-  if (status.pitch_deg === null) blockers.push("no aim sent yet");
+  if (!status.aim_established) blockers.push("no aim sent yet");
   if (status.wheel_rpm < RPM_MIN_FIRE)
-    blockers.push(`wheels below the ${RPM_MIN_FIRE} RPM gate`);
+    blockers.push(`wheels commanded below the ${RPM_MIN_FIRE} RPM gate`);
+  // The commanded RPM says what was asked for; only these two say what happened.
+  if (!status.loaded) blockers.push("no reload since the last shot");
+  if (!status.wheels_confirmed)
+    blockers.push(status.wheels_unconfirmed_reason || "flywheels not confirmed");
   if (!status.armed) blockers.push("not armed");
   return blockers;
+}
+
+/** One named step, so the per-shot cycle is on screen instead of on paper.
+ *
+ *  The cycle is not incidental: firmware `reload` homes both aim axes AND zeroes
+ *  the wheel targets, and a shot consumes the arm — so RPM and ARM genuinely have
+ *  to be re-established for every single shot. That surprised the operator on the
+ *  first pass, which is the tell that the sequence needed to be shown rather than
+ *  remembered.
+ *
+ *  Every branch reads a field the BRIDGE computed. This function orders and names
+ *  them; it never decides a safety question of its own.
+ */
+export type CycleStep = {
+  key: string;
+  title: string;
+  detail: string;
+  tone: "idle" | "ask" | "wait" | "ready" | "danger";
+};
+
+export function cycleStep(
+  status: ConsoleStatus | null,
+  roomClear: boolean
+): CycleStep {
+  if (!status || !status.connected)
+    return {
+      key: "closed",
+      title: "OPEN THE CONSOLE",
+      detail: "Pick the launcher port and press OPEN CONSOLE.",
+      tone: "idle",
+    };
+  if (status.estop_latched)
+    return {
+      key: "latched",
+      title: "RELEASE THE LATCH",
+      detail: "Every actuating command is refused until the ESTOP latch is released.",
+      tone: "danger",
+    };
+
+  // A fired shot outranks everything else: the ball is on the floor and the only
+  // way to walk out to it is through a confirmed spin-down.
+  if (status.pending_shot) {
+    const shot = status.pending_shot;
+    if (status.wheel_rpm !== 0)
+      return {
+        key: "spin_down",
+        title: "SET RPM TO 0",
+        detail: `Shot ${shot.seq} is on the floor. Nobody may walk downrange until the wheels are commanded to zero.`,
+        tone: "danger",
+      };
+    if (!status.safe_to_approach)
+      return {
+        key: "spinning_down",
+        title: "DO NOT APPROACH",
+        detail:
+          status.telemetry_age_s === null ||
+          status.telemetry_age_s > status.telemetry_max_age_s
+            ? "The flywheel reading is stale, so the console cannot tell whether they have stopped. Do not use it as permission."
+            : `Waiting for both wheels below ${status.rpm_safe_approach} rpm.`,
+        tone: "danger",
+      };
+    return {
+      key: "measure",
+      title: `MEASURE SHOT ${shot.seq}`,
+      detail: `Wheels confirmed stopped. Measure from directly below the barrel to the first floor contact, then RECORD SHOT at ${shot.rpm} rpm.`,
+      tone: "ask",
+    };
+  }
+
+  if (!status.loaded)
+    return {
+      key: "reload",
+      title: "RELOAD",
+      detail:
+        "Reload also homes the aim and zeroes the wheels, so it comes first — everything after it is set against a known state.",
+      tone: "ask",
+    };
+  if (!status.aim_established)
+    return {
+      key: "aim",
+      title: "SET THE AIM",
+      detail: "Commit PITCH and YAW. An RPM-only change does not count as an aim.",
+      tone: "ask",
+    };
+  if (status.wheel_rpm < RPM_MIN_FIRE)
+    return {
+      key: "spin_up",
+      title: "COMMAND THE PASS RPM",
+      detail: `The reload zeroed the wheels. Pick the pass RPM — at least ${RPM_MIN_FIRE} to clear the firmware gate.`,
+      tone: "ask",
+    };
+  if (!status.wheels_confirmed)
+    return {
+      key: "unconfirmed",
+      title: "WHEELS NOT CONFIRMED",
+      detail: status.wheels_unconfirmed_reason,
+      tone: "wait",
+    };
+  if (status.wheels_in_band_s < status.wheels_stable_required_s)
+    return {
+      key: "stabilising",
+      title: "CONFIRMING THE WHEELS",
+      detail: `Held ${status.wheels_in_band_s.toFixed(1)} s of the ${status.wheels_stable_required_s.toFixed(1)} s required inside ±${status.wheels_band_rpm} rpm.`,
+      tone: "wait",
+    };
+  if (!status.allow_fire)
+    return {
+      key: "aim_only",
+      title: "AIM ONLY",
+      detail:
+        "This console was opened without fire control. Reopen it with ENABLE FIRE CONTROL to arm.",
+      tone: "idle",
+    };
+  if (!roomClear)
+    return {
+      key: "room",
+      title: "CONFIRM THE ROOM",
+      detail: "The one condition no machine can check. Nobody downrange.",
+      tone: "ask",
+    };
+  if (!status.armed)
+    return {
+      key: "arm",
+      title: "ARM",
+      detail: `Wheels confirmed for ${status.wheels_in_band_s.toFixed(1)} s. The arm lasts ${status.arm_timeout_s} s and one shot consumes it.`,
+      tone: "ready",
+    };
+  return {
+    key: "fire",
+    title: "HOLD TO FIRE",
+    detail: `Armed for ${status.arm_remaining_s.toFixed(0)} s more. Start the slow-motion capture first.`,
+    tone: "ready",
+  };
 }

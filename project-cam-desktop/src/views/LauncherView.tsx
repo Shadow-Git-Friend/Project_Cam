@@ -21,6 +21,7 @@ import {
   RPM_MIN_FIRE,
   YAW_LIMIT_DEG,
   autoSelectPort,
+  cycleStep,
   fireBlockers,
   type ConsoleCommand,
   type ConsoleStatus,
@@ -125,6 +126,10 @@ export default function LauncherView({
   // silently ignored everything, which reads as "the panel is broken".
   const canActuate = live && !latched;
   const commandedRpm = status?.wheel_rpm ?? 0;
+  // The shot a distance would attach to. Never the RPM control: the protocol
+  // stops the wheels before anyone may walk downrange, so the control reads 0
+  // exactly when a measurement becomes possible.
+  const pendingShot = status?.pending_shot ?? null;
   // The pitch envelope is LIVE state, not a constant: the bridge holds it, the
   // operator declares it, and a re-zero translates it. Taking the slider bounds from
   // here means the control can never offer an angle the bridge will clamp.
@@ -143,14 +148,38 @@ export default function LauncherView({
 
   const blockers = useMemo(() => fireBlockers(status, roomClear), [status, roomClear]);
   const canFire = live && blockers.length === 0;
+  // Mirrors the bridge's arm gate exactly, including the two conditions the
+  // commanded RPM cannot express: a reload since the last shot, and MEASURED
+  // wheels that have agreed with the command long enough to be stable.
   const canArm =
     live &&
     status !== null &&
     status.allow_fire &&
     !status.estop_latched &&
     roomClear &&
-    status.pitch_deg !== null &&
-    status.wheel_rpm >= RPM_MIN_FIRE;
+    status.aim_established &&
+    status.wheel_rpm >= RPM_MIN_FIRE &&
+    status.loaded &&
+    status.wheels_confirmed &&
+    status.wheels_in_band_s >= status.wheels_stable_required_s;
+  // The one step in the protocol that ends with a person walking into the line of
+  // fire, so it is the machine's own verdict or nothing.
+  const safeToApproach = status?.safe_to_approach === true;
+  const telemetryFresh =
+    status !== null &&
+    status.telemetry_age_s !== null &&
+    status.telemetry_age_s <= status.telemetry_max_age_s;
+  const step = useMemo(
+    () => cycleStep(live ? status : null, roomClear),
+    [live, status, roomClear]
+  );
+  const stepTone: Record<string, string> = {
+    idle: "border-white/[0.12] bg-black/40 text-white/50",
+    ask: "border-arena-yellow/50 bg-arena-yellow/[0.07] text-arena-yellow",
+    wait: "border-white/25 bg-black/50 text-white/70",
+    ready: "border-arena-hit/50 bg-[#0c1a10] text-arena-hit",
+    danger: "border-arena-miss bg-[#1a0d0c] text-arena-missText",
+  };
 
   const clearHold = () => {
     if (holdTimer.current !== null) {
@@ -242,7 +271,10 @@ export default function LauncherView({
   const recordMeasurement = () => {
     const value = Number(distance);
     if (!Number.isFinite(value) || value <= 0) return;
-    send({ command: "measure", rpm, landing_distance_m: value });
+    // No rpm: by the time a distance can be measured the wheels are stopped, so
+    // anything this view could send would be 0. The bridge attaches the distance
+    // to the shot it fired, carrying that shot's RPM.
+    send({ command: "measure", landing_distance_m: value });
     setDistance("");
   };
 
@@ -398,18 +430,97 @@ export default function LauncherView({
                 the firmware read 25.0 deg after 1.2 s with no position feedback
                 anywhere in the loop. So every angle on this panel is a command,
                 and nothing here can confirm the barrel actually moved. */}
-            <Metric label="WHEEL L · MEAS" value={fmt(status?.rpm_left)} unit="rpm" />
-            <Metric label="WHEEL R · MEAS" value={fmt(status?.rpm_right)} unit="rpm" />
+            {/* A measured value is shown ONLY while its reading is fresh. A frozen
+                "0 / 0" is precisely the number an operator reads before walking
+                downrange, so a stale one must not be displayed as a measurement at
+                all — it becomes an em dash and the row below says why. */}
+            <Metric
+              label="WHEEL L · MEAS"
+              value={telemetryFresh ? fmt(status?.rpm_left) : "—"}
+              unit="rpm"
+            />
+            <Metric
+              label="WHEEL R · MEAS"
+              value={telemetryFresh ? fmt(status?.rpm_right) : "—"}
+              unit="rpm"
+            />
             <Metric label="RPM · CMD" value={fmt(status?.wheel_rpm)} unit="rpm" />
             <Metric label="SHOTS" value={status ? String(status.shots_fired) : "—"} />
             <Metric label="PITCH · CMD" value={fmt(status?.pitch_deg)} unit="deg" />
             <Metric label="YAW · CMD" value={fmt(status?.yaw_deg)} unit="deg" />
           </div>
+
+          {/* The walk-downrange decision. It is the bridge's verdict, never one
+              computed here: commanded zero, a FRESH reading, and both wheels under
+              the threshold — absent telemetry is never "safe". */}
+          <div
+            className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border font-mono text-[11px] ${
+              !live
+                ? "border-white/[0.1] bg-black/40 text-white/35"
+                : safeToApproach
+                  ? "border-arena-hit/50 bg-[#0c1a10] text-arena-hit"
+                  : "border-arena-miss/50 bg-[#1a0d0c] text-arena-missText"
+            }`}
+          >
+            <span className="font-bold tracking-[0.1em]">
+              {!live
+                ? "FLYWHEELS UNKNOWN"
+                : safeToApproach
+                  ? "WHEELS CONFIRMED STOPPED"
+                  : "DO NOT APPROACH"}
+            </span>
+            <span className="ml-auto text-white/45">
+              {status === null
+                ? "—"
+                : status.telemetry_age_s === null
+                  ? "no reading yet"
+                  : `read ${status.telemetry_age_s.toFixed(1)} s ago`}
+            </span>
+          </div>
+          {live && !status?.wheels_confirmed && status?.wheels_unconfirmed_reason && (
+            <p className="text-[11px] text-arena-missText leading-snug">
+              {status.wheels_unconfirmed_reason}
+            </p>
+          )}
+
+          <div className="grid grid-cols-2 gap-2">
+            <Metric
+              label="CHAMBER"
+              value={
+                status === null
+                  ? "—"
+                  : status.loaded
+                    ? "RELOADED"
+                    : "NO RELOAD"
+              }
+            />
+            <Metric
+              label="BALL SWITCH"
+              value={
+                status?.ball_present === undefined || status?.ball_present === null
+                  ? "NOT POLLED"
+                  : status.ball_present
+                    ? "BALL"
+                    : "EMPTY"
+              }
+            />
+          </div>
           <p className="text-[10.5px] leading-snug text-white/35">
-            CMD is the last commanded value. POLL FIRMWARE returns the firmware's
-            own angle, which is <span className="text-white/55">open-loop</span> — it
-            ramps to the commanded value whether or not the barrel followed. There is
-            no position feedback in this machine, so confirm the aim by eye.
+            CHAMBER is the console's own bookkeeping — a reload since the last shot —
+            and it gates ARM. BALL SWITCH is what the last{" "}
+            <span className="text-white/55">POLL FIRMWARE</span> reported; its
+            polarity is inferred from the firmware wiring, so it informs and warns
+            but never blocks. They disagree when a reload hit the firmware's 10 s
+            dispense timeout with an empty chamber.
+          </p>
+          <p className="text-[10.5px] leading-snug text-white/35">
+            CMD is the last commanded value; MEAS is what the firmware reports and is
+            blank whenever the reading is older than{" "}
+            {status?.telemetry_max_age_s ?? 2} s. The angles have no MEAS at all:
+            POLL FIRMWARE returns the firmware's own angle, which is{" "}
+            <span className="text-white/55">open-loop</span> — it ramps to the
+            commanded value whether or not the barrel followed. Confirm the aim by
+            eye.
           </p>
           <button
             onClick={() => send({ command: "info" })}
@@ -426,6 +537,15 @@ export default function LauncherView({
                   {line}
                 </div>
               ))}
+              {/* Each poll starts a fresh block with its own age, because the
+                  protocol's three-polls check needs all three to be visible — and
+                  a stable machine answers identically every time, which is exactly
+                  what a dedup would swallow. */}
+              <div className="text-white/30">
+                {status.info_age_s === null
+                  ? "awaiting the reply to this poll"
+                  : `this poll answered ${status.info_age_s.toFixed(1)} s ago`}
+              </div>
             </div>
           )}
           {status?.last_refusal && (
@@ -497,6 +617,28 @@ export default function LauncherView({
             )}
           </div>
         )}
+
+        {/* The per-shot cycle, named. Firmware RELOAD homes the aim and zeroes the
+            wheel targets, and a shot consumes the arm — so RPM and ARM must be
+            re-established for EVERY shot. That is by design, and it is the thing
+            that surprised the operator on the first pass, so the sequence belongs on
+            screen rather than on a printed sheet. Every branch reads a field the
+            bridge computed; this strip orders and names them. */}
+        <div
+          className={`flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3.5 py-2.5 rounded-lg border ${
+            stepTone[step.tone]
+          }`}
+        >
+          <span className="text-[9.5px] font-bold tracking-[0.16em] opacity-60">
+            NEXT
+          </span>
+          <span className="font-extrabold text-[13px] tracking-[0.06em]">
+            {step.title}
+          </span>
+          <span className="text-[11.5px] text-white/55 basis-full sm:basis-auto">
+            {step.detail}
+          </span>
+        </div>
 
         {/* The three control panels scroll as one column. They are taller than a
             short window, and with the column fixed they simply got clipped —
@@ -750,13 +892,44 @@ export default function LauncherView({
               </button>
             </div>
 
+            {/* The spin-up confirmation, next to the button that consumes it. The
+                protocol asked the operator to eyeball "both wheels 450-550,
+                difference <= 75, three polls over two seconds"; the bridge now
+                enforces exactly that, so the countdown is worth watching. */}
+            {live && status && (
+              <p className="text-[11px] leading-snug font-mono">
+                {status.wheel_rpm < RPM_MIN_FIRE ? (
+                  <span className="text-white/40">
+                    wheels commanded {status.wheel_rpm} rpm — below the{" "}
+                    {RPM_MIN_FIRE} rpm gate
+                  </span>
+                ) : !status.wheels_confirmed ? (
+                  <span className="text-arena-missText">
+                    unconfirmed · {status.wheels_unconfirmed_reason}
+                  </span>
+                ) : status.wheels_in_band_s < status.wheels_stable_required_s ? (
+                  <span className="text-arena-yellow">
+                    confirming · {status.wheels_in_band_s.toFixed(1)} s /{" "}
+                    {status.wheels_stable_required_s.toFixed(1)} s inside{" "}
+                    {status.wheel_rpm}±{status.wheels_band_rpm} rpm
+                  </span>
+                ) : (
+                  <span className="text-arena-hit">
+                    confirmed · L={fmt(status.rpm_left)} R={fmt(status.rpm_right)} held{" "}
+                    {status.wheels_in_band_s.toFixed(1)} s inside {status.wheel_rpm}±
+                    {status.wheels_band_rpm} rpm
+                  </span>
+                )}
+              </p>
+            )}
+
             {blockers.length > 0 ? (
               <p className="text-[11px] text-white/45 leading-snug">
                 fire blocked: {blockers.join(" · ")}
               </p>
             ) : (
               <p className="text-[11px] text-arena-hit leading-snug">
-                armed and clear — one shot, then ARM again
+                armed and clear — one shot, then RELOAD and ARM again
               </p>
             )}
           </div>
@@ -766,15 +939,33 @@ export default function LauncherView({
             <div className="flex items-end gap-2.5 flex-wrap">
               <Field label="BARREL HEIGHT (m)" value={heightM} onChange={setHeightM} width="w-[130px]" />
               <Field
-                label={`LANDING DISTANCE (m) @ ${rpm} rpm`}
+                label={
+                  pendingShot
+                    ? `LANDING DISTANCE (m) · SHOT ${pendingShot.seq} @ ${pendingShot.rpm} rpm`
+                    : "LANDING DISTANCE (m) · NO SHOT AWAITING"
+                }
                 value={distance}
                 onChange={setDistance}
-                width="w-[210px]"
+                width="w-[260px]"
                 onEnter={recordMeasurement}
               />
+              {/* What the flywheels were last measured at BEFORE this ball left.
+                  The model stays indexed by the commanded RPM — that is the value
+                  a launcher can be told to reproduce — but a curve whose
+                  independent variable was never checked against the machine is not
+                  auditable. It says "pre-fire" with its age because the firmware
+                  gates telemetry on STATE_IDLE, so nothing measured during the
+                  shot itself can exist. */}
+              {pendingShot && (
+                <span className="font-mono text-[11px] text-white/45 pb-2.5">
+                  pre-fire L={fmt(pendingShot.rpm_left_pre_fire)} R=
+                  {fmt(pendingShot.rpm_right_pre_fire)} (
+                  {pendingShot.rpm_pre_fire_sample_age_s.toFixed(1)}s before)
+                </span>
+              )}
               <button
                 onClick={recordMeasurement}
-                disabled={!live || !distance}
+                disabled={!live || !distance || !pendingShot}
                 className="flex items-center gap-1.5 px-3 py-2.5 rounded-lg border border-white/[0.18] text-[11.5px] font-bold text-white/80 hover:border-arena-yellow/60 hover:text-arena-yellow disabled:opacity-30"
               >
                 <Ruler size={13} />
