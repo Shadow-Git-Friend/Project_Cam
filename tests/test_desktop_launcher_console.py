@@ -159,6 +159,19 @@ def test_the_status_record_matches_between_the_bridge_and_typescript(bridge):
         f"only in TypeScript {sorted(ts_fields - python_fields)}")
 
 
+def test_the_connected_firmware_identity_is_visible_not_inferred():
+    """The CP2102 identifies the adapter, not the firmware behind it. The panel
+    must consume the bridge's exact serial evidence and say UNVERIFIED until it
+    has such evidence; a source filename or selected port is not identity."""
+    blm = BLM_TS.read_text(encoding="utf-8")
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+
+    assert re.search(r"^  firmware_id: string;$", blm, re.MULTILINE)
+    assert 'label="FIRMWARE"' in view
+    assert "status?.firmware_id" in view
+    assert '|| "UNVERIFIED"' in view
+
+
 def test_the_ui_reads_the_wheel_verdicts_instead_of_recomputing_them(bridge):
     """Added 2026-08-07 with the measured-wheel gates.
 

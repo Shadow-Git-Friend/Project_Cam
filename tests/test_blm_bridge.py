@@ -1307,6 +1307,40 @@ def test_an_unwritable_shot_log_warns_but_does_not_end_the_session(
 
 # --------------------------------- serial reading ---------------------------
 
+
+@pytest.mark.parametrize(("line", "firmware_id"), [
+    ("SYS: FW control_13 READY", "control_13"),
+    ("INFO | FW: control_13", "control_13"),
+])
+def test_firmware_identity_is_parsed_from_boot_and_info(
+        bridge, line, firmware_id):
+    """The panel reports what the connected firmware said, never the filename
+    the host happened to launch beside it."""
+    controller, _, _, _ = make(bridge, allow_fire=False)
+
+    assert controller.note_serial_line(line)
+    assert controller.state.firmware_id == firmware_id
+    assert controller.status()["firmware_id"] == firmware_id
+
+
+def test_unrecognised_text_cannot_claim_the_control_13_identity(bridge):
+    """Only the two exact control_13 identity records are evidence. A filename,
+    a custom label, or a different firmware generation cannot make the UI claim
+    the USB-telemetry firmware is connected."""
+    controller, _, _, _ = make(bridge, allow_fire=False)
+
+    for line in (
+        "control_13",
+        "INFO | FW: custom",
+        "SYS: FW control_12 READY",
+        "prefix SYS: FW control_13 READY",
+    ):
+        controller.note_serial_line(line)
+
+    assert controller.state.firmware_id == ""
+    assert controller.status()["firmware_id"] == ""
+
+
 def test_the_recorded_control_12_info_rpm_line_is_telemetry(bridge):
     """The exact lines the stand produced on 2026-08-11. The firmware answered
     with real numbers and the panel showed `— / —`, because the parser accepted

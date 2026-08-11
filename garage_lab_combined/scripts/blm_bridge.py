@@ -370,6 +370,9 @@ class Measurement:
 class ConsoleState:
     port: str = ""
     connected: bool = False
+    # Proven by an exact boot or solicited-info record from the device. Empty is
+    # deliberately "unverified", never inferred from a host filename or port.
+    firmware_id: str = ""
     allow_fire: bool = False
     estop_latched: bool = False
     armed: bool = False
@@ -705,6 +708,11 @@ class BlmController:
         vanished — the more stable the rig, the less visible the confirmation.
         """
         with self._state_lock:
+            # Identity is state, not log decoration, and must therefore be
+            # absorbed before identical INFO replies are deduplicated.
+            firmware_id = parse_firmware_id(raw)
+            if firmware_id is not None:
+                self.state.firmware_id = firmware_id
             # BEFORE the dedup, and not merely as an optimisation: two consecutive
             # shots produce two IDENTICAL acknowledgement lines, so a
             # dedup-first order would swallow the second one and leave a real
@@ -1319,6 +1327,7 @@ class BlmController:
             "schema": SCHEMA,
             "port": state.port,
             "connected": state.connected,
+            "firmware_id": state.firmware_id,
             "allow_fire": state.allow_fire,
             "estop_latched": state.estop_latched,
             "armed": state.armed,
@@ -1440,6 +1449,19 @@ def is_noise(line: str) -> bool:
 
 
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+
+# Firmware identity is evidence, so accept only records emitted verbatim by the
+# commissioned candidate. `control_12`, arbitrary labels and incidental mentions
+# stay unverified rather than being promoted by substring matching.
+FIRMWARE_ID_LINE = re.compile(
+    r"^(?:SYS: FW (?P<boot>control_13) READY|INFO \| FW: (?P<info>control_13))$")
+
+
+def parse_firmware_id(line: str) -> Optional[str]:
+    match = FIRMWARE_ID_LINE.fullmatch(line)
+    if match is None:
+        return None
+    return match.group("boot") or match.group("info")
 
 # The 4 Hz stream. `control_12` emits it only to a connected BLE client, so over
 # USB alone it never arrives — which is exactly why the second form below has to
