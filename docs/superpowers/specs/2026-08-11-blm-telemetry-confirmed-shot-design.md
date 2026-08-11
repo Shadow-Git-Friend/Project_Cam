@@ -87,7 +87,8 @@ On a successful serial write, the bridge:
 
 - consumes ARM immediately;
 - conservatively marks the chamber bookkeeping as not loaded;
-- captures commanded RPM, measured left/right RPM, aim, timestamp, and a request
+- captures commanded RPM, the last confirmed **pre-fire** left/right RPM sample,
+  that sample's age at the instant `shoot` is sent, aim, timestamp, and a request
   identifier in `fire_request`;
 - records `shot_requested`, which states only that the command reached the serial
   writer;
@@ -105,12 +106,21 @@ The exact front-limit line finalizes the request once:
 - increment `shots_fired`;
 - create the one `pending_shot` which may receive a distance;
 - append `shot_fired` linked to the request and carrying both commanded and
-  measured RPM;
+  explicitly named pre-fire measured RPM plus its age at request time;
 - expose the confirmed state to the UI.
 
 A duplicate acknowledgement is idempotent. An acknowledgement with no matching
 request is an `orphan_shot_ack`: the bridge latches STOP because it proves
 physical motion outside the evidence state it can explain.
+
+The evidence must never call the captured pair "RPM at firing". Both firmware
+revisions intentionally suppress the compact telemetry stream outside IDLE, so
+no fresh sample can arrive while the firmware is in `STATE_SHOOTING` awaiting the
+front limit. The v2 field names therefore state their provenance, for example
+`rpm_left_pre_fire`, `rpm_right_pre_fire`, and
+`rpm_pre_fire_sample_age_s`. The UI uses the same wording. These values prove the
+last sample which satisfied the bridge gate before the request; they do not claim
+to observe wheel speed at the later physical front-limit event.
 
 #### 2. Acknowledgement timeout
 
@@ -134,6 +144,16 @@ the session remains diagnostically failed. Without an acknowledgement, no
 physical shot or measurement is asserted. Recovery requires closing the console,
 physically inspecting the chamber after confirmed spin-down, and starting a new
 session; `CLEAR` cannot turn an unresolved request back into a fire-ready state.
+
+This timeout is also the expected detector for the firmware's silent RPM refusal.
+In `STATE_SHOOTING`, if either measured wheel falls below 400 RPM, `control_12`
+holds the pusher at zero and emits neither a refusal nor a completion event. The
+bridge's pre-fire RPM window makes that outcome rare but cannot make it
+impossible: RPM can fall after `shoot`. Therefore the timeout log and UI explicitly
+say that a below-400 firmware refusal is one possible cause of the missing ACK.
+It remains an outcome-unknown ESTOP and invalid session, not a recoverable warning
+and not a proven `shot_refused`, because missing ACK can also mean link loss or a
+front-limit failure.
 
 #### 3. Real `control_12` parsers
 
@@ -213,6 +233,12 @@ unambiguous. New records distinguish:
 - `orphan_shot_ack` — physical acknowledgement with no explainable request;
 - `measurement` / `retracted_measurement` — linked to a confirmed shot only.
 
+Both `shot_requested` and `shot_fired` carry the same explicitly named
+`rpm_left_pre_fire`, `rpm_right_pre_fire`, and
+`rpm_pre_fire_sample_age_s` captured at request time. A later reader can therefore
+audit the independent variable without mistaking it for telemetry sampled during
+`STATE_SHOOTING`.
+
 The status transport may remain `project_cam.blm_console.v1`; changing its fields
 is additive. The evidence file already contains four v1 `shot_fired` rows from
 2026-08-07. Under the old implementation those rows prove command writes, not
@@ -231,6 +257,10 @@ negative tests include:
 - a serial write without ACK produces no `shot_fired` or measurable shot;
 - an unrelated or duplicate firmware line cannot confirm a shot;
 - timeout latches before attempting STOP and remains latched if that write fails;
+- a no-ACK path is described as outcome-unknown and explicitly includes the
+  firmware's silent below-400 RPM refusal; it never creates `shot_fired`;
+- pre-fire RPM and sample age survive unchanged from request to confirmed-shot
+  evidence, and no field claims an at-fire measurement;
 - one sample aged two seconds, three samples in 30 ms, and a sample after a stale
   gap all fail stability;
 - three separate samples spanning two seconds with no gap pass;
