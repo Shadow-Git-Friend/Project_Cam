@@ -167,6 +167,7 @@ BALL_PRESENT_LEVEL = 0
 # Serial pacing. The ESP32 answers a command in well under 300 ms; the pusher
 # suppresses telemetry while it moves, so a reload/shoot needs a longer grace.
 WRITE_SETTLE_S = 0.3
+SERIAL_BOOT_SETTLE_S = 2.0
 
 
 class CommandError(Exception):
@@ -1556,6 +1557,15 @@ def load_fitter(path: Path):
     return module
 
 
+def open_serial_link(serial_module, port: str, baud: int, *,
+                     sleep: Callable[[float], None] = time.sleep):
+    """Open CP2102, discard pre-open bytes, then retain DTR boot evidence."""
+    ser = serial_module.Serial(port, baud, timeout=0.1)
+    ser.reset_input_buffer()
+    sleep(SERIAL_BOOT_SETTLE_S)
+    return ser
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1604,14 +1614,10 @@ def main() -> int:
 
     log(f"opening {args.serial_port} @ {args.baud}")
     try:
-        ser = serial.Serial(args.serial_port, args.baud, timeout=0.1)
+        ser = open_serial_link(serial, args.serial_port, args.baud)
     except Exception as error:  # noqa: BLE001 - surfaced to the operator log
         emit(f"[BLM] ERROR: could not open {args.serial_port}: {error}")
         return 2
-    # The ESP32 resets when DTR asserts; anything written before it settles is
-    # lost, and the boot banner would otherwise be read as telemetry.
-    time.sleep(2)
-    ser.reset_input_buffer()
 
     write_lock = threading.Lock()
 

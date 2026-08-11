@@ -1323,6 +1323,52 @@ def test_firmware_identity_is_parsed_from_boot_and_info(
     assert controller.status()["firmware_id"] == firmware_id
 
 
+def test_serial_open_clears_before_wait_and_preserves_dtr_boot_identity(bridge):
+    """Clear pre-open bytes, then retain the identity emitted during reset."""
+    class BootingSerial:
+        def __init__(self):
+            self.lines = [b"stale pre-open bytes\n"]
+            self.reset_calls = 0
+
+        def reset_input_buffer(self):
+            self.reset_calls += 1
+            self.lines.clear()
+
+        def readline(self):
+            return self.lines.pop(0)
+
+    class SerialModule:
+        def __init__(self, link):
+            self.link = link
+            self.open_args = None
+
+        def Serial(self, port, baud, timeout):
+            self.open_args = (port, baud, timeout)
+            return self.link
+
+    link = BootingSerial()
+    serial_module = SerialModule(link)
+
+    def boot_during_settle(seconds):
+        assert seconds == bridge.SERIAL_BOOT_SETTLE_S
+        link.lines.append(b"SYS: FW control_13 READY\n")
+
+    opened = bridge.open_serial_link(
+        serial_module, "/dev/test-control13", 921600,
+        sleep=boot_during_settle,
+    )
+    controller, _, _, _ = make(bridge, allow_fire=False)
+    raw = opened.readline().decode().strip()
+
+    assert serial_module.open_args == ("/dev/test-control13", 921600, 0.1)
+    assert opened.reset_calls == 1
+    assert bridge.consume_serial_line(controller, raw)
+    assert controller.status()["firmware_id"] == "control_13"
+    assert "open_serial_link(serial, args.serial_port, args.baud)" in (
+        BRIDGE.read_text(encoding="utf-8")
+    )
+
+
 def test_unrecognised_text_cannot_claim_the_control_13_identity(bridge):
     """Only the two exact control_13 identity records are evidence. A filename,
     a custom label, or a different firmware generation cannot make the UI claim
