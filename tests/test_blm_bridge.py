@@ -1212,6 +1212,23 @@ def test_undo_returns_the_shot_to_awaiting_rather_than_discarding_it(
     assert controller.state.measurements[-1].shot_seq == 1
 
 
+def test_undo_refuses_to_overwrite_a_newer_pending_shot(
+        bridge, fitter, tmp_path):
+    """UNDO puts a retracted measurement's shot back to awaiting-distance. If a
+    NEWER confirmed shot is already waiting there, doing so would silently
+    replace it — and the ball on the floor belongs to the newer one, so the next
+    distance typed would land on the older shot's record."""
+    controller, _, _, clock = make(bridge, fitter=fitter, tmp_path=tmp_path)
+    fire_at(bridge, controller, clock, rpm=500)
+    send(bridge, controller, "measure 3.0")
+    fire_at(bridge, controller, clock, rpm=650)
+
+    with pytest.raises(bridge.CommandError, match="newer confirmed shot"):
+        send(bridge, controller, "undo")
+    assert controller.state.pending_shot.rpm == 650
+    assert [m.rpm for m in controller.state.measurements] == [500]
+
+
 def test_a_written_model_always_carries_its_sample_count_and_residual(
         bridge, fitter, tmp_path):
     controller, _, logs, clock = make(bridge, fitter=fitter, tmp_path=tmp_path)

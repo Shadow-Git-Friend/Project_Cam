@@ -1025,6 +1025,10 @@ class BlmController:
         if reason is not None:
             self._refuse(f"the flywheels are not confirmed: {reason}")
         if self.state.fire_request is not None:
+            # Unreachable through `handle`, which refuses every command while a
+            # request is outstanding — that is the tested gate. Kept as a backstop
+            # for a direct call, and marked as such so nobody reads it as the
+            # guarantee: no test can exercise it while `handle` refuses first.
             self._refuse("a shoot request is still awaiting firmware confirmation")
         if self.state.pending_shot is not None:
             # Two balls on the floor and no way to tell which is which. Refusing
@@ -1160,6 +1164,16 @@ class BlmController:
         )
 
     def _do_undo(self, _intent: Intent) -> None:
+        if self.state.pending_shot is not None:
+            # Undo returns the retracted measurement's shot to awaiting-distance.
+            # There is only one such slot, so doing that on top of a NEWER
+            # confirmed shot would silently discard it — and the ball on the
+            # floor belongs to the newer one, so the next distance typed would
+            # land on the older shot's record.
+            self._refuse(
+                f"a newer confirmed shot ({self.state.pending_shot.seq}) is "
+                "awaiting its distance — record it before undoing an earlier one"
+            )
         if not self.state.measurements:
             self._log("no measurements to undo")
             return
