@@ -4,7 +4,7 @@
 
 **Goal:** Create an explicitly identifiable `control_13` firmware candidate which continuously reports actual flywheel RPM over USB through coast-down to zero without blocking the cooperative state machine.
 
-**Architecture:** `control_12_full.ino` remains immutable and deployed until a separate flash checkpoint. `control_13_full.ino` preserves its command grammar, limits, and 921600-baud transport, but removes BLE/PWM suppression from the IDLE telemetry emitter and removes all `info` delays. Source-contract tests pin the old firmware hash and the new protocol before any hardware interaction.
+**Architecture:** `control_12_full.ino` remains immutable and deployed until a separate flash checkpoint. `control_13_full.ino` preserves its command grammar, limits, and 921600-baud transport, but removes BLE/PWM suppression from the IDLE telemetry emitter and removes all `info` delays. The host clears buffered serial input immediately after opening the CP2102, waits for the DTR-triggered reset without clearing again, and therefore retains the strict boot identity for the reader. Source-contract tests pin the old firmware hash, the new protocol, and this startup ordering before any hardware interaction.
 
 **Tech Stack:** ESP32 Arduino C++, Python 3.10 source-contract tests, pytest, existing Python serial consumers, React/TypeScript identity display.
 
@@ -13,9 +13,9 @@
 ## Execution boundaries
 
 - Prerequisite: complete `docs/superpowers/plans/2026-08-11-blm-confirmed-shot-host.md` through its no-fire handoff.
-- Design authority: `docs/superpowers/specs/2026-08-11-blm-telemetry-confirmed-shot-design.md` at commit `c25273e`.
+- Design authority: `docs/superpowers/specs/2026-08-11-blm-telemetry-confirmed-shot-design.md` through the approved startup-identity amendment at commit `ccac069`.
 - Never edit `control_12_full.ino`; its pinned SHA-256 is `eefb35acce89f5f1467dab26865b90394e4f880127718c2697cd4924c51b660e`.
-- Tasks 1–5 are software-only. Do not open serial, flash the ESP32, move axes, spin wheels, ARM, or fire.
+- Tasks 1–5A are software-only. Do not open serial, flash the ESP32, move axes, spin wheels, ARM, or fire.
 - Task 6 is an operator checkpoint, not an autonomous agent action. Stop and obtain explicit confirmation immediately before opening the firmware tool or serial port.
 - `arduino-cli`, PlatformIO, and the Arduino CLI compiler are not currently installed on PATH. Source tests are not a compile substitute; no flash is allowed until the existing Arduino IDE successfully compiles the exact candidate with the deployed board settings.
 
@@ -24,8 +24,8 @@
 - `control_12_full.ino` — immutable deployed firmware reference.
 - `control_13_full.ino` — new candidate with observable identity and non-blocking USB telemetry.
 - `tests/test_blm_firmware_contract.py` — immutable-hash, protocol, telemetry, delay, and serial-consumer contracts.
-- `garage_lab_combined/scripts/blm_bridge.py` — parse and publish firmware identity.
-- `tests/test_blm_bridge.py` — identity parser/status behavior.
+- `garage_lab_combined/scripts/blm_bridge.py` — preserve boot input across DTR settle, then parse and publish firmware identity.
+- `tests/test_blm_bridge.py` — serial-open ordering plus identity parser/status behavior.
 - `project-cam-desktop/src/blm.ts` — additive `firmware_id` status field.
 - `project-cam-desktop/src/views/LauncherView.tsx` — visible firmware identity.
 - `tests/test_desktop_launcher_console.py` — identity parity and visible-label contract.
@@ -488,6 +488,128 @@ hardware S0-S2: NOT ATTEMPTED
 
 Stop here. Do not convert the compile block into an installation or GUI action without explicit operator approval.
 
+### Task 5A: Preserve the boot identity through DTR settle
+
+**Files:**
+- Modify: `garage_lab_combined/scripts/blm_bridge.py:78-100,1598-1615`
+- Test: `tests/test_blm_bridge.py:1307-1342`
+
+- [ ] **Step 1: Write the failing serial-open ordering test**
+
+Add beside the existing firmware-identity tests:
+
+```python
+def test_serial_open_clears_before_wait_and_preserves_dtr_boot_identity(bridge):
+    """Clear pre-open bytes, then retain the identity emitted during reset."""
+    class BootingSerial:
+        def __init__(self):
+            self.lines = [b"stale pre-open bytes\n"]
+            self.reset_calls = 0
+
+        def reset_input_buffer(self):
+            self.reset_calls += 1
+            self.lines.clear()
+
+        def readline(self):
+            return self.lines.pop(0)
+
+    class SerialModule:
+        def __init__(self, link):
+            self.link = link
+            self.open_args = None
+
+        def Serial(self, port, baud, timeout):
+            self.open_args = (port, baud, timeout)
+            return self.link
+
+    link = BootingSerial()
+    serial_module = SerialModule(link)
+
+    def boot_during_settle(seconds):
+        assert seconds == bridge.SERIAL_BOOT_SETTLE_S
+        link.lines.append(b"SYS: FW control_13 READY\n")
+
+    opened = bridge.open_serial_link(
+        serial_module, "/dev/test-control13", 921600,
+        sleep=boot_during_settle,
+    )
+    controller, _, _, _ = make(bridge, allow_fire=False)
+    raw = opened.readline().decode().strip()
+
+    assert serial_module.open_args == ("/dev/test-control13", 921600, 0.1)
+    assert opened.reset_calls == 1
+    assert bridge.consume_serial_line(controller, raw)
+    assert controller.status()["firmware_id"] == "control_13"
+    assert "open_serial_link(serial, args.serial_port, args.baud)" in (
+        BRIDGE.read_text(encoding="utf-8")
+    )
+```
+
+- [ ] **Step 2: Run the new test and verify RED**
+
+Run:
+
+```bash
+/home/hanush/Desktop/ProjectCam/venv/bin/python -m pytest \
+  tests/test_blm_bridge.py::test_serial_open_clears_before_wait_and_preserves_dtr_boot_identity \
+  -q -p no:cacheprovider -o addopts=
+```
+
+Expected: FAIL with `AttributeError: module 'blm_bridge' has no attribute 'open_serial_link'`.
+
+- [ ] **Step 3: Implement the serial-open boundary**
+
+Beside the other bridge constants add:
+
+```python
+SERIAL_BOOT_SETTLE_S = 2.0
+```
+
+Before `main()` add:
+
+```python
+def open_serial_link(serial_module, port: str, baud: int, *,
+                     sleep: Callable[[float], None] = time.sleep):
+    """Open CP2102, discard pre-open bytes, then retain DTR boot evidence."""
+    ser = serial_module.Serial(port, baud, timeout=0.1)
+    ser.reset_input_buffer()
+    sleep(SERIAL_BOOT_SETTLE_S)
+    return ser
+```
+
+Replace the current open/sleep/reset sequence in `main()` with:
+
+```python
+    try:
+        ser = open_serial_link(serial, args.serial_port, args.baud)
+    except Exception as error:  # noqa: BLE001 - surfaced to the operator log
+        emit(f"[BLM] ERROR: could not open {args.serial_port}: {error}")
+        return 2
+```
+
+The reset is intentionally before the wait. Do not add any second buffer reset:
+the reader must receive the boot identity emitted during that wait.
+
+- [ ] **Step 4: Run identity and bridge regression tests**
+
+```bash
+/home/hanush/Desktop/ProjectCam/venv/bin/python -m pytest \
+  tests/test_blm_bridge.py tests/test_desktop_launcher_console.py \
+  -q -p no:cacheprovider -o addopts=
+/home/hanush/Desktop/ProjectCam/venv/bin/python -m ruff check \
+  garage_lab_combined/scripts/blm_bridge.py tests/test_blm_bridge.py
+```
+
+Expected: all tests and lint pass.
+
+- [ ] **Step 5: Commit the boot-path fix**
+
+```bash
+git add garage_lab_combined/scripts/blm_bridge.py tests/test_blm_bridge.py
+git diff --cached --check
+git commit -m "fix(blm): retain firmware identity after DTR reset"
+```
+
 ### Task 6: Operator-controlled compile, flash, and S0–S2
 
 **Files:**
@@ -513,13 +635,18 @@ Only after the operator approves the compiled artifact, select the stable CP2102
 Re-level before opening the console because DTR resets the ESP32 and adopts the physical pose as logical zero. Open the rebuilt console without fire control. Require:
 
 ```text
-FIRMWARE = control_13
+FIRMWARE = control_13 before the first POLL
 fresh L/R readings continue near zero without POLL
 POLL shows INFO | FW, Ang, RPM, FDR, LMT, CFG
 Ball HIGH/LOW appears as advisory BALL/EMPTY
 ```
 
-Wait more than two seconds and confirm zero telemetry remains fresh. Any identity mismatch, stale stream, unexpected movement, or parsing error fails S0.
+Wait more than two seconds and confirm zero telemetry remains fresh. Then connect
+a passive BLE notification subscriber, press **POLL FIRMWARE** once in the USB
+console, and require all six INFO records (`FW`, `Ang`, `RPM`, `FDR`, `LMT`,
+`CFG`) on both USB and BLE. Do not send commands from BLE, and disconnect it
+before S1. Any missing BLE record, identity mismatch, stale stream, unexpected
+movement, or parsing error fails S0.
 
 - [ ] **Step 5: Run S1 no-fire/manual safety**
 
