@@ -5,6 +5,7 @@ They prevent a silent edit of deployed control_12 and pin the narrow source
 changes required before control_13 may reach the compile/flash gate.
 """
 
+import ast
 import hashlib
 import re
 from pathlib import Path
@@ -37,6 +38,17 @@ def firmware_commands(source: str) -> tuple[set[str], set[str]]:
     exact = set(re.findall(r'equalsIgnoreCase\("([^"]+)"\)', source))
     prefixes = set(re.findall(r'startsWith\("([^"]+)"\)', source))
     return exact, prefixes
+
+
+def opens_serial(path: Path) -> bool:
+    """Whether Python syntax in this file constructs a Serial link."""
+    tree = ast.parse(text(path))
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "Serial"
+        for node in ast.walk(tree)
+    )
 
 
 def test_control_12_is_the_byte_identical_deployed_reference():
@@ -116,7 +128,7 @@ def test_exactly_seven_python_files_open_serial_and_five_are_active():
     scripts = sorted(
         path.relative_to(ROOT).as_posix()
         for path in scripts_dir.glob("*.py")
-        if "serial.Serial(" in text(path)
+        if opens_serial(path)
     )
     expected = sorted(ACTIVE_SERIAL_CLIENTS + LEGACY_SERIAL_CLIENTS)
     assert scripts == expected
