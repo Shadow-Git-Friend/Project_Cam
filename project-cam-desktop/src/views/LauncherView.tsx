@@ -124,7 +124,11 @@ export default function LauncherView({
   // A latched ESTOP refuses every actuating command in the bridge. The controls
   // must go dead with it: they used to stay live and responsive while the machine
   // silently ignored everything, which reads as "the panel is broken".
-  const canActuate = live && !latched;
+  // ...and the same applies while a `shoot` is unacknowledged: the bridge
+  // refuses every command that could change the physical outcome until the
+  // firmware reports the front limit. STOP keeps its own independent path.
+  const awaitingAck = status?.fire_request != null;
+  const canActuate = live && !latched && !awaitingAck;
   const commandedRpm = status?.wheel_rpm ?? 0;
   // The shot a distance would attach to. Never the RPM control: the protocol
   // stops the wheels before anyone may walk downrange, so the control reads 0
@@ -160,8 +164,12 @@ export default function LauncherView({
     status.aim_established &&
     status.wheel_rpm >= RPM_MIN_FIRE &&
     status.loaded &&
-    status.wheels_confirmed &&
-    status.wheels_in_band_s >= status.wheels_stable_required_s;
+    // The bridge's FULL predicate, verdict-only: agreement with the command plus
+    // enough separate arrivals spanning enough time. Comparing the span here
+    // would reimplement half the rule and miss the sample count entirely.
+    status.wheels_stable &&
+    status.fire_request === null &&
+    status.pending_shot === null;
   // The one step in the protocol that ends with a person walking into the line of
   // fire, so it is the machine's own verdict or nothing.
   const safeToApproach = status?.safe_to_approach === true;
@@ -522,9 +530,12 @@ export default function LauncherView({
             commanded value whether or not the barrel followed. Confirm the aim by
             eye.
           </p>
+          {/* Disabled while a shoot is unacknowledged: `info` spends 250 ms
+              inside five firmware delay(50) calls, during which the cooperative
+              stepper state machine does not run. */}
           <button
             onClick={() => send({ command: "info" })}
-            disabled={!live}
+            disabled={!live || awaitingAck}
             className="flex items-center justify-center gap-1.5 w-full py-2 rounded-lg border border-white/[0.14] text-[11px] font-bold tracking-wide text-white/60 hover:text-arena-yellow hover:border-arena-yellow/50 disabled:opacity-30"
           >
             <Activity size={13} />
@@ -907,15 +918,20 @@ export default function LauncherView({
                   <span className="text-arena-missText">
                     unconfirmed · {status.wheels_unconfirmed_reason}
                   </span>
-                ) : status.wheels_in_band_s < status.wheels_stable_required_s ? (
+                ) : !status.wheels_stable ? (
+                  // Both halves shown, because they fail for different reasons
+                  // and the operator's remedy differs: poll again, or wait.
                   <span className="text-arena-yellow">
-                    confirming · {status.wheels_in_band_s.toFixed(1)} s /{" "}
+                    confirming · samples {status.wheels_sample_count}/
+                    {status.wheels_stable_min_samples} · span{" "}
+                    {status.wheels_in_band_s.toFixed(1)}/
                     {status.wheels_stable_required_s.toFixed(1)} s inside{" "}
                     {status.wheel_rpm}±{status.wheels_band_rpm} rpm
                   </span>
                 ) : (
                   <span className="text-arena-hit">
-                    confirmed · L={fmt(status.rpm_left)} R={fmt(status.rpm_right)} held{" "}
+                    confirmed · L={fmt(status.rpm_left)} R={fmt(status.rpm_right)} ·{" "}
+                    {status.wheels_sample_count} samples spanning{" "}
                     {status.wheels_in_band_s.toFixed(1)} s inside {status.wheel_rpm}±
                     {status.wheels_band_rpm} rpm
                   </span>
@@ -959,8 +975,8 @@ export default function LauncherView({
               {pendingShot && (
                 <span className="font-mono text-[11px] text-white/45 pb-2.5">
                   pre-fire L={fmt(pendingShot.rpm_left_pre_fire)} R=
-                  {fmt(pendingShot.rpm_right_pre_fire)} (
-                  {pendingShot.rpm_pre_fire_sample_age_s.toFixed(1)}s before)
+                  {fmt(pendingShot.rpm_right_pre_fire)} · sample age at request{" "}
+                  {pendingShot.rpm_pre_fire_sample_age_s.toFixed(2)} s
                 </span>
               )}
               <button
@@ -971,9 +987,17 @@ export default function LauncherView({
                 <Ruler size={13} />
                 RECORD SHOT
               </button>
+              {/* UNDO returns the retracted measurement's shot to
+                  awaiting-distance, and there is only one such slot. The bridge
+                  refuses while a NEWER confirmed shot occupies it; the button
+                  must not offer it either. */}
               <button
                 onClick={() => send({ command: "undo" })}
-                disabled={!live || (status?.measurements.length ?? 0) === 0}
+                disabled={
+                  !live ||
+                  (status?.measurements.length ?? 0) === 0 ||
+                  status?.pending_shot !== null
+                }
                 className="flex items-center gap-1.5 px-3 py-2.5 rounded-lg border border-white/[0.14] text-[11.5px] font-bold text-white/55 hover:text-white disabled:opacity-30"
               >
                 <Undo2 size={13} />

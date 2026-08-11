@@ -219,8 +219,21 @@ export function fireBlockers(
     blockers.push(`wheels commanded below the ${RPM_MIN_FIRE} RPM gate`);
   // The commanded RPM says what was asked for; only these two say what happened.
   if (!status.loaded) blockers.push("no reload since the last shot");
-  if (!status.wheels_confirmed)
-    blockers.push(status.wheels_unconfirmed_reason || "flywheels not confirmed");
+  // The FULL predicate, not just agreement with the command: enough separate
+  // arrivals, spanning enough time. `wheels_confirmed` alone would show a green
+  // ARM the bridge refuses.
+  if (!status.wheels_stable)
+    blockers.push(
+      status.wheels_unstable_reason ||
+        status.wheels_unconfirmed_reason ||
+        "flywheels not confirmed"
+    );
+  // An unresolved outcome and an unmeasured ball each mean the next shot has
+  // nowhere honest to attach its distance.
+  if (status.fire_request)
+    blockers.push("previous shoot request is awaiting firmware confirmation");
+  if (status.pending_shot)
+    blockers.push("record the previous shot's distance first");
   if (!status.armed) blockers.push("not armed");
   return blockers;
 }
@@ -261,6 +274,25 @@ export function cycleStep(
       detail: "Every actuating command is refused until the ESTOP latch is released.",
       tone: "danger",
     };
+
+  // An unresolved request outranks even a pending shot: until the firmware
+  // reports the front limit, nobody knows whether a ball is on the floor at all.
+  if (status.fire_request) {
+    return status.fire_request.timed_out
+      ? {
+          key: "shot_unknown",
+          title: "SHOT OUTCOME UNKNOWN",
+          detail:
+            "No front-limit ACK. This includes the firmware's silent below-400 RPM refusal. STOP is latched by design; close the console and inspect the chamber after confirmed spin-down.",
+          tone: "danger",
+        }
+      : {
+          key: "awaiting_ack",
+          title: "AWAITING FIRMWARE ACK",
+          detail: `Shoot request ${status.fire_request.request_seq} was sent; only the front-limit event creates a shot record.`,
+          tone: "wait",
+        };
+  }
 
   // A fired shot outranks everything else: the ball is on the floor and the only
   // way to walk out to it is through a confirmed spin-down.

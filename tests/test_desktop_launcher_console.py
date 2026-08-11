@@ -182,18 +182,71 @@ def test_the_ui_reads_the_wheel_verdicts_instead_of_recomputing_them(bridge):
             f"{recomputed} in the view means the rule is implemented twice")
         assert recomputed not in blm, recomputed
 
-    # The arm button mirrors the bridge's gate, including the two conditions a
-    # commanded RPM cannot express.
+
+def test_the_ui_names_pre_fire_rpm_and_never_claims_an_at_fire_measurement():
+    """The firmware gates telemetry on STATE_IDLE and is in STATE_SHOOTING for
+    the whole acknowledgement window, so no reading contemporaneous with the
+    shot can exist. A panel labelling it `measured` would state one."""
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+    assert "pre-fire L=" in view
+    assert "rpm_pre_fire_sample_age_s" in view
+    assert "measured L={fmt(pendingShot.rpm_left)}" not in view
+
+
+def test_an_outstanding_request_is_visible_and_blocks_the_controls():
+    """While a `shoot` is unacknowledged the outcome is unknown: no shot exists,
+    nothing may be recorded against it, and nothing that could change the
+    physical result may be sent. The panel has to SAY so rather than looking
+    idle — an operator who cannot see the state will press something."""
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+    blm = BLM_TS.read_text(encoding="utf-8")
+    assert "status.fire_request" in blm
+    assert "status?.fire_request" in view
+    assert "AWAITING FIRMWARE ACK" in blm
+    assert "SHOT OUTCOME UNKNOWN" in blm
+    # UNDO would overwrite the newer confirmed shot's slot; the bridge refuses,
+    # and the button must not offer it either.
+    assert "status?.pending_shot !== null" in view
+
+
+def test_the_ui_shows_the_sampled_window_not_a_bare_elapsed_time(bridge):
+    """`wheels_confirmed` is necessary but not sufficient — the full arm
+    predicate also needs enough separate arrivals spanning enough time. A panel
+    showing only agreement would look ready while ARM refuses."""
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+    controller = bridge.BlmController(lambda _l: None, lambda _m: None)
+    status = controller.status()
+    for field in ("wheels_stable", "wheels_sample_count",
+                  "wheels_stable_min_samples", "shot_ack_timeout_s",
+                  "fire_request"):
+        assert field in status, f"the bridge stopped publishing {field}"
+    for field in ("wheels_stable", "wheels_sample_count"):
+        assert field in view, field
+
+
+def test_the_arm_button_mirrors_the_bridge_gate():
+    """One safety rule, one implementation: the panel consumes the bridge's
+    verdicts rather than deciding readiness for itself. A panel that decided for
+    itself could show a green ARM the bridge refuses, or worse, the reverse."""
+    view = LAUNCHER_VIEW.read_text(encoding="utf-8")
+    blm = BLM_TS.read_text(encoding="utf-8")
+
     can_arm = view[view.index("const canArm ="):view.index("const safeToApproach")]
-    for condition in ("status.loaded", "status.wheels_confirmed",
-                      "status.wheels_in_band_s >= status.wheels_stable_required_s",
-                      "status.aim_established"):
+    for condition in ("status.loaded", "status.wheels_stable",
+                      "status.aim_established",
+                      "status.fire_request === null",
+                      "status.pending_shot === null"):
         assert condition in can_arm, condition
+    # `wheels_stable` IS the full predicate. Comparing the span here as well
+    # would reimplement half the rule in the panel and still miss the sample
+    # count, which is the half that a single poll fails.
+    assert "wheels_stable_required_s" not in can_arm
 
     fire_blockers = blm[blm.index("export function fireBlockers("):
                         blm.index("export type CycleStep")]
-    for condition in ("status.loaded", "status.wheels_confirmed",
-                      "status.aim_established"):
+    for condition in ("status.loaded", "status.wheels_stable",
+                      "status.aim_established", "status.fire_request",
+                      "status.pending_shot"):
         assert condition in fire_blockers, condition
 
 
@@ -392,7 +445,9 @@ def test_a_latched_estop_disables_the_controls_and_announces_itself():
     """
     view = LAUNCHER_VIEW.read_text(encoding="utf-8")
     assert "const latched = status?.estop_latched === true;" in view
-    assert "const canActuate = live && !latched;" in view
+    # An unacknowledged shoot kills the controls the same way, so the expression
+    # gained a term — the latch must still be one of them.
+    assert "const canActuate = live && !latched && !awaitingAck;" in view
     # Pitch, yaw, RPM, presets, LEVEL, RELOAD and CENTER all die with the latch.
     assert view.count("disabled={!canActuate}") >= 7, view.count(
         "disabled={!canActuate}")
