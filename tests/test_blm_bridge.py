@@ -82,8 +82,8 @@ class Wire:
 
 
 def make(bridge, *, allow_fire=True, clock=None, wire=None, fitter=None,
-         tmp_path=None, arm_timeout_s=30.0, pitch_min_deg=None,
-         pitch_max_deg=None):
+         tmp_path=None, arm_timeout_s=30.0, shot_ack_timeout_s=5.0,
+         pitch_min_deg=None, pitch_max_deg=None):
     clock = clock or Clock()
     wire = wire or Wire()
     logs: list[str] = []
@@ -93,6 +93,7 @@ def make(bridge, *, allow_fire=True, clock=None, wire=None, fitter=None,
         allow_fire=allow_fire,
         now=clock,
         arm_timeout_s=arm_timeout_s,
+        shot_ack_timeout_s=shot_ack_timeout_s,
         shot_log=(tmp_path / "shots.jsonl") if tmp_path else None,
         model_out=(tmp_path / "model.json") if tmp_path else None,
         fitter=fitter,
@@ -836,6 +837,87 @@ def test_outstanding_request_refuses_every_competing_command(bridge):
         with pytest.raises(bridge.CommandError, match="awaiting firmware"):
             send(bridge, controller, command)
     assert wire.sent[-1] == "shoot"
+
+
+def test_missing_ack_times_out_to_latched_stop_without_a_shot(
+        bridge, fitter, tmp_path):
+    """The firmware has NO refusal message: below 400 RPM `STATE_SHOOTING` holds
+    the pusher and says nothing at all. So a missing acknowledgement is the only
+    detector of a blocked shot, and it must end the session rather than leave a
+    console that looks ready."""
+    controller, wire, logs, clock = make(
+        bridge, fitter=fitter, tmp_path=tmp_path, shot_ack_timeout_s=5.0)
+    ready_to_arm(bridge, controller, clock, rpm=500)
+    send(bridge, controller, "arm")
+    send(bridge, controller, "fire")
+    clock.advance(5.0)
+    controller.refresh_safety()
+
+    assert controller.state.estop_latched
+    # The request is KEPT, not discarded: a late acknowledgement must still be
+    # recognisable rather than arriving as an unexplained one.
+    assert controller.state.fire_request is not None
+    assert controller.state.fire_request.timed_out
+    assert controller.state.shots_fired == 0
+    assert controller.state.pending_shot is None
+    assert wire.sent[-1] == "stop"
+    assert any("below 400 RPM" in line and "outcome unknown" in line
+               for line in logs)
+    rows = [json.loads(line) for line in
+            (tmp_path / "shots.jsonl").read_text().splitlines()]
+    assert [row["event"] for row in rows] == [
+        "shot_requested", "shot_confirmation_timeout"]
+
+
+def test_timeout_latches_even_when_the_stop_write_fails(bridge, fitter, tmp_path):
+    """Same asymmetry the supervisor keeps for a failed stop: a stop whose
+    transmission failed must never leave the console looking live.
+
+    What this pins is that the latch does not DEPEND on the write succeeding —
+    not the order of two statements. The bridge gets there two ways (latching
+    first, and guarding the write), and either alone would satisfy the property;
+    removing both is what this catches, including the exception then escaping
+    the heartbeat and killing the thread that resolves every later shot.
+    """
+    wire = Wire(fail_on="stop")
+    controller, _, _, clock = make(
+        bridge, fitter=fitter, tmp_path=tmp_path, wire=wire,
+        shot_ack_timeout_s=5.0)
+    ready_to_arm(bridge, controller, clock, rpm=500)
+    send(bridge, controller, "arm")
+    send(bridge, controller, "fire")
+    clock.advance(5.0)
+    controller.refresh_safety()
+    assert controller.state.estop_latched
+    assert controller.state.fire_request.timed_out
+    assert controller.state.shots_fired == 0
+
+
+def test_orphan_front_limit_ack_latches_and_stops(bridge, fitter, tmp_path):
+    """Physical travel the console cannot explain. Whatever else is true, the
+    evidence state is no longer trustworthy, so the session ends."""
+    controller, wire, _, _ = make(bridge, fitter=fitter, tmp_path=tmp_path)
+    controller.note_serial_line(SHOT_ACK)
+    assert controller.state.estop_latched
+    assert wire.sent == ["stop"]
+    rows = [json.loads(line) for line in
+            (tmp_path / "shots.jsonl").read_text().splitlines()]
+    assert [row["event"] for row in rows] == ["orphan_shot_ack"]
+
+
+def test_clear_cannot_recover_an_unknown_shot_outcome(bridge, fitter, tmp_path):
+    """CLEAR releases an ESTOP the operator caused. It must not release one that
+    stands for "a ball may or may not be on the floor" — that needs the chamber
+    inspected after confirmed spin-down, i.e. a new session."""
+    controller, _, _, clock = make(
+        bridge, fitter=fitter, tmp_path=tmp_path, shot_ack_timeout_s=5.0)
+    ready_to_arm(bridge, controller, clock, rpm=500)
+    send(bridge, controller, "arm")
+    send(bridge, controller, "fire")
+    clock.advance(5.0)
+    controller.refresh_safety()
+    with pytest.raises(bridge.CommandError, match="outcome is unresolved"):
+        send(bridge, controller, "clear")
 
 
 # ---------------------------------- ESTOP latch -----------------------------

@@ -66,6 +66,7 @@ Measurement procedure: docs/protocols/2026-08-03-rpm-speed-measurement.md
 import argparse
 import importlib.util
 import json
+import math
 import os
 import re
 import signal
@@ -117,6 +118,14 @@ PITCH_DEFAULT_MAX_DEG = 30.0
 RPM_MAX = 1200
 RPM_MIN_FIRE = 400
 ARM_TIMEOUT_S = 30.0
+
+# How long a `shoot` may stay unacknowledged before the outcome is declared
+# unknown. Deliberately a starting default, not a commissioned number: S0-S2 do
+# not exercise the physical shot path, so nothing here has yet measured the real
+# command-to-front-limit latency. Tightening it needs that measurement from a
+# separately authorised non-human backstop test, after every preceding gate
+# passes.
+SHOT_ACK_TIMEOUT_S = 5.0
 
 # Wheel confirmation (added 2026-08-07).
 #
@@ -425,6 +434,7 @@ class BlmController:
         allow_fire: bool = False,
         now: Callable[[], float] = time.monotonic,
         arm_timeout_s: float = ARM_TIMEOUT_S,
+        shot_ack_timeout_s: float = SHOT_ACK_TIMEOUT_S,
         shot_log: Optional[Path] = None,
         model_out: Optional[Path] = None,
         fitter=None,
@@ -442,6 +452,12 @@ class BlmController:
         # has been installed.
         self._state_lock = threading.RLock()
         self._arm_timeout_s = arm_timeout_s
+        if not math.isfinite(shot_ack_timeout_s) or shot_ack_timeout_s <= 0:
+            raise ValueError(
+                "shot_ack_timeout_s must be finite and positive, got "
+                f"{shot_ack_timeout_s!r}"
+            )
+        self._shot_ack_timeout_s = float(shot_ack_timeout_s)
         self._shot_log = shot_log
         self._model_out = model_out
         self._fitter = fitter
@@ -492,6 +508,43 @@ class BlmController:
             self.state.armed = False
             self.state.arm_expires_at = 0.0
             self._log(f"ARM cleared — {reason}")
+
+    def refresh_safety(self) -> None:
+        """Everything the console must re-decide without an operator action.
+
+        Called from the heartbeat, so an unacknowledged shot resolves itself
+        rather than waiting for the operator to press something — which they
+        will not do, because the panel is what tells them anything is wrong.
+        """
+        with self._state_lock:
+            self.refresh_arm()
+            request = self.state.fire_request
+            if request is None or request.timed_out:
+                return
+            if (self._now() - request.requested_monotonic
+                    < self._shot_ack_timeout_s):
+                return
+            # Latch and record BEFORE the write, so a stop whose transmission
+            # fails still leaves a console that refuses actuation. Same
+            # asymmetry `_do_stop` already keeps.
+            self.state.estop_latched = True
+            self.state.armed = False
+            self.state.arm_expires_at = 0.0
+            self.state.wheel_rpm = 0.0
+            self._reset_wheel_band()
+            # Marked rather than dropped: the request stays so a LATE exact
+            # acknowledgement is still recognisable as this shot instead of
+            # arriving as an unexplained one. The latch stays set regardless.
+            request.timed_out = True
+            self._append_fire_event("shot_confirmation_timeout", request)
+            self._log(
+                "shot outcome unknown — no front-limit ACK; this includes the "
+                "firmware's silent below 400 RPM refusal. STOP latched by design."
+            )
+            try:
+                self._send("stop")
+            except Exception as error:
+                self._log(f"STOP write failed after ACK timeout: {error}")
 
     # ---- measured flywheel state --------------------------------------
 
@@ -846,6 +899,17 @@ class BlmController:
         self._send("stop")
 
     def _do_clear(self, _intent: Intent) -> None:
+        request = self.state.fire_request
+        if request is not None and request.timed_out:
+            # CLEAR releases a latch the OPERATOR caused. This one stands for "a
+            # ball may or may not be on the floor and the chamber state is
+            # unknown", which no keystroke can resolve — it needs the chamber
+            # inspected after confirmed spin-down, i.e. a new session.
+            self._refuse(
+                f"shot {request.request_seq}'s outcome is unresolved — close the "
+                "console, confirm the wheels have stopped, inspect the chamber, "
+                "and start a new session"
+            )
         if not self.state.estop_latched:
             self._log("nothing latched")
             return
@@ -994,11 +1058,28 @@ class BlmController:
         return True
 
     def _handle_orphan_shot_ack(self) -> None:
-        """The firmware reports physical travel the console cannot explain."""
-        self._log(
-            "WARNING: the firmware reported a front-limit shot with no matching "
-            "request"
-        )
+        """The firmware reports physical travel the console cannot explain.
+
+        Whatever the cause — a second writer on the port, a stale buffer, a
+        firmware fault — the console's model of what the machine has done is
+        now wrong, and a calibration pass built on it would not be evidence.
+        """
+        self.state.estop_latched = True
+        self.state.armed = False
+        self.state.arm_expires_at = 0.0
+        self.state.wheel_rpm = 0.0
+        self._reset_wheel_band()
+        self._write_shot_record({
+            "schema": SHOT_EVIDENCE_SCHEMA,
+            "event": "orphan_shot_ack",
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "session_id": self._session_id,
+        })
+        self._log("orphan firmware shot ACK — STOP latched; session invalid")
+        try:
+            self._send("stop")
+        except Exception as error:
+            self._log(f"STOP write failed after orphan ACK: {error}")
 
     # ---- calibration bookkeeping --------------------------------------
 
@@ -1223,6 +1304,22 @@ class BlmController:
             # The UI gates RECORD SHOT on this and shows whose RPM it will carry,
             # so the operator can see the distance is attaching to the shot they
             # just took rather than to whatever the RPM control currently reads.
+            "shot_ack_timeout_s": self._shot_ack_timeout_s,
+            # Published so the panel can say "awaiting firmware confirmation"
+            # instead of showing a console that merely looks idle.
+            "fire_request": (
+                None if state.fire_request is None else {
+                    "request_seq": state.fire_request.request_seq,
+                    "rpm": state.fire_request.rpm,
+                    "rpm_left_pre_fire": state.fire_request.rpm_left_pre_fire,
+                    "rpm_right_pre_fire": state.fire_request.rpm_right_pre_fire,
+                    "rpm_pre_fire_sample_age_s": (
+                        state.fire_request.rpm_pre_fire_sample_age_s),
+                    "confirmation_age_s": round(
+                        self._now() - state.fire_request.requested_monotonic, 1),
+                    "timed_out": state.fire_request.timed_out,
+                }
+            ),
             "pending_shot": (
                 None if state.pending_shot is None
                 else {"rpm": state.pending_shot.rpm,
@@ -1436,11 +1533,12 @@ def main() -> int:
 
     def heartbeat() -> None:
         # Republishes so the UI sees flywheel telemetry, its AGE and the arm
-        # countdown without having to poll the backend. `refresh_arm` also drops an
-        # arm whose wheels stopped being confirmed, so that state cannot persist
-        # just because no command happened to arrive.
+        # countdown without having to poll the backend. `refresh_safety` also drops
+        # an arm whose wheels stopped being confirmed, and resolves a `shoot` the
+        # firmware never acknowledged — neither state may persist just because no
+        # command happened to arrive.
         while not stop_event.wait(0.5):
-            controller.refresh_arm()
+            controller.refresh_safety()
             publish()
 
     threading.Thread(target=heartbeat, daemon=True).start()
