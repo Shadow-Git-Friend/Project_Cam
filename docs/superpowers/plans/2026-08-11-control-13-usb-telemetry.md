@@ -200,9 +200,9 @@ sendMsg(String(buf0));
 
 Replace the old five-buffer declaration rather than declaring the same names twice.
 
-- [ ] **Step 3: Remove the five `delay(50)` calls from `info`**
+- [ ] **Step 3: Remove the four `delay(50)` calls from `info`**
 
-Delete only the five delays between `sendMsg` calls in the `info` branch. Preserve every field and its order after the new firmware identity line.
+Delete only the four delays between `sendMsg` calls in the `info` branch. Preserve every field and its order after the new firmware identity line.
 
 - [ ] **Step 4: Replace the telemetry block exactly**
 
@@ -240,7 +240,7 @@ Expected: all firmware contracts pass and the control12 digest remains
 git diff --no-index -- control_12_full.ino control_13_full.ino
 ```
 
-Expected differences only: identity constant/messages, one extra INFO line, removal of five 50 ms delays, and replacement of telemetry gates. No command, pin, state transition, RPM threshold, motor calibration, baud, or limit-polarity difference.
+Expected differences only: identity constant/messages, one extra INFO line, removal of four 50 ms delays, and replacement of telemetry gates. No command, pin, state transition, RPM threshold, motor calibration, baud, or limit-polarity difference.
 Because the files are intentionally different, `git diff --no-index` exits `1`;
 that status means "differences found" here and is expected. Review the diff
 contents rather than treating this one command as a failed verification.
@@ -397,7 +397,7 @@ Directly below `## BLM Firmware (control_12_full.ino — current)` in `CLAUDE.md
 ### Candidate: control_13_full.ino (not deployed until S0)
 - Command grammar, 921600 baud, pins, limits and state machine remain control12-compatible.
 - Adds `INFO | FW: control_13` identity and unconditional 4 Hz USB actual-RPM telemetry while IDLE, including coast-down and zero.
-- Removes the five blocking `delay(50)` calls from `info`.
+- Removes the four blocking `delay(50)` calls from `info`.
 - Do not call it current until it compiles, is flashed deliberately, and passes S0 identity/serial.
 ```
 

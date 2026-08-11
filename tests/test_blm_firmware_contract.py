@@ -9,7 +9,6 @@ import hashlib
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL_12 = ROOT / "control_12_full.ino"
 CONTROL_13 = ROOT / "control_13_full.ino"
@@ -60,6 +59,25 @@ def test_control_13_is_explicitly_identifiable_and_protocol_compatible():
         "pinMode(LIMIT_BALL_PIN, INPUT_PULLUP);",
     ):
         assert invariant in old and invariant in new
+
+
+def test_control_13_command_grammar_is_the_control_12_grammar():
+    """Pin the public command set independently of the equality comparison.
+
+    If both sketches accidentally gain or lose the same command they still match
+    each other; this explicit vocabulary makes that drift fail as well.
+    """
+    expected_exact = {
+        "shoot", "reload", "setzero", "center", "stop", "info",
+    }
+    expected_prefixes = {
+        "set ", "jsset", "jfspeedset", "jfaccelset",
+        "jv", "jh", "js", "jf",
+    }
+    assert firmware_commands(text(CONTROL_12)) == (
+        expected_exact, expected_prefixes)
+    assert firmware_commands(text(CONTROL_13)) == (
+        expected_exact, expected_prefixes)
 
 
 def test_control_13_idle_telemetry_is_not_ble_pwm_or_zero_gated():

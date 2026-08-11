@@ -98,7 +98,7 @@ On a successful serial write, the bridge:
 While an acknowledgement is outstanding, all commands which could change the
 physical outcome are refused. `STOP` and process shutdown remain available at
 all times. In particular, `info` is not auto-polled during this interval: the
-current firmware spends 250 ms inside five `delay(50)` calls, during which the
+current firmware spends 200 ms inside four `delay(50)` calls, during which the
 cooperative stepper state machine does not run.
 
 The exact front-limit line finalizes the request once:
@@ -316,10 +316,10 @@ bridge to measured RPM (`<50` for approach), never by a firmware PWM proxy.
 
 #### 3. Non-blocking `info`
 
-Remove all five `delay(50)` calls from the `info` handler. The response remains a
+Remove all four `delay(50)` calls from the `info` handler. The response remains a
 snapshot with the same existing fields plus firmware identity. No command handler
 may deliberately stall `vertStepper.run()`, `horzStepper.run()`, or
-`pusherStepper.run()` for 250 ms.
+`pusherStepper.run()` for 200 ms.
 
 #### Slice 2 acceptance and hardware order
 

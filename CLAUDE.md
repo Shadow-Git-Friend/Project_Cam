@@ -38,6 +38,13 @@
 - Training drills (GK + field player, **9 in the registry**): `Parallel_working/run_training_drill.sh <drill> [--layout split|swap|none]` — spawns viewer (UDP broadcast) + athlete scoreboard, both opening together tiled on the two screen halves; drill state machines in `src/project_cam/training/drills.py`, board in `garage_lab_combined/scripts/training_drill.py`, catalog in the desktop TRAINING view. Ids: `balance`, `shuttle`, `line_hops`, `gk_save`, `gk_updown`, `reaction_zones`, `cmj`, `hop_symmetry`, `reactive_cut`
 
 ## BLM Firmware (control_12_full.ino — current)
+
+### Candidate: control_13_full.ino (not deployed until S0)
+- Command grammar, 921600 baud, pins, limits and state machine remain control12-compatible.
+- Adds `INFO | FW: control_13` identity and unconditional 4 Hz USB actual-RPM telemetry while IDLE, including coast-down and zero.
+- Removes the four blocking `delay(50)` calls from `info`.
+- Do not call it current until it compiles, is flashed deliberately, and passes S0 identity/serial.
+
 - **Serial baud: 921600** (was 115200 in control_11)
 - **Limit switches: PULLUP, triggered on LOW** (was PULLDOWN+HIGH in control_11)
 - BLE name: `RoboLauncher` (USB serial backup also active)

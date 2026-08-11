@@ -943,7 +943,7 @@ def test_only_the_exact_front_limit_line_confirms_a_shot(
 def test_outstanding_request_refuses_every_competing_command(bridge):
     """While the outcome of a physical shot is unknown, nothing may change it.
     STOP and shutdown stay available; `info` is refused because the current
-    firmware spends 250 ms inside five delay(50) calls, during which the
+    firmware spends 200 ms inside four delay(50) calls, during which the
     cooperative stepper state machine does not run."""
     controller, wire, _, clock = make(bridge)
     ready_to_arm(bridge, controller, clock, rpm=500)
