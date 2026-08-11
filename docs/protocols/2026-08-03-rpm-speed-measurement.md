@@ -54,6 +54,16 @@ the declared mechanical envelope without spinning the flywheels:
 2. Press **POLL FIRMWARE**. Require wheels `0/0`, feeder `IDLE`, and visually
    confirm the barrel is in the intended zero position. Telemetry angles are
    commanded values, not position feedback.
+   On `control_12` this single poll is also what proves the console can read the
+   machine at all: `MEASURED` and `BALL SWITCH` must both populate from the
+   reply. If they stay `— / —` and `NOT POLLED`, stop — the console is not
+   seeing the firmware, and every later verdict would be built on nothing.
+   That snapshot is a snapshot: the stopped verdict correctly goes back to
+   `DO NOT APPROACH` once it ages past two seconds, because `control_12` sends
+   its continuous `L:/R:` stream only to a connected BLE client and therefore
+   nothing arrives over USB unless you poll again. A **spin-only** check — commanding
+   RPM and watching the stream follow the wheels down through coast-down to a
+   fresh zero — is not possible on this firmware and waits for `control_13`.
 3. Press **SET ZERO**. If the barrel was moved by hand, do not reuse stale travel
    numbers: with drive power removed, measure the unobstructed pitch travel from
    this zero, restore the mechanism, and enter it as **TRAVEL DOWN / UP → APPLY
@@ -149,21 +159,70 @@ aim control.
 For each of five shots with the same ball:
 
 1. Press **RELOAD** with wheel command zero and the ball in the vertical lift.
+   RELOAD is not optional bookkeeping: the firmware homes both aim axes and zeroes
+   the wheel targets, so it is what puts the machine into a known state, and the
+   console refuses to **ARM** without one since the last shot. `NEXT` names this.
 2. Press **POLL FIRMWARE**. Require feeder `IDLE`, `Ball=LOW`, logical aim `0/0`,
-   and unchanged physical YAW marks. Any visible aim motion fails the session.
+   and unchanged physical YAW marks. Any visible aim motion fails the session. The
+   console parses the ball switch into `BALL SWITCH` and warns when it disagrees
+   with `CHAMBER` — that mismatch is the only visible sign of the firmware's 10 s
+   dispense timeout finishing with an empty chamber. The switch informs; it does
+   not gate, because its polarity is inferred from the wiring rather than measured.
+   Each poll now starts its own block with its own age, so three identical replies
+   read as three replies.
 3. Command **500 RPM**. Allow at most 15 seconds for spin-up. Once both measured
    wheels are between 450 and 550 RPM, require three polls spanning at least two seconds;
    both wheels must remain in that band and within 75 RPM of each other.
-   Do not arm during spin-up.
+   Do not arm during spin-up. Since 2026-08-07 this is a gate rather than
+   discipline: **ARM** and the shot itself both require the MEASURED `L:/R:`
+   telemetry to be fresh, inside the band and held for two seconds, and the panel
+   shows the countdown. Before that the gates read only the COMMANDED value, so a
+   shot the firmware refused for low RPM was still recorded as fired.
+   Since 2026-08-11 the window is made of ARRIVALS, and the panel shows both
+   halves — `samples n/3` and `span x/2.0 s`. They fail for different reasons: a
+   short count means poll again, a short span means wait. A gap longer than two
+   seconds restarts the window rather than spanning across it, so three polls
+   taken in quick succession and then left to age do **not** satisfy it, and a
+   single fresh poll arriving after a silence *clears* an existing ARM. On
+   `control_12` this matters directly, because nothing arrives unless you poll:
+   the firmware's continuous `L:/R:` stream is sent only to a connected BLE
+   client, never over USB.
 4. Start side-view slow-motion video with the barrel exit, ruler scale, flight
    region, and first floor contact visible. Recheck the empty controlled area and
    YAW marks, tick room-clear, press **ARM**, then deliberately hold **HOLD TO
    FIRE**. One arm permits one shot.
+   **`shoot` is only a request.** The panel goes to `AWAITING FIRMWARE ACK`, and
+   the shot counter and the distance field appear only after the firmware reports
+   `SYS: SHOT FIRED - FRONT LIMIT HIT`. Nothing else creates a shot record.
+   If that acknowledgement does not arrive, the console latches STOP and records
+   the outcome as unknown — never as a shot. This is the *expected* outcome of the
+   firmware's below-400-RPM refusal, which sends no message at all: `STATE_SHOOTING`
+   simply holds the pusher, so a refused shot and a fired one look identical to
+   anything watching the command. Treat `SHOT OUTCOME UNKNOWN` as a session ender:
+   close the console, confirm spin-down, inspect the chamber, start a new session.
+   It is not a fault in the panel and the latch is not clearable from it.
 5. After the feeder returns to `IDLE`, command wheel RPM zero. Nobody enters the
-   controlled area until both measured values are below 50 RPM.
+   controlled area until both measured values are below 50 RPM. Read this off the
+   console's own verdict, which turns from `DO NOT APPROACH` to `WHEELS CONFIRMED
+   STOPPED` only when the command is zero, the reading is FRESH, and both wheels
+   are under the threshold. A measured value is blanked once its reading goes
+   stale, because a frozen `0 / 0` is exactly what would be misread as permission
+   here — absent telemetry is never a confirmation of a stopped machine.
 6. Measure from the point directly below the barrel exit to the first floor
-   contact. Enter the distance and press **RECORD SHOT**. Retain the video filename,
-   the three stable left/right RPM polls, the YAW-mark check, and any anomaly note.
+   contact. The distance field names the shot it will attach to and the RPM that
+   shot was fired at — confirm it reads `SHOT <n> @ 500 rpm` before recording, and
+   press **RECORD SHOT**. Retain the video filename, the three stable left/right
+   RPM polls, the YAW-mark check, and any anomaly note. Record each shot before
+   firing the next: the console now **refuses** the second shot until the first
+   has its distance, so every ball on the floor keeps exactly one place to attach
+   its measurement. `UNDO` is refused for the same reason while a newer confirmed
+   shot is waiting.
+   The record's `pre-fire L/R` is the last fresh sample that passed the gate
+   *before* `shoot`, and the age beside it is measured at request time. It is
+   **not** RPM sampled at the front-limit event: the firmware suppresses telemetry
+   outside `STATE_IDLE`, so no reading contemporaneous with the shot can exist.
+   The model stays indexed by the COMMANDED RPM, which is the only value a
+   launcher can be told to reproduce.
 
 Press **STOP** and reject the shot if a person enters, a YAW mark moves, `RELOAD`
 moves an aim axis, spin-up misses its deadline or stability window, `Ball=LOW` or
