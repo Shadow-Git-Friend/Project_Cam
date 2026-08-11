@@ -284,20 +284,24 @@ and makes only the protocol/runtime changes below.
 the parsed identity, so a test report can name the firmware actually connected
 rather than infer it from a filename on disk.
 
-Opening the CP2102 asserts DTR and resets the ESP32. The host therefore clears
-only bytes which predate that new boot, **immediately after opening the port**, and
-then waits two seconds for the reset to settle. It must not clear the buffer after
-that wait: `SYS: FW control_13 READY` is emitted at the start of `setup()` and
-would be deleted before the reader starts. Boot-ROM chatter accumulated during
-the wait is handled by the existing `is_noise()` filter; the exact firmware line
-continues through `consume_serial_line()` into the same strict identity parser as
-the solicited `INFO | FW: control_13` fallback.
+Hardware S0 disproved the original assumption that opening this CP2102 resets the
+ESP32: pyserial opened with DTR and RTS both asserted, a pair the auto-reset
+circuit deliberately ignores. The host therefore performs an explicit normal-app
+hard reset. It deasserts DTR (IO0 high), asserts RTS (EN low) for 0.1 s, clears
+queued input while the old firmware is unable to refill it, and releases RTS.
 
-The regression test models the actual ordering rather than calling the parser in
-isolation: a fake serial buffer is cleared, the injected settle callback appends
-the boot identity, and the buffered line must still reach controller status. This
-keeps `UNVERIFIED` meaningful — it is the absence of firmware evidence, not an
-artifact of the host throwing that evidence away.
+The reader starts immediately after reset release and drains the port during the
+two-second operator-command settle window. Waiting before starting the reader is
+not safe on this link: queued CP2102 USB URBs filled the roughly 4 KiB tty input
+queue with old `L:0 R:0` records and displaced the beginning of the new boot,
+including its identity. Boot-ROM chatter is handled by the existing `is_noise()`
+filter; the exact firmware line continues through `consume_serial_line()` into
+the same strict identity parser as the solicited `INFO | FW: control_13` fallback.
+
+The regression tests model both physical boundaries: the exact DTR/RTS/reset/
+flush order, and the reader starting before the settle delay. This keeps
+`UNVERIFIED` meaningful — it is the absence of firmware evidence, not an artifact
+of the host failing to reset the board or overflowing its input queue.
 
 The baud rate (921600), commands, limit polarity, BLE name, and mechanical state
 machine remain compatible. Repository inspection found seven Python files which

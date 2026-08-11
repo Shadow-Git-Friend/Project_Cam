@@ -1323,16 +1323,35 @@ def test_firmware_identity_is_parsed_from_boot_and_info(
     assert controller.status()["firmware_id"] == firmware_id
 
 
-def test_serial_open_clears_before_wait_and_preserves_dtr_boot_identity(bridge):
-    """Clear pre-open bytes, then retain the identity emitted during reset."""
+def test_serial_open_hard_resets_into_the_app_and_preserves_boot_identity(bridge):
+    """Opening pyserial alone does not reset this CP2102/ESP32 pair.
+
+    Both modem-control lines start asserted on the real link, a state the
+    ESP32 auto-reset circuit deliberately ignores.  The console must put IO0
+    high, pulse EN low, and only then wait for the application boot record.
+    """
     class BootingSerial:
         def __init__(self):
             self.lines = [b"stale pre-open bytes\n"]
             self.reset_calls = 0
+            self.dtr = True
+            self.rts = True
+            self.events = []
 
         def reset_input_buffer(self):
             self.reset_calls += 1
             self.lines.clear()
+            self.events.append(("reset_input_buffer",))
+
+        def setDTR(self, state):
+            self.dtr = state
+            self.events.append(("dtr", state))
+
+        def setRTS(self, state):
+            self.rts = state
+            self.events.append(("rts", state))
+            if state is False:
+                self.lines.append(b"SYS: FW control_13 READY\n")
 
         def readline(self):
             return self.lines.pop(0)
@@ -1349,24 +1368,56 @@ def test_serial_open_clears_before_wait_and_preserves_dtr_boot_identity(bridge):
     link = BootingSerial()
     serial_module = SerialModule(link)
 
-    def boot_during_settle(seconds):
-        assert seconds == bridge.SERIAL_BOOT_SETTLE_S
-        link.lines.append(b"SYS: FW control_13 READY\n")
+    def record_sleep(seconds):
+        link.events.append(("sleep", seconds))
 
     opened = bridge.open_serial_link(
         serial_module, "/dev/test-control13", 921600,
-        sleep=boot_during_settle,
+        sleep=record_sleep,
     )
     controller, _, _, _ = make(bridge, allow_fire=False)
     raw = opened.readline().decode().strip()
 
     assert serial_module.open_args == ("/dev/test-control13", 921600, 0.1)
     assert opened.reset_calls == 1
+    assert opened.events == [
+        ("dtr", False),       # IO0 high: boot the application, not ROM loader.
+        ("rts", True),        # EN low.
+        ("sleep", bridge.SERIAL_RESET_HOLD_S),
+        # Clear only while the old firmware is unable to refill the input.  The
+        # CP2102 driver can deliver queued USB URBs just after open.
+        ("reset_input_buffer",),
+        ("rts", False),       # EN high: hard reset released.
+    ]
     assert bridge.consume_serial_line(controller, raw)
     assert controller.status()["firmware_id"] == "control_13"
     assert "open_serial_link(serial, args.serial_port, args.baud)" in (
         BRIDGE.read_text(encoding="utf-8")
     )
+
+
+def test_serial_reader_runs_during_the_boot_settle_window(bridge):
+    """The 4 kB tty queue can overflow if nobody drains it during boot.
+
+    `ready` still waits for the firmware to finish setup, but the reader must
+    already be active so the identity at ~0.4 s cannot be displaced by queued
+    telemetry and boot diagnostics.
+    """
+    events = []
+
+    class ReaderThread:
+        def start(self):
+            events.append("reader_started")
+
+    bridge.start_reader_during_boot_settle(
+        ReaderThread(),
+        sleep=lambda seconds: events.append(("sleep", seconds)),
+    )
+
+    assert events == [
+        "reader_started",
+        ("sleep", bridge.SERIAL_BOOT_SETTLE_S),
+    ]
 
 
 def test_unrecognised_text_cannot_claim_the_control_13_identity(bridge):

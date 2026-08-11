@@ -168,6 +168,7 @@ BALL_PRESENT_LEVEL = 0
 # suppresses telemetry while it moves, so a reload/shoot needs a longer grace.
 WRITE_SETTLE_S = 0.3
 SERIAL_BOOT_SETTLE_S = 2.0
+SERIAL_RESET_HOLD_S = 0.1
 
 
 class CommandError(Exception):
@@ -1559,11 +1560,31 @@ def load_fitter(path: Path):
 
 def open_serial_link(serial_module, port: str, baud: int, *,
                      sleep: Callable[[float], None] = time.sleep):
-    """Open CP2102, discard pre-open bytes, then retain DTR boot evidence."""
+    """Open CP2102, hard-reset into the app, and retain boot evidence.
+
+    pyserial opens this link with DTR and RTS both asserted.  The ESP32
+    auto-reset circuit deliberately ignores that pair, so opening the port is
+    not itself evidence that a reset happened.  DTR deasserted holds IO0 high
+    for a normal application boot; the RTS pulse then drives EN low and releases
+    it using Espressif's 0.1 s UART hard-reset timing.
+    """
     ser = serial_module.Serial(port, baud, timeout=0.1)
+    ser.setDTR(False)
+    ser.setRTS(True)
+    sleep(SERIAL_RESET_HOLD_S)
+    # The CP2102/kernel can deliver USB URBs that were queued before open just
+    # after an initial flush.  Clear while EN is low and the old firmware cannot
+    # refill the input, immediately before releasing the new boot.
     ser.reset_input_buffer()
-    sleep(SERIAL_BOOT_SETTLE_S)
+    ser.setRTS(False)
     return ser
+
+
+def start_reader_during_boot_settle(reader_thread, *,
+                                    sleep: Callable[[float], None] = time.sleep):
+    """Drain startup output while still delaying operator command acceptance."""
+    reader_thread.start()
+    sleep(SERIAL_BOOT_SETTLE_S)
 
 
 def main() -> int:
@@ -1669,7 +1690,9 @@ def main() -> int:
                 continue
             emit(f"  <- {raw}")
 
-    threading.Thread(target=reader, daemon=True).start()
+    start_reader_during_boot_settle(
+        threading.Thread(target=reader, daemon=True)
+    )
 
     def heartbeat() -> None:
         # Republishes so the UI sees flywheel telemetry, its AGE and the arm

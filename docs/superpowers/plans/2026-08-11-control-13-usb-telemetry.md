@@ -4,7 +4,7 @@
 
 **Goal:** Create an explicitly identifiable `control_13` firmware candidate which continuously reports actual flywheel RPM over USB through coast-down to zero without blocking the cooperative state machine.
 
-**Architecture:** `control_12_full.ino` remains immutable and deployed until a separate flash checkpoint. `control_13_full.ino` preserves its command grammar, limits, and 921600-baud transport, but removes BLE/PWM suppression from the IDLE telemetry emitter and removes all `info` delays. The host clears buffered serial input immediately after opening the CP2102, waits for the DTR-triggered reset without clearing again, and therefore retains the strict boot identity for the reader. Source-contract tests pin the old firmware hash, the new protocol, and this startup ordering before any hardware interaction.
+**Architecture:** `control_12_full.ino` remains immutable and deployed until a separate flash checkpoint. `control_13_full.ino` preserves its command grammar, limits, and 921600-baud transport, but removes BLE/PWM suppression from the IDLE telemetry emitter and removes all `info` delays. The host explicitly hard-resets the ESP32 into normal application boot, clears queued CP2102 input while EN is held low, and runs the serial reader throughout the remaining settle window so strict boot identity cannot be displaced by the tty queue. Source-contract tests pin the old firmware hash, the new protocol, and this startup ordering before any hardware interaction.
 
 **Tech Stack:** ESP32 Arduino C++, Python 3.10 source-contract tests, pytest, existing Python serial consumers, React/TypeScript identity display.
 
@@ -24,7 +24,7 @@
 - `control_12_full.ino` — immutable deployed firmware reference.
 - `control_13_full.ino` — new candidate with observable identity and non-blocking USB telemetry.
 - `tests/test_blm_firmware_contract.py` — immutable-hash, protocol, telemetry, delay, and serial-consumer contracts.
-- `garage_lab_combined/scripts/blm_bridge.py` — preserve boot input across DTR settle, then parse and publish firmware identity.
+- `garage_lab_combined/scripts/blm_bridge.py` — explicitly reset into the app and drain boot input during settle, then parse and publish firmware identity.
 - `tests/test_blm_bridge.py` — serial-open ordering plus identity parser/status behavior.
 - `project-cam-desktop/src/blm.ts` — additive `firmware_id` status field.
 - `project-cam-desktop/src/views/LauncherView.tsx` — visible firmware identity.
@@ -488,127 +488,52 @@ hardware S0-S2: NOT ATTEMPTED
 
 Stop here. Do not convert the compile block into an installation or GUI action without explicit operator approval.
 
-### Task 5A: Preserve the boot identity through DTR settle
+### Task 5A: Preserve boot identity through an explicit hard reset
+
+The original software-only plan assumed that opening pyserial resets this
+CP2102/ESP32 pair. Hardware S0 disproved that assumption: the port opened with
+DTR and RTS both asserted and the running firmware continued uninterrupted.
+S0 also exposed a second boundary — waiting two seconds before starting the
+reader allowed queued USB URBs to fill the tty input queue and displace the new
+boot identity.
 
 **Files:**
-- Modify: `garage_lab_combined/scripts/blm_bridge.py:78-100,1598-1615`
-- Test: `tests/test_blm_bridge.py:1307-1342`
+- Modify: `garage_lab_combined/scripts/blm_bridge.py`
+- Test: `tests/test_blm_bridge.py`
 
-- [ ] **Step 1: Write the failing serial-open ordering test**
+- [x] **Step 1: Model the real modem-control state and verify RED**
 
-Add beside the existing firmware-identity tests:
+The serial fake starts with DTR/RTS asserted and emits its boot identity only
+when RTS releases EN. The test requires this exact sequence:
 
-```python
-def test_serial_open_clears_before_wait_and_preserves_dtr_boot_identity(bridge):
-    """Clear pre-open bytes, then retain the identity emitted during reset."""
-    class BootingSerial:
-        def __init__(self):
-            self.lines = [b"stale pre-open bytes\n"]
-            self.reset_calls = 0
-
-        def reset_input_buffer(self):
-            self.reset_calls += 1
-            self.lines.clear()
-
-        def readline(self):
-            return self.lines.pop(0)
-
-    class SerialModule:
-        def __init__(self, link):
-            self.link = link
-            self.open_args = None
-
-        def Serial(self, port, baud, timeout):
-            self.open_args = (port, baud, timeout)
-            return self.link
-
-    link = BootingSerial()
-    serial_module = SerialModule(link)
-
-    def boot_during_settle(seconds):
-        assert seconds == bridge.SERIAL_BOOT_SETTLE_S
-        link.lines.append(b"SYS: FW control_13 READY\n")
-
-    opened = bridge.open_serial_link(
-        serial_module, "/dev/test-control13", 921600,
-        sleep=boot_during_settle,
-    )
-    controller, _, _, _ = make(bridge, allow_fire=False)
-    raw = opened.readline().decode().strip()
-
-    assert serial_module.open_args == ("/dev/test-control13", 921600, 0.1)
-    assert opened.reset_calls == 1
-    assert bridge.consume_serial_line(controller, raw)
-    assert controller.status()["firmware_id"] == "control_13"
-    assert "open_serial_link(serial, args.serial_port, args.baud)" in (
-        BRIDGE.read_text(encoding="utf-8")
-    )
+```text
+DTR=false (IO0 high)
+RTS=true  (EN low)
+wait 0.1 s
+reset_input_buffer while EN remains low
+RTS=false (EN high)
 ```
 
-- [ ] **Step 2: Run the new test and verify RED**
+The old implementation failed because it never performed that pulse.
 
-Run:
+- [x] **Step 2: Model reader/settle ordering and verify RED**
 
-```bash
-/home/hanush/Desktop/ProjectCam/venv/bin/python -m pytest \
-  tests/test_blm_bridge.py::test_serial_open_clears_before_wait_and_preserves_dtr_boot_identity \
-  -q -p no:cacheprovider -o addopts=
-```
+A second test requires the serial reader to start before the two-second settle
+delay. The old implementation failed because `open_serial_link()` slept before
+the reader existed.
 
-Expected: FAIL with `AttributeError: module 'blm_bridge' has no attribute 'open_serial_link'`.
+- [x] **Step 3: Implement the smallest host correction**
 
-- [ ] **Step 3: Implement the serial-open boundary**
+`open_serial_link()` performs the explicit normal-app reset and returns as soon
+as EN is released. `start_reader_during_boot_settle()` starts the reader first,
+then delays command acceptance for `SERIAL_BOOT_SETTLE_S`.
 
-Beside the other bridge constants add:
+- [x] **Step 4: Verify software and hardware**
 
-```python
-SERIAL_BOOT_SETTLE_S = 2.0
-```
-
-Before `main()` add:
-
-```python
-def open_serial_link(serial_module, port: str, baud: int, *,
-                     sleep: Callable[[float], None] = time.sleep):
-    """Open CP2102, discard pre-open bytes, then retain DTR boot evidence."""
-    ser = serial_module.Serial(port, baud, timeout=0.1)
-    ser.reset_input_buffer()
-    sleep(SERIAL_BOOT_SETTLE_S)
-    return ser
-```
-
-Replace the current open/sleep/reset sequence in `main()` with:
-
-```python
-    try:
-        ser = open_serial_link(serial, args.serial_port, args.baud)
-    except Exception as error:  # noqa: BLE001 - surfaced to the operator log
-        emit(f"[BLM] ERROR: could not open {args.serial_port}: {error}")
-        return 2
-```
-
-The reset is intentionally before the wait. Do not add any second buffer reset:
-the reader must receive the boot identity emitted during that wait.
-
-- [ ] **Step 4: Run identity and bridge regression tests**
-
-```bash
-/home/hanush/Desktop/ProjectCam/venv/bin/python -m pytest \
-  tests/test_blm_bridge.py tests/test_desktop_launcher_console.py \
-  -q -p no:cacheprovider -o addopts=
-/home/hanush/Desktop/ProjectCam/venv/bin/python -m ruff check \
-  garage_lab_combined/scripts/blm_bridge.py tests/test_blm_bridge.py
-```
-
-Expected: all tests and lint pass.
-
-- [ ] **Step 5: Commit the boot-path fix**
-
-```bash
-git add garage_lab_combined/scripts/blm_bridge.py tests/test_blm_bridge.py
-git diff --cached --check
-git commit -m "fix(blm): retain firmware identity after DTR reset"
-```
+The targeted tests failed before the fix and passed afterward. The focused BLM
+suite and ruff passed. Hardware S0 then reported `control_13` before the first
+POLL, followed by fresh continuous zero-RPM telemetry; no firmware reflash was
+needed because this correction is entirely on the host.
 
 ### Task 6: Operator-controlled compile, flash, and S0–S2
 
