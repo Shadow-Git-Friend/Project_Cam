@@ -1171,6 +1171,61 @@ def test_an_unwritable_shot_log_warns_but_does_not_end_the_session(
 
 # --------------------------------- serial reading ---------------------------
 
+def test_the_recorded_control_12_info_rpm_line_is_telemetry(bridge):
+    """The exact lines the stand produced on 2026-08-11. The firmware answered
+    with real numbers and the panel showed `— / —`, because the parser accepted
+    only the compact `L:<n> R:<n>` stream — which `control_12` emits solely to a
+    connected BLE client, never over USB."""
+    assert bridge.parse_telemetry("INFO | RPM: L=22/0, R=8/0") == (22.0, 8.0)
+    assert bridge.parse_telemetry(
+        "INFO | RPM: L=500/500, R=493/500") == (500.0, 493.0)
+
+    # A measured RPM is the input to `safe_to_approach` — the decision to walk in
+    # front of the barrel — so it may only come from a line whose WHOLE shape the
+    # console recognises. An echo or a quoted fragment is not a measurement.
+    for not_a_reading in (
+        ">>> INFO | RPM: L=500/500, R=500/500",
+        "echo INFO | RPM: L=500/500, R=500/500",
+        "INFO | RPM: L=500/500, R=500/500 (stale)",
+        "INFO | RPM: L=500, R=500",
+    ):
+        assert bridge.parse_telemetry(not_a_reading) is None, not_a_reading
+
+
+@pytest.mark.parametrize(("line", "present"), [
+    ("INFO | LMT: Front=HIGH, Back=LOW, Ball=HIGH", False),
+    ("INFO | LMT: Front=HIGH, Back=LOW, Ball=LOW", True),
+    ("Front:1 Back:0 Ball:1", False),
+    ("Front:1 Back:0 Ball:0", True),
+])
+def test_ball_parser_accepts_control_12_levels_and_legacy_digits(
+        bridge, line, present):
+    """`control_12` prints words, not digits — which is why the panel said NOT
+    POLLED while the firmware was reporting `Ball=HIGH`. LOW stays the present
+    level: the switches are INPUT_PULLUP and trigger on LOW, so this is the same
+    inferred polarity as before, written in the other notation."""
+    assert bridge.parse_ball_state(line) is present
+
+
+def test_info_rpm_updates_telemetry_and_stays_in_the_poll_block(bridge):
+    controller, _, _, _ = make(bridge, allow_fire=False)
+    echoed = bridge.consume_serial_line(
+        controller, "INFO | RPM: L=22/0, R=8/0")
+    assert echoed
+    assert (controller.state.rpm_left, controller.state.rpm_right) == (22.0, 8.0)
+    assert controller.state.info_lines[-1] == "INFO | RPM: L=22/0, R=8/0"
+
+
+def test_compact_telemetry_updates_state_without_flooding_the_log(bridge):
+    """A solicited poll is evidence the operator asked for and must stay
+    visible; the 4 Hz stream is not, and would bury everything else."""
+    controller, _, _, _ = make(bridge, allow_fire=False)
+    echoed = bridge.consume_serial_line(controller, "L:22 R:8")
+    assert not echoed
+    assert (controller.state.rpm_left, controller.state.rpm_right) == (22.0, 8.0)
+    assert controller.state.info_lines == []
+
+
 def test_boot_noise_is_filtered_and_telemetry_is_parsed_not_logged(bridge):
     for noise in ["ets Jun  8 2016 00:22:57", "rst:0x1 (POWERON_RESET)",
                   "configsip: 0, SPIWP:0xee", "load:0x3fff0030,len:1184",
@@ -1242,19 +1297,26 @@ def test_the_ball_switch_is_parsed_and_warns_but_never_gates(bridge):
     for silent in ["IDLE", "Front:1 Back:0", "Ballistics:1", ""]:
         assert bridge.parse_ball_state(silent) is None, silent
 
-    controller, _, logs, clock = make(bridge)
-    send(bridge, controller, "reload")
-    # The firmware's DISPENSING state also exits on a 10 s TIMEOUT with an empty
-    # chamber, and this warning is the only visible sign of it.
-    controller.note_serial_line("Front:1 Back:1 Ball:1")
-    assert controller.state.ball_present is False
-    assert any("reports no ball" in line for line in logs), logs
+    # The reading now arrives in the notation `control_12` actually prints, and
+    # neither notation may become a gate.
+    for line, present in (
+        ("INFO | LMT: Front=HIGH, Back=LOW, Ball=HIGH", False),
+        ("INFO | LMT: Front=HIGH, Back=LOW, Ball=LOW", True),
+    ):
+        controller, _, logs, clock = make(bridge)
+        send(bridge, controller, "reload")
+        # The firmware's DISPENSING state also exits on a 10 s TIMEOUT with an
+        # empty chamber, and this warning is the only visible sign of it.
+        controller.note_serial_line(line)
+        assert controller.state.ball_present is present, line
+        assert any("reports no ball" in entry for entry in logs) is not present
 
-    # ...and it does not refuse the shot, because the polarity is inferred.
-    send(bridge, controller, "aim 0 0 500")
-    spin_up(controller, clock, 500)
-    send(bridge, controller, "arm")
-    assert controller.state.armed
+        # ...and it does not refuse the shot either way, because the polarity is
+        # inferred from the wiring rather than measured on the stand.
+        send(bridge, controller, "aim 0 0 500")
+        spin_up(controller, clock, 500)
+        send(bridge, controller, "arm")
+        assert controller.state.armed, line
 
 
 def test_a_shot_records_the_measured_rpm_beside_the_commanded_one(

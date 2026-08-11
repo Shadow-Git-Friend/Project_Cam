@@ -1369,19 +1369,43 @@ def is_noise(line: str) -> bool:
     return len(line) > 20 and len(set(line)) <= 2
 
 
+NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+
+# The 4 Hz stream. `control_12` emits it only to a connected BLE client, so over
+# USB alone it never arrives — which is exactly why the second form below has to
+# work.
+COMPACT_RPM = re.compile(
+    rf"^L:\s*(?P<left>{NUMBER})\s+R:\s*(?P<right>{NUMBER})(?:\s|$)")
+# A solicited `info` reply, and on `control_12` the ONLY way a measured RPM
+# reaches this console. The `/target` half is deliberately matched and discarded:
+# the bridge already owns the commanded value, and reading the machine's echo of
+# it back as though it were independent evidence is how a commanded number gets
+# mistaken for a measured one.
+INFO_RPM = re.compile(
+    rf"^INFO \| RPM:\s*L=(?P<left>{NUMBER})/{NUMBER},\s*"
+    rf"R=(?P<right>{NUMBER})/{NUMBER}\s*$")
+
+
 def parse_telemetry(line: str) -> Optional[Tuple[float, float]]:
-    """`L:1234 R:1200` -> (left, right). Too chatty for the log, but it is the
-    only continuous evidence that the flywheels are actually spinning."""
-    if not line.startswith("L:") or " R:" not in line:
+    """Measured flywheel RPM from either firmware form -> (left, right).
+
+    Anchored at the start of the line in both cases: a measured RPM is the input
+    to `safe_to_approach`, i.e. to the decision to walk in front of the barrel,
+    so it may only come from a line whose whole shape the console recognises.
+    """
+    match = COMPACT_RPM.match(line) or INFO_RPM.match(line)
+    if match is None:
         return None
     try:
-        left, right = line.split(" R:", 1)
-        return float(left[2:].strip()), float(right.strip().split()[0])
-    except (ValueError, IndexError):
+        return float(match.group("left")), float(match.group("right"))
+    except ValueError:
         return None
 
 
-BALL_FIELD = re.compile(r"\bBall\s*[:=]\s*(\d)\b")
+# `control_12` prints levels (`Ball=HIGH`), older/other firmware prints the pin
+# digit (`Ball:0`). Both are accepted; anything else is not a reading.
+BALL_FIELD = re.compile(
+    r"\bBall\s*[:=]\s*(?P<value>\d+|HIGH|LOW)\b", re.IGNORECASE)
 
 
 def parse_ball_state(line: str) -> Optional[bool]:
@@ -1401,7 +1425,28 @@ def parse_ball_state(line: str) -> Optional[bool]:
     match = BALL_FIELD.search(line)
     if match is None:
         return None
-    return int(match.group(1)) == BALL_PRESENT_LEVEL
+    raw = match.group("value").upper()
+    # HIGH/LOW are the pin LEVELS the firmware prints, so they map onto the same
+    # inferred polarity as the digits — this is a change of notation, not of
+    # meaning, and LOW stays "a ball is there".
+    level = 0 if raw == "LOW" else 1 if raw == "HIGH" else int(raw)
+    return level == BALL_PRESENT_LEVEL
+
+
+def consume_serial_line(controller: BlmController, raw: str) -> bool:
+    """Route one firmware line. True if the operator should see it.
+
+    One router for both forms, because an `info` reply is BOTH a measurement and
+    something the operator asked to see: it updates the flywheel state and stays
+    in the poll block. The compact stream updates the same state silently — at
+    4 Hz it would bury every other line in the log.
+    """
+    telemetry = parse_telemetry(raw)
+    if telemetry is not None:
+        controller.note_telemetry(*telemetry)
+        if raw.startswith("L:"):
+            return False
+    return controller.note_serial_line(raw)
 
 
 def load_fitter(path: Path):
@@ -1519,13 +1564,10 @@ def main() -> int:
                 break
             if not raw or is_noise(raw):
                 continue
-            telemetry = parse_telemetry(raw)
-            if telemetry is not None:
-                # Through the controller, so the band/stability logic and the
-                # arm re-check happen in exactly one place.
-                controller.note_telemetry(*telemetry)
-                continue
-            if not controller.note_serial_line(raw):
+            # One router, so an `info` reply can be both a measurement and a
+            # visible answer. Everything goes through the controller, keeping the
+            # band/stability logic and the arm re-check in exactly one place.
+            if not consume_serial_line(controller, raw):
                 continue
             emit(f"  <- {raw}")
 
