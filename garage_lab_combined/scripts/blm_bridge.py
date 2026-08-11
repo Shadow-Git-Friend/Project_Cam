@@ -24,8 +24,10 @@ is driving:
   * `fire` requires an explicit `arm` first, and ARM EXPIRES (default 30 s)
   * a successful shot AUTO-DISARMS, so every shot needs its own deliberate arm
     ("no autonomous repeated fire" -- the garage firing policy)
-  * `fire` additionally requires a commanded wheel RPM >= 400, mirroring the
-    firmware's own gate, and an aim that was actually sent
+  * `arm` requires a `reload` since the last shot, so a dry cycle cannot be
+    recorded as a shot
+  * `arm` and `fire` require the MEASURED flywheel RPM to agree with the command,
+    freshly and for long enough to be stable -- not merely a commanded number
   * `stop` LATCHES: after it, every actuating intent is refused until `clear`
   * without `--allow-fire` the arm/fire intents do not exist at all
   * any exit path -- normal, signal, exception -- sends `stop`. It does NOT
@@ -38,7 +40,7 @@ Protocol (stdin, one intent per line)
     wheels <wheel_rpm>                      fire        stop       clear
     center            set_zero              info        quit
     limits <pitch_min_deg> <pitch_max_deg>
-    measure <rpm> <landing_distance_m>      undo        fit <height_m> [kind]
+    measure <landing_distance_m>            undo        fit <height_m> [kind]
 
 Protocol (stdout)
 -----------------
@@ -50,6 +52,14 @@ The `measure`/`fit` intents exist so a v(RPM) calibration session never has to
 leave the console: `fit` calls the SAME `scripts/fit_rpm_speed.py` functions the
 launcher reads its model from, rather than reimplementing the arithmetic.
 
+`measure` deliberately takes NO rpm. The protocol requires the wheels commanded
+to zero and confirmed below 50 RPM before anyone may walk downrange to the ball,
+so by the time a distance can be measured the commanded RPM is 0 -- a caller
+supplying it would record 0 for every shot. The RPM is captured by `fire`, at
+the instant the shot was actually taken, and a distance attaches to that
+pending shot. An rpm argument is not merely redundant: it is the one way a wrong
+value could enter the evidence, so the vocabulary does not offer it.
+
 Measurement procedure: docs/protocols/2026-08-03-rpm-speed-measurement.md
 """
 
@@ -57,6 +67,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -67,6 +78,19 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 SCHEMA = "project_cam.blm_console.v1"
 STATUS_PREFIX = "@BLM "
+
+# Shot evidence gets its OWN schema, separate from the status transport, because
+# the word `shot_fired` changed meaning (2026-08-11). Under v1 it was written the
+# moment `shoot` reached the serial writer; under v2 it is written only when the
+# firmware reports the front limit. The four v1 rows already on disk therefore
+# prove a command write and nothing more, and a reader must be able to tell the
+# two apart without knowing which day the file was produced.
+SHOT_EVIDENCE_SCHEMA = "project_cam.blm_shot_evidence.v2"
+
+# The firmware's own proof that a ball physically travelled. Matched EXACTLY: it
+# is the one line that promotes a request into a shot, so a substring or prefix
+# match would let an unrelated message manufacture evidence.
+SHOT_FIRED_ACK = "SYS: SHOT FIRED - FRONT LIMIT HIT"
 
 # Limits are duplicated from .claude/rules/safety.md on purpose: the firmware
 # enforces its own too, and one check is not defence in depth.
@@ -93,6 +117,42 @@ PITCH_DEFAULT_MAX_DEG = 30.0
 RPM_MAX = 1200
 RPM_MIN_FIRE = 400
 ARM_TIMEOUT_S = 30.0
+
+# Wheel confirmation (added 2026-08-07).
+#
+# The firmware reports MEASURED flywheel RPM as `L:<n> R:<n>`, and until now the
+# console collected it and gated on nothing: `arm` and `fire` both read the
+# COMMANDED value. So a shot could be armed and taken 200 ms after commanding 500
+# while the wheels were still at 120 — the firmware's own >=400 gate would refuse
+# it, but the bridge had ALREADY incremented the shot count, created a pending
+# shot and written `shot_fired` to the evidence log. A refused shot was recorded
+# as a real one, and the landing distance of the previous ball could then attach
+# to it.
+#
+# These numbers come from docs/protocols/2026-08-03-rpm-speed-measurement.md,
+# which asked the operator to check them by eye ("both wheels 450-550, difference
+# <= 75, three polls spanning at least two seconds"). Written down as a gate they
+# hold whether or not anyone remembers the step.
+RPM_BAND_FRAC = 0.10          # +/-10 % of the commanded RPM ...
+RPM_BAND_FLOOR = 50.0         # ... and never tighter than +/-50 (the 450-550 at 500)
+RPM_SPREAD_MAX = 75.0         # max |L - R|; a bigger split is not one delivery speed
+WHEELS_STABLE_S = 2.0         # the protocol's "three polls spanning >= 2 s"
+
+# Telemetry older than this is not evidence of anything. The firmware suppresses
+# telemetry while the pusher moves, and a dead reader thread leaves the LAST
+# numbers in place forever — so a frozen "0 / 0" would read as "the wheels are
+# stopped, it is safe to walk out to the ball".
+TELEMETRY_MAX_AGE_S = 2.0
+# Both wheels below this, freshly measured, before anyone may walk downrange.
+RPM_SAFE_APPROACH = 50.0
+
+# `info` prints the limit-switch pin levels (`Front:1 Back:0 Ball:0`). The
+# switches are INPUT_PULLUP and trigger on LOW, so a pressed switch reads 0 and a
+# detected ball is `Ball:0` — which is what the written protocol means by
+# "Ball=LOW". INFERRED from the firmware wiring, not measured here, which is
+# exactly why the ball reading is displayed, recorded and used to warn, but is
+# NOT a gate: an inverted polarity would refuse every shot with a ball loaded.
+BALL_PRESENT_LEVEL = 0
 
 # Serial pacing. The ESP32 answers a command in well under 300 ms; the pusher
 # suppresses telemetry while it moves, so a reload/shoot needs a longer grace.
@@ -201,13 +261,12 @@ def parse_command(line: str) -> Optional[Intent]:
         exact(1)
         return Intent("wheels", (_rpm(rest[0]),))
     if verb == "measure":
-        exact(2)
-        rpm = _rpm(rest[0])
-        distance = _number(rest[1], "landing_distance_m")
+        exact(1)
+        distance = _number(rest[0], "landing_distance_m")
         if distance <= 0 or distance > 60:
             raise CommandError(
                 f"landing_distance_m must be between 0 and 60, got {distance:g}")
-        return Intent("measure", (rpm, distance))
+        return Intent("measure", (distance,))
     if verb == "fit":
         if not rest or len(rest) > 2:
             raise CommandError("fit takes <height_m> [linear|quadratic|interp]")
@@ -232,10 +291,69 @@ def parse_command(line: str) -> Optional[Intent]:
 
 
 @dataclass
+class FireRequest:
+    """A `shoot` that reached the serial writer. NOT yet a shot.
+
+    Below the firmware's 400 RPM gate `STATE_SHOOTING` simply holds the pusher in
+    place and sends nothing at all, so a refused shot and a successful one are
+    indistinguishable to the writer. Only the front-limit acknowledgement tells
+    them apart, and until it arrives this object is the whole record: the outcome
+    is unknown, and no distance may attach to it.
+
+    The pre-fire RPM pair is captured HERE rather than at confirmation because it
+    cannot be re-read later — the firmware gates telemetry on `STATE_IDLE` and is
+    in `STATE_SHOOTING` for the entire acknowledgement window.
+    """
+
+    request_seq: int
+    rpm: float
+    requested_at: str
+    requested_monotonic: float
+    rpm_left_pre_fire: float
+    rpm_right_pre_fire: float
+    rpm_pre_fire_sample_age_s: float
+    pitch_deg: float
+    yaw_deg: float
+    timed_out: bool = False
+
+
+@dataclass
+class PendingShot:
+    """A shot the FIRMWARE confirmed, waiting for its landing distance.
+
+    `rpm` is the wheel RPM commanded at the instant `fire` was accepted, which is
+    the only moment it is knowable: the protocol spins the wheels down before the
+    operator may walk out and measure.
+
+    `rpm_*_pre_fire` are what the flywheels were MEASURED at before the request
+    went out, and `rpm_pre_fire_sample_age_s` is how old that reading already was.
+    The name says `pre_fire` because a contemporaneous measurement is structurally
+    impossible here, and a field called `measured` would invite the reader to
+    assume one. The model stays indexed by the commanded RPM — that is the only
+    value a launcher can be told to reproduce — but a v(RPM) curve whose
+    independent variable was never checked against the machine is not auditable,
+    so both travel together.
+    """
+
+    rpm: float
+    seq: int
+    request_seq: int
+    confirmed_at: str
+    rpm_left_pre_fire: float
+    rpm_right_pre_fire: float
+    rpm_pre_fire_sample_age_s: float
+
+
+@dataclass
 class Measurement:
     rpm: float
     distance_m: float
     at: str
+    shot_seq: int
+    request_seq: int
+    rpm_left_pre_fire: float
+    rpm_right_pre_fire: float
+    rpm_pre_fire_sample_age_s: float
 
 
 @dataclass
@@ -255,7 +373,35 @@ class ConsoleState:
     rpm_left: Optional[float] = None
     rpm_right: Optional[float] = None
     telemetry_at: float = 0.0
+    # When the measured wheels ENTERED the band around the commanded RPM. None
+    # means they are not in it. Reset by any command that changes the target, so a
+    # stability timer can never be inherited from a different RPM.
+    rpm_band_since: Optional[float] = None
+    # Whether a ball has been loaded since the last shot. Bookkeeping the console
+    # is entitled to: it sent the `reload` and it sent the `shoot`. Without it a
+    # second `arm`+`fire` with no reload is a dry cycle that still gets recorded
+    # as a shot, and the ONE ball on the floor then attaches to the wrong one.
+    loaded: bool = False
+    # An aim the operator actually established. Distinct from `pitch_deg`, which
+    # is also filled in by `wheels` (the firmware takes one combined
+    # `set v h wl wr`, so an RPM-only change must still state the angles).
+    aim_established: bool = False
+    # Parsed from `info`, so the operator does not have to read Ball=LOW out of raw
+    # serial text. None until a poll has been seen.
+    ball_present: Optional[bool] = None
+    ball_seen_at: float = 0.0
+    info_at: float = 0.0
+    # Dedup memory for the serial reader. Held here rather than in the reader
+    # closure so that requesting `info` can RESET it — see `_do_info`.
+    last_serial_line: str = ""
     shots_fired: int = 0
+    # `shoot` commands written to the port. Deliberately distinct from
+    # `shots_fired`, which counts only firmware-confirmed physical shots: the gap
+    # between the two IS the diagnostic.
+    fire_requests_sent: int = 0
+    fire_request: Optional[FireRequest] = None
+    last_confirmed_request_seq: int = 0
+    pending_shot: Optional[PendingShot] = None
     last_refusal: str = ""
     info_lines: List[str] = field(default_factory=list)
     measurements: List[Measurement] = field(default_factory=list)
@@ -289,6 +435,12 @@ class BlmController:
         self._write = write
         self._log = log
         self._now = now
+        # Telemetry and acknowledgements arrive on the reader thread while intents
+        # arrive on the main loop. Re-entrant because `handle()` calls helpers that
+        # read the same state. Held ACROSS the `shoot` write, so a fast
+        # acknowledgement cannot be processed before the request that explains it
+        # has been installed.
+        self._state_lock = threading.RLock()
         self._arm_timeout_s = arm_timeout_s
         self._shot_log = shot_log
         self._model_out = model_out
@@ -324,6 +476,165 @@ class BlmController:
             return 0.0
         return max(0.0, self.state.arm_expires_at - self._now())
 
+    def refresh_arm(self) -> None:
+        """Drop an arm that has expired OR whose wheels are no longer confirmed.
+
+        An armed console whose flywheels cannot be verified is the same misleading
+        state as a latched ESTOP with live-looking controls: the panel says the
+        next hold fires a shot, and the machine may not be able to. Called from
+        `handle` and from the heartbeat, so it holds without an operator action.
+        """
+        self.expire_arm()
+        if not self.state.armed:
+            return
+        reason = self.wheels_unconfirmed_reason()
+        if reason is not None:
+            self.state.armed = False
+            self.state.arm_expires_at = 0.0
+            self._log(f"ARM cleared — {reason}")
+
+    # ---- measured flywheel state --------------------------------------
+
+    def note_telemetry(self, left: float, right: float) -> None:
+        """Absorb one `L:<n> R:<n>` reading.
+
+        Lives on the controller rather than in the reader thread so the band and
+        stability logic is testable without a serial port, and so there is exactly
+        one implementation of "the wheels agree with the command".
+        """
+        with self._state_lock:
+            now = self._now()
+            self.state.rpm_left = left
+            self.state.rpm_right = right
+            self.state.telemetry_at = now
+            if self._rpm_in_band(left, right):
+                if self.state.rpm_band_since is None:
+                    self.state.rpm_band_since = now
+            else:
+                self.state.rpm_band_since = None
+            self.refresh_arm()
+
+    def _reset_wheel_band(self) -> None:
+        """Forget the stability timer. Any change of target invalidates it."""
+        self.state.rpm_band_since = None
+
+    def rpm_band(self) -> float:
+        """Half-width of the acceptance band around the commanded RPM."""
+        return max(RPM_BAND_FLOOR, RPM_BAND_FRAC * self.state.wheel_rpm)
+
+    def _rpm_in_band(self, left: float, right: float) -> bool:
+        commanded = self.state.wheel_rpm
+        band = self.rpm_band()
+        return (abs(left - commanded) <= band
+                and abs(right - commanded) <= band
+                and abs(left - right) <= RPM_SPREAD_MAX)
+
+    def telemetry_age_s(self) -> Optional[float]:
+        """Seconds since the last flywheel reading, or None if there never was one.
+
+        Published, because the number itself is worthless without it: the panel's
+        "MEASURED 0 rpm" is what the operator reads before walking downrange.
+        """
+        if self.state.telemetry_at == 0.0:
+            return None
+        return max(0.0, self._now() - self.state.telemetry_at)
+
+    def wheels_unconfirmed_reason(self) -> Optional[str]:
+        """None when the MEASURED wheels agree with the command; else why not."""
+        age = self.telemetry_age_s()
+        if age is None:
+            return ("no flywheel telemetry has arrived on this link, so the "
+                    "console cannot tell whether the wheels are spinning")
+        if age > TELEMETRY_MAX_AGE_S:
+            return (f"the last flywheel reading is {age:.1f} s old "
+                    f"(limit {TELEMETRY_MAX_AGE_S:.0f} s)")
+        left, right = self.state.rpm_left, self.state.rpm_right
+        if left is None or right is None:
+            return "no flywheel reading has been parsed yet"
+        if abs(left - right) > RPM_SPREAD_MAX:
+            return (f"the wheels disagree: L={left:.0f} R={right:.0f}, over the "
+                    f"{RPM_SPREAD_MAX:.0f} RPM spread limit")
+        band = self.rpm_band()
+        commanded = self.state.wheel_rpm
+        if abs(left - commanded) > band or abs(right - commanded) > band:
+            return (f"measured L={left:.0f} R={right:.0f} is outside the "
+                    f"commanded {commanded:.0f} +/-{band:.0f} RPM")
+        return None
+
+    def wheels_in_band_s(self) -> float:
+        if self.state.rpm_band_since is None:
+            return 0.0
+        return max(0.0, self._now() - self.state.rpm_band_since)
+
+    def safe_to_approach(self) -> bool:
+        """Whether the machine itself says the flywheels are stopped.
+
+        Deliberately conservative in three independent ways: the command must be
+        zero, the reading must be FRESH, and both wheels must be under the
+        threshold. Absent telemetry is never "safe" — the whole failure mode being
+        guarded is a stale zero that reads like a stopped machine.
+        """
+        if self.state.wheel_rpm != 0:
+            return False
+        age = self.telemetry_age_s()
+        if age is None or age > TELEMETRY_MAX_AGE_S:
+            return False
+        left, right = self.state.rpm_left, self.state.rpm_right
+        if left is None or right is None:
+            return False
+        return left < RPM_SAFE_APPROACH and right < RPM_SAFE_APPROACH
+
+    # ---- serial input -------------------------------------------------
+
+    def note_serial_line(self, raw: str) -> bool:
+        """Absorb one non-telemetry firmware line. True if it is worth echoing.
+
+        Consecutive identical lines are collapsed (boot spam, repeated warnings),
+        but `_do_info` clears the memory first, so a SOLICITED reply is never the
+        thing that gets deduplicated away. That was a real defect: the protocol
+        asks for three polls spanning two seconds to prove the machine is stable,
+        a stable machine answers with IDENTICAL text, and the 2nd and 3rd replies
+        vanished — the more stable the rig, the less visible the confirmation.
+        """
+        with self._state_lock:
+            # BEFORE the dedup, and not merely as an optimisation: two consecutive
+            # shots produce two IDENTICAL acknowledgement lines, so a
+            # dedup-first order would swallow the second one and leave a real
+            # shot permanently unconfirmed. Idempotence is decided by the request
+            # state instead, which is the thing that actually distinguishes them.
+            if raw == SHOT_FIRED_ACK:
+                return self._confirm_fire_request()
+            if raw == self.state.last_serial_line:
+                return False
+            self.state.last_serial_line = raw
+            self.state.info_lines.append(raw)
+            del self.state.info_lines[:-12]
+            if self.state.info_at == 0.0:
+                self.state.info_at = self._now()
+            return self._note_ball_state(raw)
+
+    def _note_ball_state(self, raw: str) -> bool:
+        ball = parse_ball_state(raw)
+        if ball is not None:
+            self.state.ball_present = ball
+            self.state.ball_seen_at = self._now()
+            if self.state.loaded and not ball:
+                # Not a refusal: the polarity of this reading is inferred from the
+                # firmware wiring, so it warns rather than blocking a session. It
+                # is also the ONLY evidence of the reload timeout path, where the
+                # feeder gives up after 10 s and IDLEs with no ball.
+                self._log(
+                    "WARNING: the firmware reports no ball at the feeder, but a "
+                    "reload was sent — reload may have timed out. Check the "
+                    "chamber before firing."
+                )
+        return True
+
+    def info_age_s(self) -> Optional[float]:
+        if self.state.info_at == 0.0:
+            return None
+        return max(0.0, self._now() - self.state.info_at)
+
     # ---- gates --------------------------------------------------------
 
     def _require_live(self, kind: str) -> None:
@@ -337,10 +648,23 @@ class BlmController:
     # ---- intents ------------------------------------------------------
 
     def handle(self, intent: Intent) -> None:
-        self.expire_arm()
-        self._require_live(intent.kind)
-        handler = getattr(self, f"_do_{intent.kind}")
-        handler(intent)
+        with self._state_lock:
+            # An outstanding request means a ball may or may not have left the
+            # barrel. Nothing that could change the physical outcome — or the
+            # evidence it will attach to — is allowed until that is resolved.
+            # STOP and DISARM stay reachable because they only ever reduce
+            # capability; CLEAR is listed so it reaches its own refusal rather
+            # than this generic one.
+            if (self.state.fire_request is not None
+                    and intent.kind not in ("stop", "disarm", "clear")):
+                self._refuse(
+                    "no confirmed shot — shoot request is awaiting firmware "
+                    "confirmation"
+                )
+            self.refresh_arm()
+            self._require_live(intent.kind)
+            handler = getattr(self, f"_do_{intent.kind}")
+            handler(intent)
 
     def _do_aim(self, intent: Intent) -> None:
         pitch_raw, yaw_raw, rpm = intent.args
@@ -360,7 +684,10 @@ class BlmController:
                 f"limit {low:g} deg — the barrel meets the ball feeder past it. "
                 "Use `limits` to declare a measured envelope if there is more room."
             )
+        if rpm != self.state.wheel_rpm:
+            self._reset_wheel_band()
         self.state.pitch_deg, self.state.yaw_deg = pitch, yaw
+        self.state.aim_established = True
         self.state.wheel_rpm = rpm
         # Changing the aim invalidates the operator's clearance judgement.
         if self.state.armed:
@@ -370,8 +697,15 @@ class BlmController:
 
     def _do_wheels(self, intent: Intent) -> None:
         (rpm,) = intent.args
+        # The firmware takes ONE combined `set v h wl wr`, so an RPM-only change
+        # must still state the angles. Filling in 0/0 when nothing was aimed does
+        # NOT count as an aim the operator established: otherwise pressing an RPM
+        # preset alone satisfied the "send an aim before arming" gate with an angle
+        # nobody chose.
         pitch = self.state.pitch_deg if self.state.pitch_deg is not None else 0.0
         yaw = self.state.yaw_deg if self.state.yaw_deg is not None else 0.0
+        if rpm != self.state.wheel_rpm:
+            self._reset_wheel_band()
         self.state.pitch_deg, self.state.yaw_deg = pitch, yaw
         self.state.wheel_rpm = rpm
         if self.state.armed and rpm < RPM_MIN_FIRE:
@@ -390,7 +724,15 @@ class BlmController:
         self.state.arm_expires_at = 0.0
         self.state.pitch_deg = 0.0
         self.state.yaw_deg = 0.0
+        # Reload homes the axes, so 0/0 is an aim the machine really holds.
+        self.state.aim_established = True
         self.state.wheel_rpm = 0.0
+        self._reset_wheel_band()
+        # The console's own record that a ball was requested. It is bookkeeping,
+        # not detection: the firmware's DISPENSING state also exits on a 10 s
+        # TIMEOUT with no ball, which is why `note_serial_line` warns when a poll
+        # contradicts this.
+        self.state.loaded = True
         self._send("reload")
 
     def _do_center(self, _intent: Intent) -> None:
@@ -405,9 +747,17 @@ class BlmController:
             self._log("centering — ARM cleared")
         self.state.pitch_deg = 0.0
         self.state.yaw_deg = 0.0
+        self.state.aim_established = True
         self._send("center")
 
     def _do_info(self, _intent: Intent) -> None:
+        # Start a fresh block and forget the dedup memory, so THIS poll's reply is
+        # always visible even when it is byte-identical to the previous one. The
+        # protocol's three-polls-over-two-seconds check depends on seeing all
+        # three, and a stable machine answers identically every time.
+        self.state.info_lines = []
+        self.state.last_serial_line = ""
+        self.state.info_at = 0.0
         self._send("info")
 
     def _do_limits(self, intent: Intent) -> None:
@@ -467,6 +817,7 @@ class BlmController:
 
         self.state.pitch_deg = 0.0
         self.state.yaw_deg = 0.0
+        self.state.aim_established = True
         self.state.pitch_min_deg = new_low
         self.state.pitch_max_deg = new_high
         self._log(
@@ -486,6 +837,11 @@ class BlmController:
         self.state.armed = False
         self.state.arm_expires_at = 0.0
         self.state.wheel_rpm = 0.0
+        self._reset_wheel_band()
+        # A stop can land in the middle of a feeder cycle, so after it nothing may
+        # be assumed about the chamber. Requiring another reload is cheap; a dry
+        # shot recorded as a real one is not.
+        self.state.loaded = False
         self._log("STOP — latched; send clear to release")
         self._send("stop")
 
@@ -495,6 +851,7 @@ class BlmController:
             return
         self.state.estop_latched = False
         self._log("ESTOP latch released — wheels are at 0, aim again before firing")
+        self._log("the stop cleared the chamber state — reload before arming")
 
     def _do_arm(self, _intent: Intent) -> None:
         if not self.state.allow_fire:
@@ -503,12 +860,29 @@ class BlmController:
         # but an armed console behind a latched ESTOP is a misleading state.
         if self.state.estop_latched:
             self._refuse("ESTOP latched — send clear before arming")
-        if self.state.pitch_deg is None:
+        if not self.state.aim_established:
             self._refuse("send an aim before arming")
         if self.state.wheel_rpm < RPM_MIN_FIRE:
             self._refuse(
                 f"wheels must be commanded to >= {RPM_MIN_FIRE} RPM before arming "
                 f"(currently {self.state.wheel_rpm:.0f})"
+            )
+        if not self.state.loaded:
+            # Otherwise a second arm+fire with no reload is a dry cycle that still
+            # increments the shot count and writes `shot_fired`, and the single
+            # ball on the floor then attaches to the shot that launched nothing.
+            self._refuse(
+                "no ball has been loaded since the last shot — send reload first"
+            )
+        reason = self.wheels_unconfirmed_reason()
+        if reason is not None:
+            self._refuse(f"the flywheels are not confirmed: {reason}")
+        stable_s = self.wheels_in_band_s()
+        if stable_s < WHEELS_STABLE_S:
+            self._refuse(
+                f"the flywheels have held {self.state.wheel_rpm:.0f} "
+                f"+/-{self.rpm_band():.0f} RPM for only {stable_s:.1f} s — "
+                f"{WHEELS_STABLE_S:.1f} s required"
             )
         self.state.armed = True
         self.state.arm_expires_at = self._now() + self._arm_timeout_s
@@ -529,28 +903,131 @@ class BlmController:
                 f"wheel RPM {self.state.wheel_rpm:.0f} is below the {RPM_MIN_FIRE} "
                 "RPM gate"
             )
+        # Deliberately redundant with `refresh_arm`, which normally clears the arm
+        # first and produces the "not armed" refusal above. The two run in
+        # DIFFERENT THREADS — telemetry arrives on the reader, a shot on the main
+        # loop — so a fire landing between heartbeats must not depend on the
+        # heartbeat having noticed. The commanded value is not evidence: it is what
+        # was asked for, and this is the only check on what happened.
+        reason = self.wheels_unconfirmed_reason()
+        if reason is not None:
+            self._refuse(f"the flywheels are not confirmed: {reason}")
+        if self.state.fire_request is not None:
+            self._refuse("a shoot request is still awaiting firmware confirmation")
+        if self.state.pending_shot is not None:
+            # Two balls on the floor and no way to tell which is which. Refusing
+            # is the only way every physical ball keeps exactly one place to
+            # attach its measurement.
+            self._refuse("record the confirmed shot distance before firing again")
         # Disarm BEFORE the write. If the serial write raises, the console must
         # not be left armed holding a shot the operator believes was refused.
         self.state.armed = False
         self.state.arm_expires_at = 0.0
-        self.state.shots_fired += 1
-        self._send("shoot")
+        sample_age = self.telemetry_age_s()
+        left, right = self.state.rpm_left, self.state.rpm_right
+        if sample_age is None or left is None or right is None:
+            # `wheels_unconfirmed_reason` above already rejects this, so reaching
+            # here would mean the reading vanished between the two checks. Refuse
+            # rather than record a shot with no provenance for its RPM.
+            self._refuse("the pre-fire RPM sample disappeared before shoot")
+        request = FireRequest(
+            request_seq=self.state.fire_requests_sent + 1,
+            rpm=self.state.wheel_rpm,
+            requested_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            requested_monotonic=self._now(),
+            rpm_left_pre_fire=left,
+            rpm_right_pre_fire=right,
+            rpm_pre_fire_sample_age_s=sample_age,
+            pitch_deg=self.state.pitch_deg or 0.0,
+            yaw_deg=self.state.yaw_deg or 0.0,
+        )
+        # Installed BEFORE the write, because the acknowledgement can arrive on
+        # the reader thread the instant the command lands. The state lock held by
+        # `handle` is what makes that ordering safe.
+        self.state.fire_request = request
+        try:
+            self._send("shoot")
+        except Exception:
+            # No ball left the barrel, so this must not burn a sequence number or
+            # leave a request the operator would have to resolve.
+            self.state.fire_request = None
+            raise
+        self.state.fire_requests_sent = request.request_seq
+        self.state.loaded = False
+        self._append_fire_event("shot_requested", request)
         self._log(
-            f"shot {self.state.shots_fired} sent at {self.state.wheel_rpm:.0f} RPM "
-            f"(v={self.state.pitch_deg:.0f} h={self.state.yaw_deg:.0f}) — disarmed"
+            f"shoot request {request.request_seq} sent at {request.rpm:.0f} RPM "
+            f"commanded, wheels last measured L={left:.0f} R={right:.0f} "
+            f"({sample_age:.1f} s before) — awaiting firmware front-limit ACK"
+        )
+
+    def _confirm_fire_request(self) -> bool:
+        """Promote the outstanding request into a shot. The ONLY path that can.
+
+        Called with the state lock held, from `note_serial_line`.
+        """
+        request = self.state.fire_request
+        if request is None:
+            if self.state.last_confirmed_request_seq:
+                # A repeat of the acknowledgement that already promoted a shot.
+                # One ball, one record.
+                return False
+            self._handle_orphan_shot_ack()
+            return True
+        self.state.shots_fired += 1
+        shot = PendingShot(
+            rpm=request.rpm,
+            seq=self.state.shots_fired,
+            request_seq=request.request_seq,
+            confirmed_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            rpm_left_pre_fire=request.rpm_left_pre_fire,
+            rpm_right_pre_fire=request.rpm_right_pre_fire,
+            rpm_pre_fire_sample_age_s=request.rpm_pre_fire_sample_age_s,
+        )
+        self.state.pending_shot = shot
+        self.state.fire_request = None
+        self.state.last_confirmed_request_seq = request.request_seq
+        self._append_shot_fired(shot)
+        self._log(
+            f"shot {shot.seq} confirmed by firmware front limit — awaiting distance"
+        )
+        return True
+
+    def _handle_orphan_shot_ack(self) -> None:
+        """The firmware reports physical travel the console cannot explain."""
+        self._log(
+            "WARNING: the firmware reported a front-limit shot with no matching "
+            "request"
         )
 
     # ---- calibration bookkeeping --------------------------------------
 
     def _do_measure(self, intent: Intent) -> None:
-        rpm, distance = intent.args
-        entry = Measurement(rpm=rpm, distance_m=distance,
-                            at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        (distance,) = intent.args
+        pending = self.state.pending_shot
+        if pending is None:
+            # A distance with no CONFIRMED shot behind it is not a measurement of
+            # anything. Before 2026-08-11 a command write was enough to open this
+            # door, so a distance could be recorded against a shot the firmware
+            # had silently refused.
+            self._refuse(
+                "no confirmed shot is waiting for a distance — fire first, and "
+                "record each shot before taking the next"
+            )
+        entry = Measurement(rpm=pending.rpm, distance_m=distance,
+                            at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            shot_seq=pending.seq,
+                            request_seq=pending.request_seq,
+                            rpm_left_pre_fire=pending.rpm_left_pre_fire,
+                            rpm_right_pre_fire=pending.rpm_right_pre_fire,
+                            rpm_pre_fire_sample_age_s=(
+                                pending.rpm_pre_fire_sample_age_s))
         self.state.measurements.append(entry)
+        self.state.pending_shot = None
         self._append_shot_log(entry)
         self._log(
-            f"recorded {rpm:.0f} RPM -> {distance:.3f} m "
-            f"({len(self.state.measurements)} measurement(s))"
+            f"recorded shot {pending.seq}: {pending.rpm:.0f} RPM -> "
+            f"{distance:.3f} m ({len(self.state.measurements)} measurement(s))"
         )
 
     def _do_undo(self, _intent: Intent) -> None:
@@ -561,7 +1038,19 @@ class BlmController:
         # The JSONL keeps the retraction rather than rewriting history: an
         # operator log that can be silently edited is not evidence.
         self._append_shot_log(dropped, retracted=True)
-        self._log(f"undid {dropped.rpm:.0f} RPM -> {dropped.distance_m:.3f} m")
+        # The shot still happened, so it goes back to awaiting a distance. A
+        # mistyped distance must cost a re-entry, never a re-shoot.
+        self.state.pending_shot = PendingShot(
+            rpm=dropped.rpm, seq=dropped.shot_seq,
+            request_seq=dropped.request_seq, confirmed_at=dropped.at,
+            rpm_left_pre_fire=dropped.rpm_left_pre_fire,
+            rpm_right_pre_fire=dropped.rpm_right_pre_fire,
+            rpm_pre_fire_sample_age_s=dropped.rpm_pre_fire_sample_age_s,
+        )
+        self._log(
+            f"undid shot {dropped.shot_seq}: {dropped.rpm:.0f} RPM -> "
+            f"{dropped.distance_m:.3f} m — awaiting a distance again"
+        )
 
     def _do_fit(self, intent: Intent) -> None:
         if self._fitter is None or self._model_out is None:
@@ -595,18 +1084,68 @@ class BlmController:
                 "clearance margin with this model yet"
             )
 
+    def _append_fire_event(self, event: str, request: FireRequest) -> None:
+        """One writer for every request-scoped event, so a `shot_requested` and
+        the `shot_confirmation_timeout` that may follow it carry identical
+        provenance and can be joined on `request_seq`."""
+        self._write_shot_record({
+            "schema": SHOT_EVIDENCE_SCHEMA,
+            "event": event,
+            "method": "A_landing_distance",
+            "request_seq": request.request_seq,
+            # `rpm` stays the COMMANDED value: it is what indexes the model and
+            # what a launcher can be told to reproduce. The pre-fire pair travels
+            # beside it so the independent variable is auditable rather than
+            # assumed — a v(RPM) curve fitted against an unchecked x is not.
+            "rpm": request.rpm,
+            "rpm_left_pre_fire": request.rpm_left_pre_fire,
+            "rpm_right_pre_fire": request.rpm_right_pre_fire,
+            "rpm_pre_fire_sample_age_s": request.rpm_pre_fire_sample_age_s,
+            "requested_at": request.requested_at,
+            "session_id": self._session_id,
+        })
+
+    def _append_shot_fired(self, shot: PendingShot) -> None:
+        """Record the confirmed shot itself, not only its measurement.
+
+        This is what makes the pass auditable from one file: a confirmed shot
+        with no matching measurement is visible as such, so a rejected attempt
+        cannot be quietly dropped and a measurement cannot be invented for a shot
+        that was never taken.
+        """
+        self._write_shot_record({
+            "schema": SHOT_EVIDENCE_SCHEMA,
+            "event": "shot_fired",
+            "method": "A_landing_distance",
+            "request_seq": shot.request_seq,
+            "rpm": shot.rpm,
+            "rpm_left_pre_fire": shot.rpm_left_pre_fire,
+            "rpm_right_pre_fire": shot.rpm_right_pre_fire,
+            "rpm_pre_fire_sample_age_s": shot.rpm_pre_fire_sample_age_s,
+            "shot_seq": shot.seq,
+            "confirmed_at": shot.confirmed_at,
+            "session_id": self._session_id,
+        })
+
     def _append_shot_log(self, entry: Measurement, retracted: bool = False) -> None:
-        if self._shot_log is None:
-            return
-        record = {
-            "schema": SCHEMA,
+        self._write_shot_record({
+            "schema": SHOT_EVIDENCE_SCHEMA,
             "event": "retracted_measurement" if retracted else "measurement",
             "method": "A_landing_distance",
+            "request_seq": entry.request_seq,
             "rpm": entry.rpm,
+            "rpm_left_pre_fire": entry.rpm_left_pre_fire,
+            "rpm_right_pre_fire": entry.rpm_right_pre_fire,
+            "rpm_pre_fire_sample_age_s": entry.rpm_pre_fire_sample_age_s,
+            "shot_seq": entry.shot_seq,
             "landing_distance_m": entry.distance_m,
             "at": entry.at,
             "session_id": self._session_id,
-        }
+        })
+
+    def _write_shot_record(self, record: Dict[str, object]) -> None:
+        if self._shot_log is None:
+            return
         try:
             self._shot_log.parent.mkdir(parents=True, exist_ok=True)
             with self._shot_log.open("a", encoding="utf-8") as handle:
@@ -624,7 +1163,14 @@ class BlmController:
     # ---- status -------------------------------------------------------
 
     def status(self) -> Dict[str, object]:
+        with self._state_lock:
+            return self._status_locked()
+
+    def _status_locked(self) -> Dict[str, object]:
         state = self.state
+        telemetry_age = self.telemetry_age_s()
+        unconfirmed = self.wheels_unconfirmed_reason()
+        info_age = self.info_age_s()
         return {
             "schema": SCHEMA,
             "port": state.port,
@@ -636,9 +1182,34 @@ class BlmController:
             "arm_timeout_s": self._arm_timeout_s,
             "pitch_deg": state.pitch_deg,
             "yaw_deg": state.yaw_deg,
+            "aim_established": state.aim_established,
             "wheel_rpm": state.wheel_rpm,
             "rpm_left": state.rpm_left,
             "rpm_right": state.rpm_right,
+            # A measured RPM without its age is not evidence: the firmware stops
+            # sending while the pusher moves, and a dead reader leaves the last
+            # numbers on screen forever. None means none has ever arrived.
+            "telemetry_age_s": (None if telemetry_age is None
+                                else round(telemetry_age, 1)),
+            "telemetry_max_age_s": TELEMETRY_MAX_AGE_S,
+            # The verdicts, computed HERE rather than in the UI, because these are
+            # the same predicates the arm and fire gates use. Two implementations
+            # of one safety rule is one implementation too many.
+            "wheels_confirmed": unconfirmed is None,
+            "wheels_unconfirmed_reason": unconfirmed or "",
+            "wheels_in_band_s": round(self.wheels_in_band_s(), 1),
+            "wheels_band_rpm": round(self.rpm_band(), 1),
+            "wheels_stable_required_s": WHEELS_STABLE_S,
+            "rpm_spread_max": RPM_SPREAD_MAX,
+            # Whether the MACHINE says the flywheels are stopped. The protocol step
+            # before anyone walks downrange to the ball.
+            "safe_to_approach": self.safe_to_approach(),
+            "rpm_safe_approach": RPM_SAFE_APPROACH,
+            # Bookkeeping (a reload since the last shot) and, separately, whatever
+            # the last poll's ball switch actually said.
+            "loaded": state.loaded,
+            "ball_present": state.ball_present,
+            "info_age_s": None if info_age is None else round(info_age, 1),
             "rpm_min_fire": RPM_MIN_FIRE,
             "angle_limit_deg": ANGLE_LIMIT_DEG,
             # The live envelope, not a constant: the UI's slider bounds come from
@@ -649,10 +1220,24 @@ class BlmController:
             "pitch_default_max_deg": self._default_pitch_max,
             "yaw_limit_deg": YAW_LIMIT_DEG,
             "shots_fired": state.shots_fired,
+            # The UI gates RECORD SHOT on this and shows whose RPM it will carry,
+            # so the operator can see the distance is attaching to the shot they
+            # just took rather than to whatever the RPM control currently reads.
+            "pending_shot": (
+                None if state.pending_shot is None
+                else {"rpm": state.pending_shot.rpm,
+                      "seq": state.pending_shot.seq,
+                      "request_seq": state.pending_shot.request_seq,
+                      "rpm_left_pre_fire": state.pending_shot.rpm_left_pre_fire,
+                      "rpm_right_pre_fire": state.pending_shot.rpm_right_pre_fire,
+                      "rpm_pre_fire_sample_age_s": (
+                          state.pending_shot.rpm_pre_fire_sample_age_s)}
+            ),
             "last_refusal": state.last_refusal,
             "info_lines": state.info_lines[-6:],
             "measurements": [
-                {"rpm": m.rpm, "distance_m": m.distance_m} for m in state.measurements
+                {"rpm": m.rpm, "distance_m": m.distance_m, "shot_seq": m.shot_seq}
+                for m in state.measurements
             ],
             "model_path": state.model_path,
             "model_summary": state.model_summary,
@@ -697,6 +1282,29 @@ def parse_telemetry(line: str) -> Optional[Tuple[float, float]]:
         return float(left[2:].strip()), float(right.strip().split()[0])
     except (ValueError, IndexError):
         return None
+
+
+BALL_FIELD = re.compile(r"\bBall\s*[:=]\s*(\d)\b")
+
+
+def parse_ball_state(line: str) -> Optional[bool]:
+    """`Front:1 Back:0 Ball:0` -> True (a ball is sitting at the feeder).
+
+    Parsed so the operator does not have to read `Ball=LOW` out of raw serial
+    text — the protocol asked for exactly that, from a line the console already
+    had in hand. Returns None when the line says nothing about the ball.
+
+    Polarity comes from the firmware wiring (INPUT_PULLUP, triggered on LOW, so a
+    pressed switch reads 0), which makes it INFERRED rather than measured. That is
+    why it never gates a shot: an inverted reading would refuse every shot with a
+    ball loaded. It is displayed, and it warns when it contradicts the console's
+    own bookkeeping — which is the only visible sign of the firmware's 10 s
+    dispense TIMEOUT, where a reload completes with an empty chamber.
+    """
+    match = BALL_FIELD.search(line)
+    if match is None:
+        return None
+    return int(match.group(1)) == BALL_PRESENT_LEVEL
 
 
 def load_fitter(path: Path):
@@ -803,7 +1411,6 @@ def main() -> int:
     stop_event = threading.Event()
 
     def reader() -> None:
-        last = ""
         while not stop_event.is_set():
             try:
                 raw = ser.readline().decode("utf-8", errors="ignore").strip()
@@ -817,23 +1424,23 @@ def main() -> int:
                 continue
             telemetry = parse_telemetry(raw)
             if telemetry is not None:
-                controller.state.rpm_left, controller.state.rpm_right = telemetry
-                controller.state.telemetry_at = time.monotonic()
+                # Through the controller, so the band/stability logic and the
+                # arm re-check happen in exactly one place.
+                controller.note_telemetry(*telemetry)
                 continue
-            if raw == last:
+            if not controller.note_serial_line(raw):
                 continue
-            last = raw
-            controller.state.info_lines.append(raw)
-            del controller.state.info_lines[:-12]
             emit(f"  <- {raw}")
 
     threading.Thread(target=reader, daemon=True).start()
 
     def heartbeat() -> None:
-        # Republishes so the UI sees flywheel telemetry and the arm countdown
-        # without having to poll the backend.
+        # Republishes so the UI sees flywheel telemetry, its AGE and the arm
+        # countdown without having to poll the backend. `refresh_arm` also drops an
+        # arm whose wheels stopped being confirmed, so that state cannot persist
+        # just because no command happened to arrive.
         while not stop_event.wait(0.5):
-            controller.expire_arm()
+            controller.refresh_arm()
             publish()
 
     threading.Thread(target=heartbeat, daemon=True).start()
