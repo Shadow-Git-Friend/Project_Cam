@@ -284,6 +284,21 @@ and makes only the protocol/runtime changes below.
 the parsed identity, so a test report can name the firmware actually connected
 rather than infer it from a filename on disk.
 
+Opening the CP2102 asserts DTR and resets the ESP32. The host therefore clears
+only bytes which predate that new boot, **immediately after opening the port**, and
+then waits two seconds for the reset to settle. It must not clear the buffer after
+that wait: `SYS: FW control_13 READY` is emitted at the start of `setup()` and
+would be deleted before the reader starts. Boot-ROM chatter accumulated during
+the wait is handled by the existing `is_noise()` filter; the exact firmware line
+continues through `consume_serial_line()` into the same strict identity parser as
+the solicited `INFO | FW: control_13` fallback.
+
+The regression test models the actual ordering rather than calling the parser in
+isolation: a fake serial buffer is cleared, the injected settle callback appends
+the boot identity, and the buffered line must still reach controller status. This
+keeps `UNVERIFIED` meaningful — it is the absence of firmware evidence, not an
+artifact of the host throwing that evidence away.
+
 The baud rate (921600), commands, limit polarity, BLE name, and mechanical state
 machine remain compatible. Repository inspection found seven Python files which
 open `serial.Serial(...)`: five active launcher/operator paths
@@ -333,8 +348,14 @@ Before flashing:
 After flashing, the operator repeats hardware commissioning for the new firmware:
 
 1. **S0 — identity and serial:** level the barrel before opening; verify
-   `control_13`, 921600 baud, current info fields, and a continuous fresh zero-RPM
-   stream with fire control disabled.
+   `control_13` appears from the boot record before the first poll, 921600 baud,
+   current info fields, and a continuous fresh zero-RPM stream with fire control
+   disabled. Then attach a passive BLE notification subscriber, press the
+   console's read-only `POLL FIRMWARE` once over USB, and require all six records
+   (`FW`, `Ang`, `RPM`, `FDR`, `LMT`, `CFG`) on both USB and BLE. This specifically
+   validates that removing the four 50 ms gaps did not make the retained BLE
+   backup path drop back-to-back notifications. Disconnect BLE before S1; it is
+   observation only and never becomes a second command source.
 2. **S1 — no-fire/manual safety:** verify STOP/latch, limit and ball display, and
    only the already-approved manual movements with clear travel. Do not simulate
    a front-limit shot acknowledgement or tune the ACK deadline in this stage.
