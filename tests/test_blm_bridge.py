@@ -1483,6 +1483,27 @@ def test_info_rpm_updates_telemetry_and_stays_in_the_poll_block(bridge):
     assert controller.state.info_lines[-1] == "INFO | RPM: L=22/0, R=8/0"
 
 
+def test_control_13_seven_line_info_block_keeps_firmware_identity(bridge):
+    """Adding BLE diagnostics must not evict the first and most important line."""
+    controller, _, _, _ = make(bridge, allow_fire=False)
+    lines = [
+        "INFO | FW: control_13",
+        "INFO | Ang: V=0.0 deg, H=0.0 deg",
+        "INFO | RPM: L=0/0, R=0/0",
+        "INFO | FDR: IDLE, PUSH_POS: 0",
+        "INFO | LMT: Front=HIGH, Back=LOW, Ball=HIGH",
+        "INFO | CFG: SrvSpd=80, PshSpd=5000, PshAcc=2000",
+        ("INFO | BLE: conn=1, cccd=0x0001, clients=1, mtu=23, "
+         "notify=SUCCESS_NOTIFY, code=0"),
+    ]
+
+    send(bridge, controller, "info")
+    for line in lines:
+        assert controller.note_serial_line(line) is True
+
+    assert controller.status()["info_lines"] == lines
+
+
 def test_compact_telemetry_updates_state_without_flooding_the_log(bridge):
     """A solicited poll is evidence the operator asked for and must stay
     visible; the 4 Hz stream is not, and would bury everything else."""

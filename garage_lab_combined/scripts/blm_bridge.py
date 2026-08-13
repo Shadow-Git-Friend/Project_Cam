@@ -1412,7 +1412,10 @@ class BlmController:
                           state.pending_shot.rpm_pre_fire_sample_age_s)}
             ),
             "last_refusal": state.last_refusal,
-            "info_lines": state.info_lines[-6:],
+            # control_13's info block is SEVEN lines (FW/Ang/RPM/FDR/LMT/CFG/BLE).
+            # A six-line tail silently dropped the FIRST one, which is the firmware
+            # identity — the exact thing the panel exists to show after a DTR reset.
+            "info_lines": state.info_lines[-7:],
             "measurements": [
                 {"rpm": m.rpm, "distance_m": m.distance_m, "shot_seq": m.shot_seq}
                 for m in state.measurements

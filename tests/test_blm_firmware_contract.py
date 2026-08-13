@@ -119,8 +119,56 @@ def test_control_13_info_has_no_cooperative_loop_stall():
         "INFO | FDR:",
         "INFO | LMT:",
         "INFO | CFG:",
+        # Reporting the BLE link is not decoration. The library compiles at
+        # CORE_DEBUG_LEVEL=0, so every failure path inside notify() — no client,
+        # CCCD zero, GATT error — is SILENT. Without these three values on the
+        # USB channel, a subscribed phone receiving nothing is indistinguishable
+        # from a phone that never connected, which is what cost a whole S0 pass.
+        "INFO | BLE:",
     ):
         assert field in source
+
+
+def test_control_13_reports_notify_outcomes_without_changing_tx_pacing():
+    """Diagnose the failed 4 Hz notification before changing transport timing.
+
+    A single nine-byte ``L:0 R:0`` packet every 250 ms also failed to arrive, so
+    burst pacing cannot explain the observed fault. The diagnostic firmware must
+    expose the BLE library's own status callback while leaving ``sendMsg`` on the
+    established immediate-notify path. Otherwise the diagnostic flash changes
+    two variables at once and can hide the original cause.
+    """
+    source = text(CONTROL_13)
+    assert "class MyTxCallbacks" in source
+    assert "void onStatus(" in source
+    assert "SUCCESS_NOTIFY" in source
+    assert "ERROR_NOTIFY_DISABLED" in source
+    assert "ERROR_GATT" in source
+    assert 'pTxCharacteristic->setCallbacks(new MyTxCallbacks())' in source
+    assert "notify=%s" in source
+    assert "volatile bool deviceConnected" in source
+    assert "BLE_TX_QUEUE" not in source
+    assert "BLE_TX_MIN_GAP_MS" not in source
+    assert "bleTxDropped" not in source
+    assert "pTxCharacteristic->notify();" in source
+
+
+def test_control_13_does_not_restart_advertising_inside_on_connect():
+    """Keep the BLE connection lifecycle identical to Espressif's UART example.
+
+    On the bench the phone remained connected while the firmware reported
+    ``deviceConnected=1`` but Bluedroid reported zero clients and rejected every
+    notification as ``ERROR_NO_CLIENT``.  The inherited control_12 callback
+    restarted advertising *inside* ``onConnect``; the reference lifecycle starts
+    advertising once at setup and restarts it only after a disconnect.  Pin that
+    single-variable experiment so the problematic call cannot creep back in.
+    """
+    source = text(CONTROL_13)
+    on_connect = source.split("void onConnect", 1)[1].split("void onDisconnect", 1)[0]
+    assert "startAdvertising" not in on_connect
+    assert 'pServer->getAdvertising()->start();' in source
+    disconnected = source.split("if (!deviceConnected && oldDeviceConnected)", 1)[1]
+    assert "pServer->startAdvertising();" in disconnected
 
 
 def test_exactly_seven_python_files_open_serial_and_five_are_active():

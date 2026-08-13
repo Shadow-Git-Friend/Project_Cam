@@ -34,9 +34,10 @@
 
 BLEServer *pServer = NULL;
 BLECharacteristic *pTxCharacteristic;
-bool deviceConnected = false;
+BLE2902 *pTxCccd = NULL;                 // the descriptor notify() gates on; kept so info can report it
+volatile bool deviceConnected = false;   // written by the BLE task, read by loop()
 bool oldDeviceConnected = false;
-String bleInputBuffer = ""; 
+String bleInputBuffer = "";
 
 // --- ENCODERS (Shooter Only) ---
 const float PPR_LEFT   = 1000.0;
@@ -132,18 +133,54 @@ float pusherAccel = 2000.0;
 // 3. BLE CALLBACKS & HELPERS
 // ==========================================
 
+volatile uint16_t bleNegotiatedMtu = 23;  // ATT default; notify() truncates above mtu-3 bytes
+volatile int bleLastNotifyStatus = -1;
+volatile uint32_t bleLastNotifyCode = 0;
+volatile uint32_t bleNotifyAttempts = 0;
+
+const char* bleNotifyStatusName(int status) {
+    switch (status) {
+      case BLECharacteristicCallbacks::SUCCESS_INDICATE: return "SUCCESS_INDICATE";
+      case BLECharacteristicCallbacks::SUCCESS_NOTIFY: return "SUCCESS_NOTIFY";
+      case BLECharacteristicCallbacks::ERROR_INDICATE_DISABLED: return "ERROR_INDICATE_DISABLED";
+      case BLECharacteristicCallbacks::ERROR_NOTIFY_DISABLED: return "ERROR_NOTIFY_DISABLED";
+      case BLECharacteristicCallbacks::ERROR_GATT: return "ERROR_GATT";
+      case BLECharacteristicCallbacks::ERROR_NO_CLIENT: return "ERROR_NO_CLIENT";
+      case BLECharacteristicCallbacks::ERROR_NO_SUBSCRIBER: return "ERROR_NO_SUBSCRIBER";
+      case BLECharacteristicCallbacks::ERROR_INDICATE_TIMEOUT: return "ERROR_INDICATE_TIMEOUT";
+      case BLECharacteristicCallbacks::ERROR_INDICATE_FAILURE: return "ERROR_INDICATE_FAILURE";
+      default: return "NONE";
+    }
+}
+
 class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
+    void onConnect(BLEServer* pServer) override {
       deviceConnected = true;
-      BLEDevice::startAdvertising(); 
     };
-    void onDisconnect(BLEServer* pServer) {
+    void onDisconnect(BLEServer* pServer) override {
       deviceConnected = false;
+    }
+    // Recorded, not polled: BLEServer::getPeerMTU() dereferences map::end() when the
+    // conn_id is absent, which is not something to risk from a command handler.
+    void onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+      bleNegotiatedMtu = param->mtu.mtu;
+    }
+};
+
+class MyTxCallbacks: public BLECharacteristicCallbacks {
+    void onNotify(BLECharacteristic *pCharacteristic) override {
+      bleNotifyAttempts++;
+    }
+    void onStatus(BLECharacteristic *pCharacteristic, Status status, uint32_t code) override {
+      // The library's log_v/log_e diagnostics are compiled out at DebugLevel=none.
+      // Retain the decision as data and report it over USB in the next info block.
+      bleLastNotifyStatus = static_cast<int>(status);
+      bleLastNotifyCode = code;
     }
 };
 
 void sendMsg(String msg) {
-    Serial.println(msg); 
+    Serial.println(msg);            // USB is unconditional - the control_13 contract
     if (deviceConnected) {
         pTxCharacteristic->setValue((uint8_t*)msg.c_str(), msg.length());
         pTxCharacteristic->notify();
@@ -337,9 +374,33 @@ void processCommand(String cmd) {
                 digitalRead(LIMIT_BALL_PIN)  ? "HIGH" : "LOW");
         sendMsg(String(buf4));
 
-        sprintf(buf5, "INFO | CFG: SrvSpd=%d, PshSpd=%.0f, PshAcc=%.0f", 
+        sprintf(buf5, "INFO | CFG: SrvSpd=%d, PshSpd=%.0f, PshAcc=%.0f",
                 FEED_SPEED, pusherMaxSpeed, pusherAccel);
         sendMsg(String(buf5));
+
+        // The values notify() gates on, its own last result, and the MTU that
+        // constrains a notification. This line is diagnostic evidence over USB;
+        // it deliberately does not change BLE pacing while the cause is unknown.
+        // Without these a silent BLE link is indistinguishable from a dead one.
+        char buf6[160];
+        unsigned int cccd = 0;
+        if (pTxCccd != NULL) {
+            uint8_t *v = pTxCccd->getValue();
+            if (v != NULL) cccd = (unsigned int)v[0] | ((unsigned int)v[1] << 8);
+        }
+        int notifyStatus = bleLastNotifyStatus;
+        uint32_t notifyCode = bleLastNotifyCode;
+        uint32_t notifyAttempts = bleNotifyAttempts;
+        snprintf(buf6, sizeof(buf6),
+                "INFO | BLE: conn=%d, cccd=0x%04X, clients=%lu, mtu=%u, notify=%s, code=%lu, attempts=%lu",
+                deviceConnected ? 1 : 0,
+                cccd,
+                (unsigned long)(pServer != NULL ? pServer->getConnectedCount() : 0),
+                (unsigned int)bleNegotiatedMtu,
+                bleNotifyStatusName(notifyStatus),
+                (unsigned long)notifyCode,
+                (unsigned long)notifyAttempts);
+        sendMsg(String(buf6));
     }
 }
 
@@ -393,7 +454,9 @@ void setup() {
                         CHARACTERISTIC_UUID_TX,
                         BLECharacteristic::PROPERTY_NOTIFY
                       );
-  pTxCharacteristic->addDescriptor(new BLE2902());
+  pTxCccd = new BLE2902();   // kept: this is the descriptor notify() reads before sending
+  pTxCharacteristic->addDescriptor(pTxCccd);
+  pTxCharacteristic->setCallbacks(new MyTxCallbacks());
 
   BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
                          CHARACTERISTIC_UUID_RX,
@@ -510,12 +573,17 @@ void loop() {
   }
 
   // --- BLE MANAGEMENT ---
+  // Transitions are printed HERE, not in the callbacks: those run in the BLE task
+  // and Serial from two tasks interleaves mid-line. USB is the only channel that
+  // can report on BLE, so a connect that never happens must be visible.
   if (!deviceConnected && oldDeviceConnected) {
-      delay(500); 
-      pServer->startAdvertising(); 
+      Serial.println("SYS: BLE DISCONNECTED");
+      delay(500);
+      pServer->startAdvertising();
       oldDeviceConnected = deviceConnected;
   }
   if (deviceConnected && !oldDeviceConnected) {
+      Serial.println("SYS: BLE CONNECTED");
       oldDeviceConnected = deviceConnected;
   }
 

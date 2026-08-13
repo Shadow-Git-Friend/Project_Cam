@@ -37,13 +37,14 @@
 - Pose-trace replay (turn a live session into a test): `src/project_cam/training/replay.py`, recorded by `training_drill.py --record-packets`
 - Training drills (GK + field player, **9 in the registry**): `Parallel_working/run_training_drill.sh <drill> [--layout split|swap|none]` — spawns viewer (UDP broadcast) + athlete scoreboard, both opening together tiled on the two screen halves; drill state machines in `src/project_cam/training/drills.py`, board in `garage_lab_combined/scripts/training_drill.py`, catalog in the desktop TRAINING view. Ids: `balance`, `shuttle`, `line_hops`, `gk_save`, `gk_updown`, `reaction_zones`, `cmj`, `hop_symmetry`, `reactive_cut`
 
-## BLM Firmware (control_12_full.ino — current)
+## BLM Firmware (control_13_full.ino — deployed; S0 passed 2026-08-11)
 
-### Candidate: control_13_full.ino (not deployed until S0)
 - Command grammar, 921600 baud, pins, limits and state machine remain control12-compatible.
 - Adds `INFO | FW: control_13` identity and unconditional 4 Hz USB actual-RPM telemetry while IDLE, including coast-down and zero.
 - Removes the four blocking `delay(50)` calls from `info`.
-- Do not call it current until it compiles, is flashed deliberately, and passes S0 identity/serial.
+- S0 passed with fire control disabled: boot identity arrived before the first poll, USB reported a continuous fresh `L:0 R:0`, a passive Nordic-UART subscriber received the same 4 Hz stream, `info` reported `clients=1`, `cccd=0x0001`, `mtu=517`, and `SUCCESS_NOTIFY`, and a phone disconnect produced `SYS: BLE DISCONNECTED` plus `conn=0, clients=0`.
+- `control_12_full.ino` remains the immutable rollback reference at SHA-256 `eefb35acce89f5f1467dab26865b90394e4f880127718c2697cd4924c51b660e`.
+- S1 manual movement, S2 aim-only, spin/coast-down above zero, ARM, and FIRE were **not** performed in this S0 session.
 
 - **Serial baud: 921600** (was 115200 in control_11)
 - **Limit switches: PULLUP, triggered on LOW** (was PULLDOWN+HIGH in control_11)
@@ -563,3 +564,12 @@
 - `docs/model_card.md` gained a **Commercial use** column and a Licensing section; `src/project_cam/api/schemas.py` gained a typed `LicensingResponse` so the audit is exposed, not just stored. `registry_version` stays 1 — the parser is backward-compatible and treats a missing block as `undeclared`, so no API contract break (`tests/test_api_mlops.py` asserts version 1).
 - Verification: full suite **823 passed, 1 warning** across **66 test files** (796 → 823). No model downloaded, no engine built, no hardware touched. Not committed.
 - Next: C6 RTMO-m spike is now unblocked and is the decision-maker — export under the existing TRT rules, verify on real 6-cam frames, A/B ms-per-image at batch 6 and 3D jitter against YOLO-pose on the recorded `walk_01`/`jog_01`/`jump_01` sequences. Separately, the two OpenCV Zoo per-model LICENSE reads are a 15-minute task that removes two `unverified` rows.
+
+### 2026-08-11 — control_13 deployed; USB and passive-BLE S0 passed
+- **Scope stayed no-fire.** The ball was removed, the barrel was level before serial open, the operator corridor was clear, and the bridge ran with `allow_fire=false`. No axis movement, wheel command above zero, reload, ARM, or FIRE was issued. The bridge exited through `quit`, sent one final `stop`, and closed serial cleanly.
+- **Firmware build and flash:** Arduino CLI 1.5.1 with ESP32 core 3.3.7, board `esp32:esp32:esp32`, deployed board options retained (921600 application baud; uploader 115200). The exact sketch compiled at 1,123,390 bytes / 85% flash and 42,352 bytes / 12% dynamic memory. The flashed final source SHA-256 is `54367d26e9dee54283beba08f0d41297ddacaae2538b296349f0b00eb946049f`; application-bin SHA-256 is `fa353af950c653e5a9d62ba7e5dab644de9db24c5e7cefc40afb37e0e2677300`. Live boot then identified `SYS: FW control_13 READY` and settled into continuous USB `L:0 R:0`.
+- **The original BLE failure was measured, not guessed.** With nRF Connect visibly connected and TX notifications enabled, USB `info` repeatedly reported `conn=1, cccd=0x0000, clients=0, mtu=23, notify=ERROR_NO_CLIENT`; 1,244 attempts were rejected inside the ESP32 BLE library. Disconnecting the phone produced no firmware disconnect event and left `conn=1`. UTF-8 parsing and notification pacing were therefore ruled out.
+- **Root cause and minimal fix:** inherited `control_12` code called `BLEDevice::startAdvertising()` inside `onConnect`, unlike Espressif's Nordic-UART lifecycle. A RED source-contract test pinned that call; removing only that line made it GREEN. Initial advertising at setup and restart after a real disconnect remain intact. Diagnostics retained the TX status callback, connected-client count, CCCD, MTU, notify result/code, and attempt count on the seventh `INFO | BLE` line; the bridge now preserves all seven info lines so firmware identity is not evicted.
+- **Physical acceptance:** after the second flash the phone subscribed successfully and USB reported `conn=1, cccd=0x0001, clients=1, mtu=517, notify=SUCCESS_NOTIFY`. The operator visually confirmed `L:0 R:0` arriving at `UART TX ...0003`. Phone disconnect then produced `SYS: BLE DISCONNECTED`; the post-disconnect poll reported `conn=0, clients=0`. A second reconnect after that disconnect was not run before ending the session.
+- **Verification:** focused firmware/bridge/desktop-console set **120 passed**; ruff and `git diff --check` passed. `control_12_full.ino` still matches its pinned SHA-256. The four implementation files plus this log entry remain uncommitted in the isolated `feature/control-13-usb-telemetry` worktree; the main tree's served-drill work was not touched.
+- **Next authorized hardware order:** S1 no-fire/manual safety, then S2 aim-only, then a separately announced lowest-RPM spin/coast-down test. No ARM or FIRE before those gates pass.
