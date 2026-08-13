@@ -207,11 +207,12 @@ achieved because the gate fired every 40 ms, so restoring it would spin the
 wheels up about 1.6× faster than the operator has ever seen. That is a separate
 decision from removing the stall and is not bundled into this change.
 
-**Known residual, to be stated before the demo:** the stall is reduced, not
-removed. During a wheel ramp the aim axes will pause for 40 ms five times a
-second, so yaw motion will be visibly stepped rather than smooth. It should take
-roughly 0.75 s instead of 37 s for 694 steps. If smooth motion under ramp is
-required, that is option C or D and a further change.
+**The residual this section originally warned about did not materialise.** It
+predicted a 40 ms pause five times a second during a wheel ramp, and therefore
+visibly stepped yaw. Measured on hardware, yaw during a real ramp took 586.2 ms
+against 585.8 ms idle — no penalty. See "Acceptance results" for why: the LEDC
+wait is for the *previous* update to latch, so spacing the writes out removes
+the stall rather than rationing it. Options C and D are not needed.
 
 Verification done so far: 10 contract tests, all 9 mutations caught by the
 intended test; `control_12` and `control_13` hashes re-pinned and unchanged;
@@ -301,8 +302,55 @@ deceleration and pickup on the unpulled left encoder pins 34/35. It matters
 because `currentRPM_Left` feeds the ≥400 RPM fire gate and the v(RPM)
 calibration; it does not block the timing work.
 
-Remaining: steps 6–8, which need the flywheels turning and are the real test of
-whether the residual 40 ms per 200 ms is acceptable.
+**Steps 6–8, yaw during a real wheel ramp — PASSED, and the predicted residual
+does not exist.** `set 0 5 300 300`, machine empty and zone confirmed clear by
+the operator, no `shoot` and no `reload` written. 300 RPM was chosen because
+`MIN_RPM_THRESHOLD` is 200 (below it no PWM is produced and the ramp is not
+exercised) while `MIN_FEED_RPM` is 400, so the firmware refuses to fire for the
+whole test regardless of what else happens.
+
+Yaw reached +5° in **586.2 ms**, against 585.8 ms with the wheels idle. A 0.4 ms
+difference — no measurable penalty at all.
+
+**The prediction was wrong, and why matters.** This document predicted ~706 ms
+(586 ms of stepping plus three 40 ms ramp-tick stalls). The stalls did not
+happen. The `while (conf1.duty_start)` wait is a wait for the *previous* duty
+update to latch: in `control_13` the two writes ran back to back inside one
+iteration, so each found the hardware still busy and spun a full PWM period,
+whereas at a 200 ms interval `duty_start` has long since cleared and the call
+returns immediately. **Spacing the writes out does not reduce the stall, it
+removes it.** That is inferred from this measurement rather than from reading
+the IDF source — but if each write cost a fixed 20 ms the move would have taken
+706 ms, and it took 586.
+
+**Consequence: options C and D are not needed.** No second task, no MCPWM port.
+Delete the "known residual" warning above from any plan built on it.
+
+### Two findings from the same run, both feeding roadmap A6
+
+**The RPM command mapping is about 23% high.** Commanding 300 RPM produced a
+plateau of L≈368, R≈372 with a peak of 399 — against a fire gate of 400, which
+the test was designed to stay under. `PWM = RPM·LEFT_SLOPE + LEFT_OFFSET`
+(0.1763 / 1101) does not describe this machine. Commanding 400 to satisfy the
+gate would deliver roughly 530, and the trajectory evaluator uses the commanded
+number. So before v(RPM) can mean anything, the **RPM setpoint itself** needs
+recalibrating, not just its conversion to m/s.
+
+**Left and right diverge during spin-up and converge at plateau.** At 6.2 s the
+readings were L=3, R=125; the right wheel leads by roughly two seconds before
+they match within 2%. A shot taken during spin-up therefore leaves with
+mismatched wheel speeds, which imparts spin. Firing must wait for the plateau,
+not merely for the gate.
+
+**`stop` needs about 20 s to bring the wheels to rest** (measured: +3 s
+281/307, +10 s 81/152, +14 s 1/86, +19 s 1/1). `.claude/rules/safety.md` says
+`stop` "kills the flywheels"; it releases them and they coast for twenty
+seconds. The left wheel stops around 15 s and the right around 19 s, so their
+friction differs markedly as well.
+
+**Resolved:** the unexplained `L=48/0` sample was flywheel inertia, not encoder
+pickup — the operator observed the wheels move slightly during the yaw
+rotation. The missing pull-up on pins 34/35 remains a separate open item.
 
 ## Acceptance, in order
 
