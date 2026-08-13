@@ -172,20 +172,57 @@ Rollback is defined by **pinned source SHA-256 + toolchain + live identity**:
   ESP-IDF `v5.5.2-729-g87912cd291`
 - after flashing, require `SYS: FW control_13 READY` and stable idle `L:0 R:0`
 
-## Fix direction
+## Fix: `control_14`, A + F
 
-Not yet a design — the minimum set worth costing, in order.
+**Built 2026-08-13, not yet flashed.** `control_14_full.ino` SHA-256
+`a43b2ef809e20b9b7860e0211b82e74fafb52f3a9d4af9c84f98af3ec6377477`.
 
-**A. Do not rewrite an unchanged duty.** Two lines. It fixes idle completely and
-nothing else: during a real `set v h wl wr` the ramp is changing `currentPWM`
-every tick, so the writes come back exactly when the machine is aiming and
-spinning up at the same time. **On its own it is not the fix**, and shipping it
-as one would hide the problem in the case that matters.
+Options A and F below were taken together, because A alone fixes only idle and
+the case that matters is aiming *while* the wheels ramp. Neither changes the
+ramp rate, its endpoints, or the 1000 µs rest value — both only change how
+**often** a duty is written:
 
-Its real value is that it is also the missing measurement: if skipping unchanged
-writes collapses the idle loop from 40 ms to sub-millisecond, the 40 ms is
-proven to be inside `writeMicroseconds`, with no diagnostic image and no extra
-flash cycle. Do this first and read the number.
+- a write happens only when `desiredPWM != currentPWM`, so idle costs zero
+  writes and the loop should collapse to sub-millisecond;
+- the interval becomes `RAMP_INTERVAL_MS = 200` with `RAMP_STEP_US = 5`, so the
+  40 ms stall occupies 40 ms of every 200 ms instead of all of it and the
+  steppers get ~80% of the time even during a ramp.
+
+**5 µs / 200 ms = 25 µs/s is deliberately the rate `control_13` *actually*
+produced**, not its nominal 1 µs / 25 ms = 40 µs/s. The nominal rate was never
+achieved because the gate fired every 40 ms, so restoring it would spin the
+wheels up about 1.6× faster than the operator has ever seen. That is a separate
+decision from removing the stall and is not bundled into this change.
+
+**Known residual, to be stated before the demo:** the stall is reduced, not
+removed. During a wheel ramp the aim axes will pause for 40 ms five times a
+second, so yaw motion will be visibly stepped rather than smooth. It should take
+roughly 0.75 s instead of 37 s for 694 steps. If smooth motion under ramp is
+required, that is option C or D and a further change.
+
+Verification done so far: 10 contract tests, all 9 mutations caught by the
+intended test; `control_12` and `control_13` hashes re-pinned and unchanged;
+compiled against core 3.3.7 with no sketch-level warnings — 1123186 bytes vs
+`control_13`'s 1123198, identical globals. **Compiled with the arduino-cli
+1.4.1 bundled in the Arduino IDE 2.3.8 AppImage, not the 1.5.1 recorded
+earlier.** The core, which determines the generated code, is the pinned 3.3.7.
+
+The options as they were costed:
+
+**A. Do not rewrite an unchanged duty. — taken.** Fixes idle completely and
+nothing else: during a real `set v h wl wr` the ramp changes `currentPWM` every
+tick, so the writes come back exactly when the machine is aiming and spinning up
+at the same time. On its own it is not the fix.
+
+It is also the missing measurement: if skipping unchanged writes collapses the
+idle loop from 40 ms to sub-millisecond, the 40 ms is **proven** to be inside
+`writeMicroseconds`, with no diagnostic image and no extra flash cycle. Reading
+that number is acceptance step 4 and it is what converts the remaining inference
+into a measurement.
+
+**F. Write less often, in bigger steps, at the same rate. — taken.** Covers the
+ramp case A cannot: 8× fewer duty updates for the same µs/s. Costs granularity
+(5 µs out of an 800 µs span) and leaves a periodic 40 ms pause.
 
 **B. Interleave `run()` around each ESC write.** Cheap, raises the ceiling by
 roughly the number of extra calls, still nowhere near the 12000 step/s profile.
@@ -199,7 +236,8 @@ path that is currently single-threaded; `ESP32Servo` is not thread-safe.
 duty update has no `duty_start` handshake to wait on. Removes the wait rather
 than scheduling around it.
 
-Pick between C and D **after** A has reported its number.
+C and D remain available if the residual 40 ms pause proves unacceptable. Decide
+after acceptance step 4 reports the idle number.
 
 Required properties of whatever ships:
 
