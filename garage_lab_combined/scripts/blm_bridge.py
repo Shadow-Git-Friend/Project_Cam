@@ -1455,11 +1455,18 @@ def is_noise(line: str) -> bool:
 
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
 
-# Firmware identity is evidence, so accept only records emitted verbatim by the
-# commissioned candidate. `control_12`, arbitrary labels and incidental mentions
+# Firmware identity is evidence, so accept only records emitted verbatim by a
+# COMMISSIONED firmware. `control_12`, arbitrary labels and incidental mentions
 # stay unverified rather than being promoted by substring matching.
+#
+# The list is data, not regex syntax, because extending it must stay a
+# deliberate act. Flashing a new generation and finding the panel still reads
+# UNVERIFIED is the correct outcome: it says the running firmware is one nobody
+# has accepted yet, which is exactly what an operator needs to know.
+COMMISSIONED_FIRMWARE = ("control_13", "control_14")
 FIRMWARE_ID_LINE = re.compile(
-    r"^(?:SYS: FW (?P<boot>control_13) READY|INFO \| FW: (?P<info>control_13))$")
+    r"^(?:SYS: FW (?P<boot>{ids}) READY|INFO \| FW: (?P<info>{ids}))$".format(
+        ids="|".join(re.escape(name) for name in COMMISSIONED_FIRMWARE)))
 
 
 def parse_firmware_id(line: str) -> Optional[str]:

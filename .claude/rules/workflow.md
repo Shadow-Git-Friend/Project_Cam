@@ -17,13 +17,14 @@
 ## Read-First Strategy
 - Always read the relevant script/config before proposing changes
 - Never modify code you haven't read in the current session
-- For BLM/firmware work: read `control_12_full.ino` to understand state machine before changing serial logic
+- For BLM/firmware work: read `control_14_full.ino` (deployed) to understand the state machine before changing serial logic. `control_12`/`control_13` are pinned rollback references, not the live behaviour.
+- **Before flashing a diagnostic image, try the cheap host-side probe (2026-08-13).** `loop()` consumes at most one command per iteration and the RX ring holds 256 bytes, so writing `b"info\n" * 20` in ONE write makes the gap between `INFO | FW:` lines equal to one loop period. That measured 40.0 ms and settled a question a whole diagnostic firmware had been designed for. Three traps: the boot identity arrives glued to baud-transition garbage (match a substring, not a line), a stale CP2102 tail survives `reset_input_buffer()` under EN low (anchor on the identity line's index), and `setup()` ends with `delay(3000)` to arm the ESCs.
 
 ## Change Process
 - Plan before coding; propose approach and get approval for non-trivial changes
 - Prefer incremental, testable steps with rollback paths
 - Report assumptions, risks, and validation checks
-- When firmware version changes (e.g., control_11 → control_12), update ALL Python serial scripts in lockstep (baud, command format, limit logic)
+- When firmware version changes (e.g., control_13 → control_14), update ALL Python serial scripts in lockstep (baud, command format, limit logic) AND add the new identity to `blm_bridge.COMMISSIONED_FIRMWARE`, or the desktop panel reports `UNVERIFIED` against a working board
 
 ## Pose / Vision Testing Order
 1. Dry-run / offline first (`process_4cam_to_3d.py` with recorded clips)

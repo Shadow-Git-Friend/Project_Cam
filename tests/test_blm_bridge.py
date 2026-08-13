@@ -1311,6 +1311,8 @@ def test_an_unwritable_shot_log_warns_but_does_not_end_the_session(
 @pytest.mark.parametrize(("line", "firmware_id"), [
     ("SYS: FW control_13 READY", "control_13"),
     ("INFO | FW: control_13", "control_13"),
+    ("SYS: FW control_14 READY", "control_14"),
+    ("INFO | FW: control_14", "control_14"),
 ])
 def test_firmware_identity_is_parsed_from_boot_and_info(
         bridge, line, firmware_id):
@@ -1321,6 +1323,20 @@ def test_firmware_identity_is_parsed_from_boot_and_info(
     assert controller.note_serial_line(line)
     assert controller.state.firmware_id == firmware_id
     assert controller.status()["firmware_id"] == firmware_id
+
+
+def test_every_commissioned_firmware_is_recognised_in_both_records(bridge):
+    """Guards the pair, not one spelling of it.
+
+    control_14 was flashed on 2026-08-13 while the parser still listed only
+    control_13, so the panel read UNVERIFIED against a working board. Adding a
+    generation to COMMISSIONED_FIRMWARE and forgetting one of its two records
+    would reproduce that silently.
+    """
+    assert bridge.COMMISSIONED_FIRMWARE == ("control_13", "control_14")
+    for name in bridge.COMMISSIONED_FIRMWARE:
+        assert bridge.parse_firmware_id(f"SYS: FW {name} READY") == name
+        assert bridge.parse_firmware_id(f"INFO | FW: {name}") == name
 
 
 def test_serial_open_hard_resets_into_the_app_and_preserves_boot_identity(bridge):
@@ -1420,17 +1436,24 @@ def test_serial_reader_runs_during_the_boot_settle_window(bridge):
     ]
 
 
-def test_unrecognised_text_cannot_claim_the_control_13_identity(bridge):
-    """Only the two exact control_13 identity records are evidence. A filename,
-    a custom label, or a different firmware generation cannot make the UI claim
-    the USB-telemetry firmware is connected."""
+def test_unrecognised_text_cannot_claim_a_commissioned_identity(bridge):
+    """Only the exact records of a COMMISSIONED firmware are evidence.
+
+    A filename, a custom label, an older generation, a prefixed line, or a
+    NEWER generation nobody has accepted yet must all leave the panel showing
+    UNVERIFIED. The last case is the one that matters going forward: flashing
+    control_15 must not inherit control_14's acceptance.
+    """
     controller, _, _, _ = make(bridge, allow_fire=False)
 
     for line in (
         "control_13",
+        "control_14",
         "INFO | FW: custom",
         "SYS: FW control_12 READY",
         "prefix SYS: FW control_13 READY",
+        "SYS: FW control_15 READY",
+        "INFO | FW: control_15",
     ):
         controller.note_serial_line(line)
 
