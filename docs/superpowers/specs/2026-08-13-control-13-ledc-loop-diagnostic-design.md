@@ -112,8 +112,18 @@ Ruled out along the way:
 - the telemetry block cannot account for a continuous ceiling;
 - the nine `gpio_pullup_en(78)` / `gpio_pulldown_en(116)` errors all occur
   inside `setup()` at 690–701 ms and never repeat in `loop()`, so per-iteration
-  `ESP_LOGE` output is not a competing cause. (Those pins having no internal
-  pull is a separate open question about the limit-switch inputs.)
+  `ESP_LOGE` output is not a competing cause.
+
+**Correction to an earlier reading of those errors.** They are *not* about the
+limit switches. `LIMIT_FRONT/BACK/BALL` are pins 18, 14 and 16 — ordinary GPIO
+whose internal pull-ups work. The failing pins are `ENC_BLDC1_A` = 34 and
+`ENC_BLDC1_B` = 35, which are input-only pads with no internal pull at all, so
+the `INPUT_PULLUP` and the encoder library's pull configuration are both
+silently refused on the **left flywheel encoder**. `ENC_BLDC2` on 32/33 is fine.
+It evidently works today — idle telemetry reads a steady `L:0 R:0`, so the
+encoder must be actively driven rather than open-collector — but `currentRPM_Left`
+feeds the ≥400 RPM fire gate, so this is worth an external pull-up and a note
+rather than being left as boot noise. Separate from the timing work.
 
 ### Operational gotchas found while measuring
 
