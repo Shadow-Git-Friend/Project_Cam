@@ -1,12 +1,13 @@
-# `control_13` loop timing: measurement and fix direction
+# `control_13` loop timing: diagnosis and fix
 
-**Status:** FIXED 2026-08-13. control_13 idle loop was 40.0 ms; control_14 is
-2.8 ms and the yaw axis now runs its configured profile — 694 steps in 585.8 ms
-against 37 000 ms. No
-diagnostic firmware was flashed and none is needed.
+**Status: FIXED, 2026-08-13.** The `control_13` idle loop was 40.0 ms;
+`control_14` is 2.8 ms, and the yaw axis now runs its configured profile —
+694 steps in **585.8 ms** against the 37 000 ms it used to take. No diagnostic
+firmware was ever flashed, and none was needed.
 
-**Scope:** find why the yaw axis crawls, without commanding any axis, flywheel,
-feeder, reload, arm, or fire action.
+**Scope:** find why the yaw axis crawls. Diagnosis was carried out without
+commanding any axis, flywheel, feeder, reload, arm or fire action; the two
+yaw-only moves that verified the fix were each separately authorized.
 
 **Firmware policy:** `control_12_full.ino` and `control_13_full.ino` stay
 byte-for-byte as they are. Any behaviour change ships as `control_14` with its
