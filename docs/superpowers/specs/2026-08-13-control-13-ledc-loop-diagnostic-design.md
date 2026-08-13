@@ -1,258 +1,242 @@
-# `control_13` LEDC/loop timing diagnostic
+# `control_13` loop timing: measurement and fix direction
 
-**Status:** conversational design approved; written review pending, 2026-08-13
+**Status:** measured 2026-08-13. The idle loop period is **40.0 ms**. No
+diagnostic firmware was flashed and none is needed.
 
-**Scope:** identify the source of the yaw step-rate regression without commanding
-any axis, flywheel, feeder, reload, arm, or fire action
+**Scope:** find why the yaw axis crawls, without commanding any axis, flywheel,
+feeder, reload, arm, or fire action.
 
-**Firmware policy:** preserve `control_12_full.ino` and
-`control_13_full.ino` byte-for-byte; build a separately identifiable diagnostic
-image named `control_13_diag_ledc_v1`
+**Firmware policy:** `control_12_full.ino` and `control_13_full.ino` stay
+byte-for-byte as they are. Any behaviour change ships as `control_14` with its
+own honest identity — changed behaviour must never keep reporting `control_13`.
 
 ## Safety boundary
 
-The launcher power is on, but this diagnostic is passive after reset. Building,
-reading flash, flashing, and opening the serial port are authorized by the
-operator's “давай диагностику”; no motion command is included in that
-authorization.
+The launcher power is on. Everything below is passive after reset. No `set`,
+`aim`, `center`, `jv`, `jh`, `reload`, `shoot`, or wheel RPM command is included
+in any authorization here, and none was sent.
 
-The diagnostic run must not send `set`, `aim`, `center`, `jv`, `jh`, `reload`,
-`shoot`, wheel RPM, or any other actuation command. It also does not run the
-proposed vertical `+2°` comparison: the passive telemetry timing already proved
-that the common cooperative loop is slow.
+Every reset adopts the barrel's current physical pose as logical `0/0`. There is
+no absolute encoder and no home switch on either aim axis, so **before any later
+reset or flash the operator marks the base and the rotating platform with a
+line and photographs it.** The 2026-08-13 measurement ran without that mark by
+the operator's explicit decision: it commands no motion, so the barrel could not
+move, and the only thing given up was the ability to recover the pre-reset yaw
+reference — which was an eyeball estimate, never a measurement. That trade is
+not available to any step that does move an axis.
 
-Every reset adopts the barrel's current physical pose as logical `0/0`. Flashing
-therefore changes the logical reference even though it does not move either aim
-axis. During this procedure the barrel remains where it is; no automatic
-`center` is allowed. The operator must separately re-establish and declare the
-physical zero and pitch limits before any later aiming session.
+`info`'s `Ang:` is the firmware's own `AccelStepper::currentPosition()`. It is
+never a measurement of where the barrel physically is.
 
-The diagnostic is valid only while all of these remain true:
+## Evidence
 
-- feeder state is `IDLE` and all three steppers have zero commanded distance;
-- left and right target RPM are zero;
-- left and right current and desired ESC PWM are all 1000 microseconds;
-- no BLE client is connected;
-- USB compact telemetry remains `L:0 R:0` apart from encoder rounding noise at
-  rest;
-- no physical motion, abnormal noise, heat, or smell is observed.
+### The regression is before the stepper driver
 
-Any violation invalidates the timing window. Unexpected physical actuation is an
-immediate physical power-off condition, followed by inspection; it is not a
-reason to continue collecting data.
+- `aim 0 5 0` advanced `horzStepper.currentPosition()` by about 694 steps in
+  roughly 37 s — about 18.8 steps/s.
+- `currentPosition()` changes only when `run()` actually emits a step, so
+  backlash, coupling, and a jammed barrel cannot explain the slow internal
+  count. **Backlash remains unmeasured and is a separate question.**
+- `setMaxSpeed(12000)` / `setAcceleration(8000)` predict about 0.59 s for that
+  same 694-step profile.
 
-## Evidence already established
+### Passive telemetry bracketed the loop period
 
-The regression is before the stepper driver:
+Telemetry is gated by `millis() - lastTelem > 250`, so it fires on the first
+iteration past 250 ms and the observed period is `n · P` with
+`n = floor(250/P) + 1`. 39 intervals averaged 279.851 ms (stdev 0.877 ms), which
+admits only `n ≤ 9`:
 
-- `aim 0 5 0` advanced the firmware's horizontal
-  `horzStepper.currentPosition()` by about 694 steps in roughly 37 seconds,
-  approximately 19 steps/s;
-- `AccelStepper::currentPosition()` changes here only when `run()` actually
-  emits a step, so backlash, coupling, and barrel motion cannot explain that
-  slow internal count;
-- the configured 12,000 step/s maximum and 8,000 step/s² acceleration predict
-  roughly 0.59 seconds for the same 694-step profile.
+| n | P (ms) | self-consistent | step ceiling (1/P) |
+|---|--------|-----------------|--------------------|
+| 10 | 27.99 | no — implies n=9 | — |
+| 9 | 31.09 | yes | 32.2/s |
+| 8 | 34.98 | yes | 28.6/s |
+| **7** | **39.98** | **yes** | **25.0/s** |
+| 6 | 46.64 | yes | 21.4/s |
+| 5 | 55.97 | yes | 17.9/s |
 
-Passive USB telemetry supplied a second independent clue. With telemetry gated
-by `millis() - lastTelem > 250`, 39 measured intervals averaged 279.851 ms and,
-after the first interval, clustered at about 279.65–280.31 ms. That is consistent
-with a loop taking tens of milliseconds (for example seven roughly 40 ms loops
-or five roughly 56 ms loops), rather than a fast loop servicing the gate
-immediately after 250 ms. The passive gate cannot distinguish those divisors;
-the direct diagnostic will. A cooperative stepper can emit at most one step per
-call to `run()`, so either range is already consistent with the observed severe
-step-rate ceiling.
+So `P ≥ 31 ms` was already established. The gate could not pick the divisor.
 
-The exact installed toolchain is Arduino-ESP32 3.3.7 on ESP-IDF
-`v5.5.2-729-g87912cd291`. In that version the classic ESP32 LEDC low-level path
-used by `ESP32Servo::writeMicroseconds()` actively waits for `duty_start` to
-self-clear before the next duty update. That classic-ESP32 wait was introduced
-by Espressif commit `723a926b26760832241e19896a582b9043ffecd9`. The current
-firmware calls both ESC writers every ramp interval even when both PWM values
-are unchanged at 1000.
+### Option 0 picked the divisor without flashing anything
 
-This makes the leading hypothesis precise: the two redundant 50 Hz ESC duty
-writes consume most of each loop, starving all three `AccelStepper::run()` calls.
-The evidence is strong but not yet direct attribution; the diagnostic below is
-designed to confirm or falsify it.
+`loop()` consumes at most one command per iteration, and `HardwareSerial`'s RX
+ring is 256 bytes on core 3.3.7, so a single 100-byte write of `20 × "info\n"`
+is buffered whole and drained one command per iteration. The interval between
+consecutive `INFO | FW: control_13` lines is therefore one loop period.
+
+Measured 2026-08-13, 19 intervals:
+
+```text
+39.892 40.030 40.135 39.868 39.983 39.848 40.182 39.914 40.114 40.065
+39.990 39.941 39.835 40.173 40.019 39.967 40.000 39.904 40.090
+```
+
+- min 39.835, max 40.182, mean **39.997**, median 39.990, stdev **0.108**, MAD 0.086
+- buckets: `<10 ms` 0, `10–25 ms` 0, `25–35 ms` 0, `>35 ms` **19**
+- 20/20 response blocks; 7 lines and ~294 bytes per block; theoretical wire time
+  3.195 ms at 921600 baud
+- **0** intervals merged by CP2102 batching, so no interval is a host artefact
+- `INFO | BLE: conn=0, cccd=0x0000, clients=0` throughout — no notify load
+
+The active result (39.997 ms) lands on the passive `n=7` candidate (39.98 ms) to
+within 0.04%. Two unrelated measurements agree.
+
+### What this proves, and what it does not
+
+Proven directly:
+
+- the idle loop period is 40.0 ms, tightly locked (stdev 0.108 ms);
+- a 25 ms gate inside a 40 ms loop is satisfied on **every** iteration, so
+  `lastRampTime = millis()` at the top of the ramp block self-locks and "once
+  per 25 ms" is really "every iteration";
+- a cooperative `AccelStepper` emits at most one step per `run()`, so the step
+  ceiling is 25/s. The observed 18.8/s sits just under it.
+
+Inferred, not directly measured: **where** the 40 ms goes. The ESCs are attached
+at 50 Hz, so one PWM period is 20 ms and the two `writeMicroseconds` calls are
+exactly `2 × 20 ms`. In Arduino-ESP32 3.3.7 / ESP-IDF `v5.5.2-729-g87912cd291`
+the classic-ESP32 LEDC path reached by
+`ESP32Servo::writeMicroseconds → writeTicks → ESP32PWM::write → ledcWrite →
+ledc_set_duty → ledc_update_duty` actively waits on `conf1.duty_start`
+(Espressif commit `723a926b26760832241e19896a582b9043ffecd9`). A 0.108 ms
+spread is what a hardware-period-locked wait looks like; software work of that
+size would jitter far more. The arithmetic is exact and the mechanism is
+present, but no timer was placed inside the call itself.
+
+Ruled out along the way:
+
+- `getRPM` only reads the encoder behind a 200 ms gate, no delay;
+- `Serial.readStringUntil` runs only under `Serial.available()`;
+- the BLE `delay(500)` runs only on a disconnect transition;
+- the telemetry block cannot account for a continuous ceiling;
+- the nine `gpio_pullup_en(78)` / `gpio_pulldown_en(116)` errors all occur
+  inside `setup()` at 690–701 ms and never repeat in `loop()`, so per-iteration
+  `ESP_LOGE` output is not a competing cause. (Those pins having no internal
+  pull is a separate open question about the limit-switch inputs.)
+
+### Operational gotchas found while measuring
+
+Three things broke the first two attempts and belong in any repeat:
+
+1. **The boot identity arrives glued to baud-transition garbage.** The boot ROM
+   talks at its own baud, producing bytes with no clean newline, so
+   `SYS: FW control_13 READY` is a **substring** of a longer line and an
+   equality test misses it.
+2. **A stale CP2102 tail survives `reset_input_buffer()` under EN low.** 56–65
+   lines of the previous session's telemetry arrived within ~1 ms of the reader
+   starting, before any boot output. Anchor the analysis on the index of the
+   boot-identity line and discard everything before it.
+3. **`setup()` ends with `delay(3000)`** to arm the ESCs, so `loop()` and the
+   first telemetry line cannot appear until ~3 s after the identity. A 4 s wait
+   for "fresh telemetry" times out for a healthy board.
 
 ## Options considered
 
-### 1. Continue passive timestamp inference
+**0. Queue 20 `info` commands, no flash — chosen, and it settled the question.**
+Costs one reset, sends only read-only commands, and measures the loop period
+directly. This is the first thing to try for any future timing question.
 
-This has already shown common-loop starvation but cannot attribute the time
-inside the loop. Repeating it adds little evidence.
+**1. Continue passive timestamp inference.** Already bracketed `P ≥ 31 ms` but
+cannot pick the divisor. Superseded by option 0.
 
-### 2. Flash `control_12` under the current toolchain
+**2. Flash `control_12` under the current toolchain.** Rejected as a
+discriminator because **`control_12` contains the same 25 ms ramp gate and the
+same unconditional pair of ESC writes** — the relevant path is identical, so the
+comparison cannot separate source from toolchain. (The `control_13` diff is not
+loop-free: it also made the telemetry block unconditional in IDLE. That change
+is one short line per ~280 ms and cannot produce a 40 ms period.) The
+historically fast binary and its exact toolchain were not preserved.
 
-Rejected as a discriminator. `control_12` contains the same 25 ms ramp gate and
-the same unconditional pair of ESC writes. Rebuilding it with Arduino-ESP32
-3.3.7 changes source revision and firmware revision together without isolating
-the LEDC path. A historical binary built with the old core would be useful, but
-its exact toolchain and binary were not preserved.
+**3. Instrument a separate `control_13_diag_ledc_v1` image.** Held in reserve.
+Option 0 satisfied the decision rule, so nothing is flashed for diagnosis alone.
+If a future question does need it: identity must be `control_13_diag_ledc_v1`
+and never `control_13`; control logic unchanged; measure `loop_us`, `ramp_us`,
+`esc_left_us`, `esc_right_us`, and **the number of consecutive iterations in
+which the ramp block executed**; no motion; its own explicit "давай" before any
+flash.
 
-### 3. Instrument the exact deployed `control_13` logic
+## Rollback
 
-Chosen. A separate image measures the loop and the two existing ESC calls while
-leaving their order, conditions, arguments, and control behavior unchanged. It
-directly tests the hypothesis in one idle, no-motion run.
+There is no flash readback or partition restore in this procedure, and none is
+needed. An ESP32 clean build is **not byte-reproducible** — `esp_app_desc_t`
+carries compile date/time and `app_elf_sha256`, and build-time strings land in
+the image — so the cache `.bin` differing from a previously recorded deployed
+hash does not imply unknown firmware.
 
-## Diagnostic image architecture
+Rollback is defined by **pinned source SHA-256 + toolchain + live identity**:
 
-### Isolation and identity
+- `control_13_full.ino` = `54367d26e9dee54283beba08f0d41297ddacaae2538b296349f0b00eb946049f`
+- `control_12_full.ino` = `eefb35acce89f5f1467dab26865b90394e4f880127718c2697cd4924c51b660e`
+- Arduino CLI 1.5.1, board `esp32:esp32:esp32`, Arduino-ESP32 core 3.3.7,
+  ESP-IDF `v5.5.2-729-g87912cd291`
+- after flashing, require `SYS: FW control_13 READY` and stable idle `L:0 R:0`
 
-The diagnostic sketch lives at:
+## Fix direction
 
-```text
-diagnostics/control_13_diag_ledc_v1/control_13_diag_ledc_v1.ino
-```
+Not yet a design — the minimum set worth costing, in order.
 
-It starts as an exact copy of the deployed `control_13_full.ino`, whose current
-source SHA-256 is:
+**A. Do not rewrite an unchanged duty.** Two lines. It fixes idle completely and
+nothing else: during a real `set v h wl wr` the ramp is changing `currentPWM`
+every tick, so the writes come back exactly when the machine is aiming and
+spinning up at the same time. **On its own it is not the fix**, and shipping it
+as one would hide the problem in the case that matters.
 
-```text
-54367d26e9dee54283beba08f0d41297ddacaae2538b296349f0b00eb946049f
-```
+Its real value is that it is also the missing measurement: if skipping unchanged
+writes collapses the idle loop from 40 ms to sub-millisecond, the 40 ms is
+proven to be inside `writeMicroseconds`, with no diagnostic image and no extra
+flash cycle. Do this first and read the number.
 
-Only marker-delimited instrumentation blocks and the two identity literals may
-differ. Its constant, boot line, and `info` reply identify it as
-`control_13_diag_ledc_v1`; it must never claim to be `control_13`.
+**B. Interleave `run()` around each ESC write.** Cheap, raises the ceiling by
+roughly the number of extra calls, still nowhere near the 12000 step/s profile.
+Insufficient alone.
 
-The production files remain untouched. A source-contract test removes the
-marker-delimited diagnostic blocks, normalizes the two diagnostic identity
-literals back to `control_13`, and requires the result to equal
-`control_13_full.ino` byte-for-byte. This proves that the diagnostic did not
-quietly change motion, feeder, ESC, BLE, or serial command behavior.
+**C. Take the duty update off the main loop** (hardware timer or a task on the
+other core) so `run()` never waits behind it. Introduces concurrency into a
+path that is currently single-threaded; `ESP32Servo` is not thread-safe.
 
-### Measurements
+**D. Drive the ESCs from MCPWM instead of the LEDC-backed `ESP32Servo`,** whose
+duty update has no `duty_start` handshake to wait on. Removes the wait rather
+than scheduling around it.
 
-The sketch uses `micros()` with unsigned subtraction and fixed-size integer
-accumulators. No dynamic allocation, task, interrupt, timer, delay, or new
-library is introduced.
+Pick between C and D **after** A has reported its number.
 
-It records four distributions:
+Required properties of whatever ships:
 
-1. `loop_us`: time between consecutive entries to `loop()`;
-2. `esc_left_us`: duration of the existing
-   `escLeft.writeMicroseconds(currentPWM_Left)` call;
-3. `esc_right_us`: duration of the existing
-   `escRight.writeMicroseconds(currentPWM_Right)` call;
-4. `ramp_us`: duration of the complete existing 25 ms ramp block, including the
-   two calls.
+- `control_12` and `control_13` preserved; the change is `control_14`
+- ESCs still safely at 1000 µs at boot and on `stop`
+- real spin-up and coast-down ramp behaviour preserved
+- command grammar and safety gates not weakened; feeder/limit logic untouched
+- `stepper.run()` no longer waits behind an ESC update
+- the BLE/USB identity evidence from 2026-08-11 still holds
+- no fire
 
-Each distribution keeps count, minimum, integer mean, and maximum over a
-two-second window. Samples accumulate only while the stationary conditions in
-the safety boundary hold. Losing eligibility resets the window rather than
-mixing moving and idle timing.
+## Acceptance, in order
 
-The diagnostic prints one USB-only line every two seconds, for example:
+1. static/source-contract tests;
+2. compile with the exact core 3.3.7;
+3. idle boot, no motion: identity, `IDLE`, `L:0 R:0`;
+4. idle loop timing by the same 20 × `info` method — expect a large drop from
+   40.0 ms;
+5. separately authorized small yaw-only move;
+6. separately authorized no-fire wheel ramp, machine empty and zone clear;
+7. **the acceptance that matters: yaw moves at normal speed *during* a real
+   wheel ramp.** 694 horizontal steps should take about 0.6 s by profile, not
+   37 s — confirmed by the operator's eye and the physical mark, never by
+   `info Ang`;
+8. coast-down back to `L/R ≈ 0`;
+9. no `reload`, no `arm`, no `fire`.
 
-```text
-DIAG | fw=control_13_diag_ledc_v1 safe_idle=1 ble=0 loop_us[n/min/avg/max]=... ramp_us[n/min/avg/max]=... esc_left_us[n/min/avg/max]=... esc_right_us[n/min/avg/max]=...
-```
+Steps 5–8 each: announce the exact command and the expected movement, wait for
+its own explicit "давай", then stop and ask the operator what physically
+happened. Nothing here inherits permission from anything above it.
 
-It uses `Serial.printf`, not `sendMsg`, so the diagnostic line can never create a
-BLE notification. The existing compact telemetry remains unchanged. The loop
-interval immediately following a diagnostic print is deliberately skipped so
-the report's own serial transmission is not counted in the next window.
+Backlash is measured only after normal speed is restored: approach one point
+from both directions against a mark or tape, and record commanded deadband and
+physical offset separately. `info Ang` is not an encoder.
 
-No diagnostic command is added to `processCommand`; reporting starts
-automatically after boot. This preserves the closed serial grammar and avoids a
-command being mistaken for motion authorization.
+## Artifacts
 
-## Static and build verification
-
-A new isolated contract file,
-`tests/test_control_13_ledc_diag_contract.py`, verifies at least:
-
-- both production firmware files retain their pinned hashes;
-- the diagnostic projection equals `control_13_full.ino` byte-for-byte;
-- the diagnostic constant, boot identity, and report identity agree exactly;
-- the original ramp gate and both `writeMicroseconds` statements remain once,
-  in the original order, with their original arguments;
-- instrumentation brackets those exact calls;
-- `DIAG |` output uses USB `Serial` only and is absent from `sendMsg`;
-- no new command branch or actuation token exists.
-
-The sketch is then compiled with Arduino CLI 1.5.1, board
-`esp32:esp32:esp32`, and the already installed ESP32 core 3.3.7. Resolved build
-properties are captured; the core is not upgraded. The source SHA-256,
-application-bin SHA-256, size, and compile command form the diagnostic manifest.
-Before any write, the operator is told the exact diagnostic firmware ID and
-application-bin hash.
-
-## Exact rollback before diagnostic flash
-
-The production source is pinned, but the current Arduino cache application
-binary has SHA-256
-`e83f541c7443f78a30542d45a991db4c7c43c564357e16bd7e659479d79bdba2`,
-which does not match the previously recorded deployed application-bin hash
-`fa353af950c653e5a9d62ba7e5dab644de9db24c5e7cefc40afb37e0e2677300`.
-The cache is therefore not accepted as an exact rollback artifact.
-
-Before replacing anything, the procedure will:
-
-1. verify the resolved CP2102 port and that no bridge or other process owns it;
-2. read and decode the board's partition table;
-3. read back the currently booted application flash range, plus every auxiliary
-   flash range the chosen uploader would overwrite;
-4. store the bytes, offsets, lengths, and SHA-256 values under the ignored local
-   `garage_lab_combined/output/firmware_backups/` directory;
-5. validate the application as an ESP32 image and confirm that it contains the
-   production `control_13` identity;
-6. stop if any readback, layout, image, identity, or hash check is ambiguous.
-
-The diagnostic write is limited to the resolved application range whenever the
-toolchain permits, leaving NVS and filesystems untouched. After capture, the
-exact read-back ranges are restored at the same validated offsets. A reboot must
-then report `SYS: FW control_13 READY` and stable idle `L:0 R:0`. No cache binary
-is substituted for that backup.
-
-## Physical run and evidence
-
-After build and rollback verification:
-
-1. announce that the next operation is a reset/flash only and sends no movement
-   command;
-2. flash `control_13_diag_ledc_v1` and open USB serial at 921600 baud;
-3. require the exact diagnostic boot identity before accepting any metric;
-4. require `safe_idle=1`, `ble=0`, and idle compact telemetry;
-5. capture at least 30 seconds of raw serial output to a timestamped ignored log;
-6. close serial without sending `center`, aim, wheel, feeder, reload, arm, or fire;
-7. restore the exact pre-flash readback and verify the production boot identity
-   and idle telemetry.
-
-Opening serial and both flashes reset the ESP32 and logical aim zero. They do not
-authorize or request physical movement.
-
-## Decision rule
-
-For each valid two-second window compute:
-
-```text
-ESC share = (mean esc_left_us + mean esc_right_us) / mean loop_us
-ramp share = mean ramp_us / mean loop_us
-```
-
-The LEDC/ESC hypothesis is considered directly confirmed when valid stationary
-windows consistently show the existing ramp block consuming at least 80% of the
-loop period, with the two measured ESC calls accounting for essentially that
-ramp duration. The min/max values must also explain the observed loop range; one
-isolated maximum is not enough.
-
-If the ramp share is below 80%, if there are too few eligible samples, or if the
-timings do not align across windows, the hypothesis is not declared proven. The
-captured residual time then determines the next instrumentation target. No ESC
-rewrite is made on an inconclusive result.
-
-## Follow-up boundary
-
-This image diagnoses only; it contains no performance fix. Once the cause is
-measured, a separate reviewed change may avoid rewriting an unchanged ESC duty
-while preserving actual spin-up and coast-down ramp behavior. That change must
-be tested at idle first and then during a separately authorized wheel-ramp test.
-
-No later yaw, pitch, wheel, feeder, reload, arm, or fire test inherits permission
-from this diagnostic run. Every physical-motion step must be announced and
-receive its own explicit operator “давай”.
+Raw log, per-line timestamps with host-read chunk ids, and the summary are under
+the ignored `garage_lab_combined/output/blm_logs/`:
+`loop_period_info_burst_20260813T142539.{log,lines.jsonl,summary.json}`.
