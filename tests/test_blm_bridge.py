@@ -1325,6 +1325,36 @@ def test_firmware_identity_is_parsed_from_boot_and_info(
     assert controller.status()["firmware_id"] == firmware_id
 
 
+def test_the_rpm_band_is_not_the_place_to_absorb_a_firmware_map_error(bridge):
+    """Measured 2026-08-13: commanding 300 RPM delivers a plateau near 370.
+
+    The setpoint map (`PWM = RPM*SLOPE + OFFSET` in the firmware) is about 23%
+    high, so commanding 500 settles near 615 and this gate refuses to arm --
+    correctly, because the machine is not doing what it was told. The tempting
+    "fix" is to widen the band until 615 counts as 500, which would delete the
+    only check that the command means anything. The real fix is to refit the
+    firmware map (and to verify the encoder scale FIRST, or the refit bakes a
+    lying encoder into the map and every number agrees while being wrong).
+
+    So the constants are pinned with their reason, not just their behaviour.
+    """
+    assert bridge.RPM_BAND_FRAC == 0.10
+    assert bridge.RPM_BAND_FLOOR == 50.0
+    assert bridge.RPM_SPREAD_MAX == 75.0
+
+    controller, _, _, _ = make(bridge)
+    send(bridge, controller, "reload")
+    send(bridge, controller, "aim 0 0 500")
+    # The plateau the rig would produce for a 500 command, scaled from the
+    # measured 300 -> 370. Steady, matched, fresh -- and still refused, because
+    # steady agreement with the WRONG number is not readiness.
+    controller.note_telemetry(615.0, 618.0)
+    controller.note_telemetry(615.0, 618.0)
+    controller.note_telemetry(615.0, 618.0)
+    with pytest.raises(bridge.CommandError, match="outside the commanded"):
+        send(bridge, controller, "arm")
+
+
 def test_every_commissioned_firmware_is_recognised_in_both_records(bridge):
     """Guards the pair, not one spelling of it.
 
