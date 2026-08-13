@@ -1,6 +1,8 @@
 # `control_13` loop timing: measurement and fix direction
 
-**Status:** measured 2026-08-13. The idle loop period is **40.0 ms**. No
+**Status:** FIXED 2026-08-13. control_13 idle loop was 40.0 ms; control_14 is
+2.8 ms and the yaw axis now runs its configured profile — 694 steps in 585.8 ms
+against 37 000 ms. No
 diagnostic firmware was flashed and none is needed.
 
 **Scope:** find why the yaw axis crawls, without commanding any axis, flywheel,
@@ -258,6 +260,48 @@ Required properties of whatever ships:
 - `stepper.run()` no longer waits behind an ESC update
 - the BLE/USB identity evidence from 2026-08-11 still holds
 - no fire
+
+## Acceptance results, 2026-08-13
+
+Steps 1–5 passed. `control_14` is flashed and live.
+
+**Step 4, idle loop timing.** The same 20 × `info` method, now against
+`control_14`: median **2.800 ms**, min 2.588, max 5.677, and all 19 intervals
+under 10 ms where `control_13` had all 19 above 35 ms. Zero intervals hidden by
+USB batching, `conn=0, clients=0`.
+
+This is the measurement that converts the attribution from inference to fact.
+The only thing changed in that path was *not writing an unchanged duty*, and the
+40 ms vanished — so the 40 ms was inside `writeMicroseconds`. Note the median
+2.800 ms is **below** the 3.179 ms theoretical wire time for one `info` reply:
+the loop is now bounded by the serial transmission of the test's own output, not
+by firmware work. No 40 ms outlier survives, confirming zero ESC writes at idle.
+
+**Step 5, yaw-only move.** `set 0 -5 0 0`, wheels commanded 0 so no duty is ever
+written. 694 steps reached **585.8 ms** after the command, 1185 steps/s average.
+`control_13` needed ~37 000 ms for the same move.
+
+The profile predicts this exactly. 694 steps cannot reach `setMaxSpeed(12000)`
+under `setAcceleration(8000)`, so the profile is triangular:
+`694 = 8000·t²` → `t = 0.2945 s` half-move → **0.589 s** total, against 0.586 s
+measured, 0.5% apart. Peak observed rate ~2315 steps/s against a predicted 2357.
+The axis is not merely faster; it now runs at its configured profile, which
+means the bottleneck is gone rather than reduced. The operator confirmed the
+barrel turned sharply, in a fraction of a second, with no strain or noise.
+
+**One unexplained observation, recorded rather than resolved.** The first
+(interrupted) yaw run reported a single `L=48/0, R=17/0` sample during
+deceleration, with both target RPMs at 0 and therefore no ESC write possible.
+The identical-magnitude reverse move produced **0 non-zero RPM samples out of
+20**, so it did not reproduce. It is a one-off, not a systematic consequence of
+yaw motion, which argues against stepper EMI (that would repeat) without
+establishing what it was. Candidates remain flywheel inertia during
+deceleration and pickup on the unpulled left encoder pins 34/35. It matters
+because `currentRPM_Left` feeds the ≥400 RPM fire gate and the v(RPM)
+calibration; it does not block the timing work.
+
+Remaining: steps 6–8, which need the flywheels turning and are the real test of
+whether the residual 40 ms per 200 ms is acceptable.
 
 ## Acceptance, in order
 
