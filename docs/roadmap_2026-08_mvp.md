@@ -155,7 +155,7 @@ can legally be sold, and it needs no lab.
 
 | # | Item | Owner | Acceptance |
 |---|---|---|---|
-| B1 | RPM → m/s calibration with measured uncertainty | user (operator) | speed model fitted, residual stated, `--rpm-speed-model` wired into the corridor evaluator. Procedure: A6 |
+| B1 | RPM → m/s calibration with measured uncertainty | user (operator) | speed model fitted, residual stated, `--rpm-speed-model` wired into the corridor evaluator. Procedure: A6. **BLOCKED 2026-08-13 by a prerequisite: the RPM setpoint map is ~23% high, so commanding 500 settles near 615 and `blm_bridge` correctly refuses to arm — no shot is possible until the encoder scale is verified with a tachometer and the map refitted (`scripts/fit_rpm_setpoint.py`, protocol §1b) and shipped as control_15.** |
 | B1b | Corridor clearance sampled over the speed's uncertainty band, not its point estimate | Claude, **with** B1 | `firing_line.py` accepts a speed uncertainty and evaluates `[v−kσ, v+kσ]`. A widening, never a narrowing. Deliberately not written ahead of B1: safety code should not gain an untested parameter before there is a measured σ |
 | B2 | Live run of all 9 drills, 6 cameras, **each with a recorded pose trace** | user + Claude | each drill completes one honest session; the trace is kept; thresholds re-tuned from the REAL noise (the plausibility guards are currently set from synthetic reconstruction); defects filed |
 | B2b | Re-audit `sessions_index.jsonl` after B2 | Claude | every reported number is one the room can produce; no session enters a baseline unread |

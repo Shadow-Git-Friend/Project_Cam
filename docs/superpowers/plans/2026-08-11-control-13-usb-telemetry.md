@@ -4,7 +4,7 @@
 
 **Goal:** Create an explicitly identifiable `control_13` firmware candidate which continuously reports actual flywheel RPM over USB through coast-down to zero without blocking the cooperative state machine.
 
-**Architecture:** `control_12_full.ino` remains immutable and deployed until a separate flash checkpoint. `control_13_full.ino` preserves its command grammar, limits, and 921600-baud transport, but removes BLE/PWM suppression from the IDLE telemetry emitter and removes all `info` delays. Source-contract tests pin the old firmware hash and the new protocol before any hardware interaction.
+**Architecture:** `control_12_full.ino` remains immutable and deployed until a separate flash checkpoint. `control_13_full.ino` preserves its command grammar, limits, and 921600-baud transport, but removes BLE/PWM suppression from the IDLE telemetry emitter and removes all `info` delays. The host explicitly hard-resets the ESP32 into normal application boot, clears queued CP2102 input while EN is held low, and runs the serial reader throughout the remaining settle window so strict boot identity cannot be displaced by the tty queue. Source-contract tests pin the old firmware hash, the new protocol, and this startup ordering before any hardware interaction.
 
 **Tech Stack:** ESP32 Arduino C++, Python 3.10 source-contract tests, pytest, existing Python serial consumers, React/TypeScript identity display.
 
@@ -13,9 +13,9 @@
 ## Execution boundaries
 
 - Prerequisite: complete `docs/superpowers/plans/2026-08-11-blm-confirmed-shot-host.md` through its no-fire handoff.
-- Design authority: `docs/superpowers/specs/2026-08-11-blm-telemetry-confirmed-shot-design.md` at commit `c25273e`.
+- Design authority: `docs/superpowers/specs/2026-08-11-blm-telemetry-confirmed-shot-design.md` through the approved startup-identity amendment at commit `ccac069`.
 - Never edit `control_12_full.ino`; its pinned SHA-256 is `eefb35acce89f5f1467dab26865b90394e4f880127718c2697cd4924c51b660e`.
-- Tasks 1–5 are software-only. Do not open serial, flash the ESP32, move axes, spin wheels, ARM, or fire.
+- Tasks 1–5A are software-only. Do not open serial, flash the ESP32, move axes, spin wheels, ARM, or fire.
 - Task 6 is an operator checkpoint, not an autonomous agent action. Stop and obtain explicit confirmation immediately before opening the firmware tool or serial port.
 - `arduino-cli`, PlatformIO, and the Arduino CLI compiler are not currently installed on PATH. Source tests are not a compile substitute; no flash is allowed until the existing Arduino IDE successfully compiles the exact candidate with the deployed board settings.
 
@@ -24,8 +24,8 @@
 - `control_12_full.ino` — immutable deployed firmware reference.
 - `control_13_full.ino` — new candidate with observable identity and non-blocking USB telemetry.
 - `tests/test_blm_firmware_contract.py` — immutable-hash, protocol, telemetry, delay, and serial-consumer contracts.
-- `garage_lab_combined/scripts/blm_bridge.py` — parse and publish firmware identity.
-- `tests/test_blm_bridge.py` — identity parser/status behavior.
+- `garage_lab_combined/scripts/blm_bridge.py` — explicitly reset into the app and drain boot input during settle, then parse and publish firmware identity.
+- `tests/test_blm_bridge.py` — serial-open ordering plus identity parser/status behavior.
 - `project-cam-desktop/src/blm.ts` — additive `firmware_id` status field.
 - `project-cam-desktop/src/views/LauncherView.tsx` — visible firmware identity.
 - `tests/test_desktop_launcher_console.py` — identity parity and visible-label contract.
@@ -200,9 +200,9 @@ sendMsg(String(buf0));
 
 Replace the old five-buffer declaration rather than declaring the same names twice.
 
-- [ ] **Step 3: Remove the five `delay(50)` calls from `info`**
+- [ ] **Step 3: Remove the four `delay(50)` calls from `info`**
 
-Delete only the five delays between `sendMsg` calls in the `info` branch. Preserve every field and its order after the new firmware identity line.
+Delete only the four delays between `sendMsg` calls in the `info` branch. Preserve every field and its order after the new firmware identity line.
 
 - [ ] **Step 4: Replace the telemetry block exactly**
 
@@ -240,7 +240,7 @@ Expected: all firmware contracts pass and the control12 digest remains
 git diff --no-index -- control_12_full.ino control_13_full.ino
 ```
 
-Expected differences only: identity constant/messages, one extra INFO line, removal of five 50 ms delays, and replacement of telemetry gates. No command, pin, state transition, RPM threshold, motor calibration, baud, or limit-polarity difference.
+Expected differences only: identity constant/messages, one extra INFO line, removal of four 50 ms delays, and replacement of telemetry gates. No command, pin, state transition, RPM threshold, motor calibration, baud, or limit-polarity difference.
 Because the files are intentionally different, `git diff --no-index` exits `1`;
 that status means "differences found" here and is expected. Review the diff
 contents rather than treating this one command as a failed verification.
@@ -397,7 +397,7 @@ Directly below `## BLM Firmware (control_12_full.ino — current)` in `CLAUDE.md
 ### Candidate: control_13_full.ino (not deployed until S0)
 - Command grammar, 921600 baud, pins, limits and state machine remain control12-compatible.
 - Adds `INFO | FW: control_13` identity and unconditional 4 Hz USB actual-RPM telemetry while IDLE, including coast-down and zero.
-- Removes the five blocking `delay(50)` calls from `info`.
+- Removes the four blocking `delay(50)` calls from `info`.
 - Do not call it current until it compiles, is flashed deliberately, and passes S0 identity/serial.
 ```
 
@@ -488,6 +488,53 @@ hardware S0-S2: NOT ATTEMPTED
 
 Stop here. Do not convert the compile block into an installation or GUI action without explicit operator approval.
 
+### Task 5A: Preserve boot identity through an explicit hard reset
+
+The original software-only plan assumed that opening pyserial resets this
+CP2102/ESP32 pair. Hardware S0 disproved that assumption: the port opened with
+DTR and RTS both asserted and the running firmware continued uninterrupted.
+S0 also exposed a second boundary — waiting two seconds before starting the
+reader allowed queued USB URBs to fill the tty input queue and displace the new
+boot identity.
+
+**Files:**
+- Modify: `garage_lab_combined/scripts/blm_bridge.py`
+- Test: `tests/test_blm_bridge.py`
+
+- [x] **Step 1: Model the real modem-control state and verify RED**
+
+The serial fake starts with DTR/RTS asserted and emits its boot identity only
+when RTS releases EN. The test requires this exact sequence:
+
+```text
+DTR=false (IO0 high)
+RTS=true  (EN low)
+wait 0.1 s
+reset_input_buffer while EN remains low
+RTS=false (EN high)
+```
+
+The old implementation failed because it never performed that pulse.
+
+- [x] **Step 2: Model reader/settle ordering and verify RED**
+
+A second test requires the serial reader to start before the two-second settle
+delay. The old implementation failed because `open_serial_link()` slept before
+the reader existed.
+
+- [x] **Step 3: Implement the smallest host correction**
+
+`open_serial_link()` performs the explicit normal-app reset and returns as soon
+as EN is released. `start_reader_during_boot_settle()` starts the reader first,
+then delays command acceptance for `SERIAL_BOOT_SETTLE_S`.
+
+- [x] **Step 4: Verify software and hardware**
+
+The targeted tests failed before the fix and passed afterward. The focused BLM
+suite and ruff passed. Hardware S0 then reported `control_13` before the first
+POLL, followed by fresh continuous zero-RPM telemetry; no firmware reflash was
+needed because this correction is entirely on the host.
+
 ### Task 6: Operator-controlled compile, flash, and S0–S2
 
 **Files:**
@@ -513,13 +560,18 @@ Only after the operator approves the compiled artifact, select the stable CP2102
 Re-level before opening the console because DTR resets the ESP32 and adopts the physical pose as logical zero. Open the rebuilt console without fire control. Require:
 
 ```text
-FIRMWARE = control_13
+FIRMWARE = control_13 before the first POLL
 fresh L/R readings continue near zero without POLL
 POLL shows INFO | FW, Ang, RPM, FDR, LMT, CFG
 Ball HIGH/LOW appears as advisory BALL/EMPTY
 ```
 
-Wait more than two seconds and confirm zero telemetry remains fresh. Any identity mismatch, stale stream, unexpected movement, or parsing error fails S0.
+Wait more than two seconds and confirm zero telemetry remains fresh. Then connect
+a passive BLE notification subscriber, press **POLL FIRMWARE** once in the USB
+console, and require all six INFO records (`FW`, `Ang`, `RPM`, `FDR`, `LMT`,
+`CFG`) on both USB and BLE. Do not send commands from BLE, and disconnect it
+before S1. Any missing BLE record, identity mismatch, stale stream, unexpected
+movement, or parsing error fails S0.
 
 - [ ] **Step 5: Run S1 no-fire/manual safety**
 

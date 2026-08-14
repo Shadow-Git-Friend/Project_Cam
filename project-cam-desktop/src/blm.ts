@@ -88,6 +88,8 @@ export type ConsoleStatus = {
   schema: string;
   port: string;
   connected: boolean;
+  /** Exact identity reported by the device over serial; empty until proven. */
+  firmware_id: string;
   allow_fire: boolean;
   estop_latched: boolean;
   armed: boolean;

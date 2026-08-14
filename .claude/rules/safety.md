@@ -3,7 +3,11 @@
 ## Core Principle
 This project controls a physical ball launching machine. Incorrect commands can cause injury or equipment damage. **As of 2026-04-09, S0-S4 + integrated live test PASSED — controlled fire is authorized under operator supervision only.**
 
-## Firmware Version (control_12_full.ino, current)
+## Firmware Version (control_14_full.ino, deployed 2026-08-13)
+- **`stop` does NOT cut the flywheels — it releases them, and they coast for ~20 s** (measured 2026-08-13: +3 s 281/307 RPM, +10 s 81/152, +19 s 1/1). The handler only sets `desiredPWM` to 1000 and lets the ramp walk it down. Everything below that calls `stop` "the safety action" is true for the feeder and for removing drive, and false for "the wheels are stopped". Plan clearance around twenty seconds, not around the acknowledgement.
+- **The RPM setpoint is ~23% high** (measured 2026-08-13): commanding 300 gave a plateau of L≈368 / R≈372 with a peak of 399, against the 400 RPM fire gate. `PWM = RPM·0.1763 + 1101` does not describe this machine. Commanding 400 to satisfy the gate would deliver roughly 530. **Until this is recalibrated, treat every commanded RPM as a lower bound and never quote it as a delivered speed.** The firmware's own gate uses MEASURED RPM and is unaffected.
+- **Left and right only match at plateau.** During spin-up the right wheel leads by up to two seconds (L=3 vs R=125 at 6.2 s), converging within 2% only once settled. A shot taken during spin-up leaves with mismatched wheel speeds and picks up spin. Fire on the plateau, not on the gate crossing.
+- control_14 fixed a 40 ms cooperative-loop stall that capped both aim axes at 25 steps/s; a 5° yaw move went from 37 s to 586 ms. `blm_bridge.COMMISSIONED_FIRMWARE` lists the accepted generations, and anything absent shows as `UNVERIFIED` in the LAUNCHER panel by design.
 - **Serial baud: 921600** (was 115200 in control_11) — all Python serial scripts must match
 - **Limit switches: INPUT_PULLUP, triggered on LOW** (was PULLDOWN+HIGH) — inverted polarity vs control_11
 - Pusher DRV8825 enable: HIGH=rest/cool, LOW=move (auto-managed by firmware)
@@ -38,7 +42,7 @@ This project controls a physical ball launching machine. Incorrect commands can 
 - KeyboardInterrupt in `live_aim_test.py` and `blm_interactive.py` → `stop` + `center` + close
 
 ## Serial Protocol
-- **Baud: 921600** (control_12)
+- **Baud: 921600** (unchanged since control_12)
 - Aim: `set v h wl wr` — vertical, horizontal, wheelLeft RPM, wheelRight RPM
 - Action: `shoot`, `reload`, `stop`, `center`, `setzero`
 - Manual jog: `jv<steps>` (vertical), `jh<steps>` (horizontal), `jf<steps>` (pusher), `js<0-180>` (servo)
@@ -66,11 +70,11 @@ All scripts that read serial MUST filter:
 ## Camera hardware-sync trigger (planned, 2026-05-29)
 - The planned global-shutter upgrade syncs cameras via a hardware trigger pulse from the ESP32. **This must NOT disturb BLM timing.** Generate the pulse on a dedicated pin via a hardware timer / LEDC / RMT peripheral — never with blocking `delay()` in the main loop, and never on a pin shared with stepper/serial/limit-switch logic.
 - Camera trigger lines are opto-isolated; drive 3.3 V ESP32 GPIO → opto/level-shift → 4 camera Line0 inputs (rising edge, 30–60 Hz). Isolation keeps the industrial I/O domain off the ESP32 logic domain.
-- Treat camera sync as a sideband peripheral clock. If adding it to `control_12_full.ino`, re-run S0–S2 to confirm serial/aim timing is unaffected before any S3/S4.
+- Treat camera sync as a sideband peripheral clock. If adding it to `control_14_full.ino`, re-run S0–S2 to confirm serial/aim timing is unaffected before any S3/S4.
 
 ## Known Hazards
 - **The aim zero is "wherever the barrel was when the board last booted" — not a mechanical home (measured 2026-08-06).** Opening the serial port asserts DTR, which resets the ESP32, and the firmware then reports `Ang: V=0.0 H=0.0` whatever the barrel's actual position. There is no absolute encoder and no homing switch on either aim axis (`Front`/`Back`/`Ball` belong to the pusher and the feeder). Consequences: **level the barrel BEFORE opening the console**, and if it is moved by hand while a session is open, send `set_zero` afterwards or every later angle is measured from the old reference. This is what produced the 2026-08-06 incident: the barrel was freed and repositioned by hand with the console open, so zero stayed inside the feeder and the exit-time `center` drove it back in.
-- **`center` is a BLIND move to that zero, so it is no longer on the exit path.** `blm_bridge.py` sends only `stop` when closing (`--center-on-exit` opts back in). `stop` is the safety action — it kills the flywheels and the feeder; moving the aim is not, and moving it toward an unverified zero is a hazard rather than a safeguard.
+- **`center` is a BLIND move to that zero, so it is no longer on the exit path.** `blm_bridge.py` sends only `stop` when closing (`--center-on-exit` opts back in). `stop` is the safety action — it removes drive from the flywheels and stops the feeder; moving the aim is not, and moving it toward an unverified zero is a hazard rather than a safeguard. **"Removes drive" is not "stops": measured 2026-08-13, the wheels coast for about 20 s after `stop`** (see Firmware Version above). The acknowledgement means the machine is no longer driving them, not that it is safe to reach in.
 - **There is NO position feedback on either aim axis (measured 2026-08-06).** `info`'s `Ang: V=…/H=…` reports the firmware's OWN internal ramp, not a measurement: commanded 25° and it read 25.0° after 1.2 s, and it reads the commanded value just the same while the barrel is physically jammed against a hard stop. Consequences: (a) never quote a polled angle as the achieved aim — confirm by eye; (b) a stalled axis is invisible in software, so a mechanical limit must be enforced BEFORE the command, not detected after; (c) the trajectory/clearance evaluator assumes the commanded angle was achieved, which is an unverified assumption and belongs in the same review as the speed uncertainty.
 - **Pitch has a fixed PHYSICAL feeder stop but a movable LOGICAL zero.** With the barrel level and that position adopted as zero, the conservative envelope is `[0°, +30°]`: below it the barrel meets the ball-feeder housing. After `setzero` at a commanded pitch `p`, those same physical endpoints must be translated into the new frame (`[old_min−p, old_max−p]`) and intersected with the firmware's `±30°` bound; restoring a hardcoded `[0, 30]` after every re-zero deletes legitimate downward travel. `blm_bridge.py` owns this live envelope, `limits <min> <max>` lets the operator redeclare it after a manual move, and the LAUNCHER slider reads it from bridge status. Every declared envelope must contain zero. Yaw stays symmetric `±30°`. **After any jam: de-energise before freeing the barrel by hand, then `setzero` and redeclare measured travel — an open-loop axis driven into a stop has lost its reference.**
 - `set` beyond ±30 → ESP32 reboot (mitigated by Python-side clamp)

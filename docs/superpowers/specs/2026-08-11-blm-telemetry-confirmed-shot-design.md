@@ -98,7 +98,7 @@ On a successful serial write, the bridge:
 While an acknowledgement is outstanding, all commands which could change the
 physical outcome are refused. `STOP` and process shutdown remain available at
 all times. In particular, `info` is not auto-polled during this interval: the
-current firmware spends 250 ms inside five `delay(50)` calls, during which the
+current firmware spends 200 ms inside four `delay(50)` calls, during which the
 cooperative stepper state machine does not run.
 
 The exact front-limit line finalizes the request once:
@@ -284,6 +284,25 @@ and makes only the protocol/runtime changes below.
 the parsed identity, so a test report can name the firmware actually connected
 rather than infer it from a filename on disk.
 
+Hardware S0 disproved the original assumption that opening this CP2102 resets the
+ESP32: pyserial opened with DTR and RTS both asserted, a pair the auto-reset
+circuit deliberately ignores. The host therefore performs an explicit normal-app
+hard reset. It deasserts DTR (IO0 high), asserts RTS (EN low) for 0.1 s, clears
+queued input while the old firmware is unable to refill it, and releases RTS.
+
+The reader starts immediately after reset release and drains the port during the
+two-second operator-command settle window. Waiting before starting the reader is
+not safe on this link: queued CP2102 USB URBs filled the roughly 4 KiB tty input
+queue with old `L:0 R:0` records and displaced the beginning of the new boot,
+including its identity. Boot-ROM chatter is handled by the existing `is_noise()`
+filter; the exact firmware line continues through `consume_serial_line()` into
+the same strict identity parser as the solicited `INFO | FW: control_13` fallback.
+
+The regression tests model both physical boundaries: the exact DTR/RTS/reset/
+flush order, and the reader starting before the settle delay. This keeps
+`UNVERIFIED` meaningful — it is the absence of firmware evidence, not an artifact
+of the host failing to reset the board or overflowing its input queue.
+
 The baud rate (921600), commands, limit polarity, BLE name, and mechanical state
 machine remain compatible. Repository inspection found seven Python files which
 open `serial.Serial(...)`: five active launcher/operator paths
@@ -316,10 +335,10 @@ bridge to measured RPM (`<50` for approach), never by a firmware PWM proxy.
 
 #### 3. Non-blocking `info`
 
-Remove all five `delay(50)` calls from the `info` handler. The response remains a
+Remove all four `delay(50)` calls from the `info` handler. The response remains a
 snapshot with the same existing fields plus firmware identity. No command handler
 may deliberately stall `vertStepper.run()`, `horzStepper.run()`, or
-`pusherStepper.run()` for 250 ms.
+`pusherStepper.run()` for 200 ms.
 
 #### Slice 2 acceptance and hardware order
 
@@ -333,8 +352,14 @@ Before flashing:
 After flashing, the operator repeats hardware commissioning for the new firmware:
 
 1. **S0 — identity and serial:** level the barrel before opening; verify
-   `control_13`, 921600 baud, current info fields, and a continuous fresh zero-RPM
-   stream with fire control disabled.
+   `control_13` appears from the boot record before the first poll, 921600 baud,
+   current info fields, and a continuous fresh zero-RPM stream with fire control
+   disabled. Then attach a passive BLE notification subscriber, press the
+   console's read-only `POLL FIRMWARE` once over USB, and require all six records
+   (`FW`, `Ang`, `RPM`, `FDR`, `LMT`, `CFG`) on both USB and BLE. This specifically
+   validates that removing the four 50 ms gaps did not make the retained BLE
+   backup path drop back-to-back notifications. Disconnect BLE before S1; it is
+   observation only and never becomes a second command source.
 2. **S1 — no-fire/manual safety:** verify STOP/latch, limit and ball display, and
    only the already-approved manual movements with clear travel. Do not simulate
    a front-limit shot acknowledgement or tune the ACK deadline in this stage.

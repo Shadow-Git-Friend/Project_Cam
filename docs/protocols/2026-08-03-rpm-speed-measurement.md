@@ -22,6 +22,100 @@ shots land short or long — it is an unmeasured input to a clearance decision.
 uncommissioned geometry.** Keep the physical exclusion zone, keep the low-energy
 presets, and do not run pose-guided firing at a person.
 
+## 1b. STOP — a prerequisite found 2026-08-13 blocks every shot below
+
+**Commanding 500 RPM does not deliver 500 RPM.** Measured on the rig: a 300 RPM
+command settled at a plateau the firmware reported as L≈368 / R≈372, peak 399.
+The setpoint map is about **23% high**, so §5's "command 500 RPM, wait for both
+measured wheels between 450 and 550" can never be satisfied — the wheels settle
+near 615 and `blm_bridge` refuses to arm with *"measured L=615 R=618 is outside
+the commanded 500 +/-50 RPM"*.
+
+**That refusal is correct and must not be worked around by widening the band.**
+The band is the only check that the machine did what it was told, and it is now
+pinned with this reason in `tests/test_blm_bridge.py`. Two further consequences:
+§4's "pass 1 at 500 RPM, the lowest energy above the gate" is false as written —
+it would really be a 615 RPM pass — and the firmware's 400 RPM fire gate is
+crossed by the two wheels about **two seconds apart** during spin-up, so they
+only match once settled.
+
+Run this before §2, and note the ORDER — it is not cosmetic.
+
+**Step 1 — verify the encoder scale with an INDEPENDENT instrument.**
+`PPR_LEFT = 1000` and `PPR_RIGHT = 2000` in the firmware, a factor of two apart.
+That is self-consistent with both wheels reporting ~370 at the same plateau (if
+the encoders were identical hardware, one would have to read double the other),
+but a *common* error in both is invisible in that comparison. Fit reflective
+tape to each tyre and read true RPM with an independent true-RPM reading (phone slow-motion video, see below) at every ladder
+step below.
+
+Skipping this is the expensive mistake: refitting the map against the firmware's
+own RPM makes command, report and model all agree **while all three are wrong**,
+and nothing downstream can detect it.
+
+**Step 2 — the ladder, no fire.** Machine empty, zone clear, through the
+sanctioned console only (`blm_bridge` — do not add a second serial writer):
+
+```
+wheels 250      # then 300, 350, 400, 450
+info            # poll until the plateau is steady; record L and R,
+                # and read the tachometer at that same moment
+wheels 0
+```
+
+Record each step as `{"commanded_rpm": …, "reported_left": …, "reported_right": …,
+"true_left": …, "true_right": …}`. Allow ~15 s per step to settle, and remember
+that **`stop` needs about 20 s to bring the wheels to rest** — it removes drive,
+it does not brake. Steps below `MIN_RPM_THRESHOLD` (200) are ignored by the fit
+because the firmware forces PWM to 1000 there.
+
+**Step 3 — refit and reflash.**
+
+```bash
+./venv/bin/python scripts/fit_rpm_setpoint.py ladder.json
+```
+
+It refuses to emit constants when reported/true falls outside 1 ± 0.05, which is
+what makes step 1 unskippable. Apply the constants it prints, ship as
+`control_15` with its own honest identity, add it to
+`blm_bridge.COMMISSIONED_FIRMWARE`, and re-run the ladder to confirm commanded ≈
+measured inside the ±10 % arm band.
+
+**Step 4 — only then start §2.** Note that v(RPM) itself stays indexed on
+**measured** RPM at the shot (`rpm_left_pre_fire` / `rpm_right_pre_fire`), never
+on the commanded number: no open-loop map can know that the ball is loading the
+wheels as it passes through them.
+
+### Measuring true RPM without a tachometer (2026-08-13)
+
+There is no tachometer on site, so the independent reading comes from a phone.
+`scripts/measure_rpm_from_video.py` does the counting — do not count frames by
+eye.
+
+1. One high-contrast mark on the tyre. **One**, not two: the tool measures the
+   period between pulses, so a second mark halves the answer.
+2. Phone on something solid, framing the mark's path. Slow motion, the highest
+   rate the phone offers.
+3. Film 3-5 s at a steady plateau, per wheel, per ladder step.
+4. `--dump-frame` to grab a still, pick a small box the mark sweeps through,
+   pass it as `--roi x,y,w,h`. **The ROI is not optional**: a mark that stays in
+   frame changes only its position, not the total brightness, so whole-frame
+   analysis has no signal at all.
+5. Pass `--fps` with the TRUE capture rate if the clip is slow motion — the
+   container usually stores the playback rate, and every number scales with it.
+6. Pass `--expect-rpm` with the firmware's own reading for that step.
+
+That last one is a precondition, not a cross-check, and it is the reason the
+tool can be trusted. **Aliasing cannot be detected from a clip.** A wheel past
+half the frame rate folds down to a lower rate: 1500 RPM filmed at 30 fps
+reports 300 RPM with a 0.95 repeat strength, and every internal quality signal
+looks excellent. Since folding pushes the answer DOWN, "comfortably below
+Nyquist" is exactly what a badly aliased clip looks like. Given the expected
+rate the frame rate can be judged BEFORE the answer is believed.
+
+If a step still looks wrong, re-film it at a different frame rate. A true rate
+is unchanged; an alias moves.
+
 ## 2. Preconditions
 
 - [ ] S0–S4 passed (they did, 2026-04-09). If firmware or wheels changed since,

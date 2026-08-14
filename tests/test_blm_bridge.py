@@ -943,7 +943,7 @@ def test_only_the_exact_front_limit_line_confirms_a_shot(
 def test_outstanding_request_refuses_every_competing_command(bridge):
     """While the outcome of a physical shot is unknown, nothing may change it.
     STOP and shutdown stay available; `info` is refused because the current
-    firmware spends 250 ms inside five delay(50) calls, during which the
+    firmware spends 200 ms inside four delay(50) calls, during which the
     cooperative stepper state machine does not run."""
     controller, wire, _, clock = make(bridge)
     ready_to_arm(bridge, controller, clock, rpm=500)
@@ -1307,6 +1307,190 @@ def test_an_unwritable_shot_log_warns_but_does_not_end_the_session(
 
 # --------------------------------- serial reading ---------------------------
 
+
+@pytest.mark.parametrize(("line", "firmware_id"), [
+    ("SYS: FW control_13 READY", "control_13"),
+    ("INFO | FW: control_13", "control_13"),
+    ("SYS: FW control_14 READY", "control_14"),
+    ("INFO | FW: control_14", "control_14"),
+])
+def test_firmware_identity_is_parsed_from_boot_and_info(
+        bridge, line, firmware_id):
+    """The panel reports what the connected firmware said, never the filename
+    the host happened to launch beside it."""
+    controller, _, _, _ = make(bridge, allow_fire=False)
+
+    assert controller.note_serial_line(line)
+    assert controller.state.firmware_id == firmware_id
+    assert controller.status()["firmware_id"] == firmware_id
+
+
+def test_the_rpm_band_is_not_the_place_to_absorb_a_firmware_map_error(bridge):
+    """Measured 2026-08-13: commanding 300 RPM delivers a plateau near 370.
+
+    The setpoint map (`PWM = RPM*SLOPE + OFFSET` in the firmware) is about 23%
+    high, so commanding 500 settles near 615 and this gate refuses to arm --
+    correctly, because the machine is not doing what it was told. The tempting
+    "fix" is to widen the band until 615 counts as 500, which would delete the
+    only check that the command means anything. The real fix is to refit the
+    firmware map (and to verify the encoder scale FIRST, or the refit bakes a
+    lying encoder into the map and every number agrees while being wrong).
+
+    So the constants are pinned with their reason, not just their behaviour.
+    """
+    assert bridge.RPM_BAND_FRAC == 0.10
+    assert bridge.RPM_BAND_FLOOR == 50.0
+    assert bridge.RPM_SPREAD_MAX == 75.0
+
+    controller, _, _, _ = make(bridge)
+    send(bridge, controller, "reload")
+    send(bridge, controller, "aim 0 0 500")
+    # The plateau the rig would produce for a 500 command, scaled from the
+    # measured 300 -> 370. Steady, matched, fresh -- and still refused, because
+    # steady agreement with the WRONG number is not readiness.
+    controller.note_telemetry(615.0, 618.0)
+    controller.note_telemetry(615.0, 618.0)
+    controller.note_telemetry(615.0, 618.0)
+    with pytest.raises(bridge.CommandError, match="outside the commanded"):
+        send(bridge, controller, "arm")
+
+
+def test_every_commissioned_firmware_is_recognised_in_both_records(bridge):
+    """Guards the pair, not one spelling of it.
+
+    control_14 was flashed on 2026-08-13 while the parser still listed only
+    control_13, so the panel read UNVERIFIED against a working board. Adding a
+    generation to COMMISSIONED_FIRMWARE and forgetting one of its two records
+    would reproduce that silently.
+    """
+    assert bridge.COMMISSIONED_FIRMWARE == ("control_13", "control_14")
+    for name in bridge.COMMISSIONED_FIRMWARE:
+        assert bridge.parse_firmware_id(f"SYS: FW {name} READY") == name
+        assert bridge.parse_firmware_id(f"INFO | FW: {name}") == name
+
+
+def test_serial_open_hard_resets_into_the_app_and_preserves_boot_identity(bridge):
+    """Opening pyserial alone does not reset this CP2102/ESP32 pair.
+
+    Both modem-control lines start asserted on the real link, a state the
+    ESP32 auto-reset circuit deliberately ignores.  The console must put IO0
+    high, pulse EN low, and only then wait for the application boot record.
+    """
+    class BootingSerial:
+        def __init__(self):
+            self.lines = [b"stale pre-open bytes\n"]
+            self.reset_calls = 0
+            self.dtr = True
+            self.rts = True
+            self.events = []
+
+        def reset_input_buffer(self):
+            self.reset_calls += 1
+            self.lines.clear()
+            self.events.append(("reset_input_buffer",))
+
+        def setDTR(self, state):
+            self.dtr = state
+            self.events.append(("dtr", state))
+
+        def setRTS(self, state):
+            self.rts = state
+            self.events.append(("rts", state))
+            if state is False:
+                self.lines.append(b"SYS: FW control_13 READY\n")
+
+        def readline(self):
+            return self.lines.pop(0)
+
+    class SerialModule:
+        def __init__(self, link):
+            self.link = link
+            self.open_args = None
+
+        def Serial(self, port, baud, timeout):
+            self.open_args = (port, baud, timeout)
+            return self.link
+
+    link = BootingSerial()
+    serial_module = SerialModule(link)
+
+    def record_sleep(seconds):
+        link.events.append(("sleep", seconds))
+
+    opened = bridge.open_serial_link(
+        serial_module, "/dev/test-control13", 921600,
+        sleep=record_sleep,
+    )
+    controller, _, _, _ = make(bridge, allow_fire=False)
+    raw = opened.readline().decode().strip()
+
+    assert serial_module.open_args == ("/dev/test-control13", 921600, 0.1)
+    assert opened.reset_calls == 1
+    assert opened.events == [
+        ("dtr", False),       # IO0 high: boot the application, not ROM loader.
+        ("rts", True),        # EN low.
+        ("sleep", bridge.SERIAL_RESET_HOLD_S),
+        # Clear only while the old firmware is unable to refill the input.  The
+        # CP2102 driver can deliver queued USB URBs just after open.
+        ("reset_input_buffer",),
+        ("rts", False),       # EN high: hard reset released.
+    ]
+    assert bridge.consume_serial_line(controller, raw)
+    assert controller.status()["firmware_id"] == "control_13"
+    assert "open_serial_link(serial, args.serial_port, args.baud)" in (
+        BRIDGE.read_text(encoding="utf-8")
+    )
+
+
+def test_serial_reader_runs_during_the_boot_settle_window(bridge):
+    """The 4 kB tty queue can overflow if nobody drains it during boot.
+
+    `ready` still waits for the firmware to finish setup, but the reader must
+    already be active so the identity at ~0.4 s cannot be displaced by queued
+    telemetry and boot diagnostics.
+    """
+    events = []
+
+    class ReaderThread:
+        def start(self):
+            events.append("reader_started")
+
+    bridge.start_reader_during_boot_settle(
+        ReaderThread(),
+        sleep=lambda seconds: events.append(("sleep", seconds)),
+    )
+
+    assert events == [
+        "reader_started",
+        ("sleep", bridge.SERIAL_BOOT_SETTLE_S),
+    ]
+
+
+def test_unrecognised_text_cannot_claim_a_commissioned_identity(bridge):
+    """Only the exact records of a COMMISSIONED firmware are evidence.
+
+    A filename, a custom label, an older generation, a prefixed line, or a
+    NEWER generation nobody has accepted yet must all leave the panel showing
+    UNVERIFIED. The last case is the one that matters going forward: flashing
+    control_15 must not inherit control_14's acceptance.
+    """
+    controller, _, _, _ = make(bridge, allow_fire=False)
+
+    for line in (
+        "control_13",
+        "control_14",
+        "INFO | FW: custom",
+        "SYS: FW control_12 READY",
+        "prefix SYS: FW control_13 READY",
+        "SYS: FW control_15 READY",
+        "INFO | FW: control_15",
+    ):
+        controller.note_serial_line(line)
+
+    assert controller.state.firmware_id == ""
+    assert controller.status()["firmware_id"] == ""
+
+
 def test_the_recorded_control_12_info_rpm_line_is_telemetry(bridge):
     """The exact lines the stand produced on 2026-08-11. The firmware answered
     with real numbers and the panel showed `— / —`, because the parser accepted
@@ -1350,6 +1534,27 @@ def test_info_rpm_updates_telemetry_and_stays_in_the_poll_block(bridge):
     assert echoed
     assert (controller.state.rpm_left, controller.state.rpm_right) == (22.0, 8.0)
     assert controller.state.info_lines[-1] == "INFO | RPM: L=22/0, R=8/0"
+
+
+def test_control_13_seven_line_info_block_keeps_firmware_identity(bridge):
+    """Adding BLE diagnostics must not evict the first and most important line."""
+    controller, _, _, _ = make(bridge, allow_fire=False)
+    lines = [
+        "INFO | FW: control_13",
+        "INFO | Ang: V=0.0 deg, H=0.0 deg",
+        "INFO | RPM: L=0/0, R=0/0",
+        "INFO | FDR: IDLE, PUSH_POS: 0",
+        "INFO | LMT: Front=HIGH, Back=LOW, Ball=HIGH",
+        "INFO | CFG: SrvSpd=80, PshSpd=5000, PshAcc=2000",
+        ("INFO | BLE: conn=1, cccd=0x0001, clients=1, mtu=23, "
+         "notify=SUCCESS_NOTIFY, code=0"),
+    ]
+
+    send(bridge, controller, "info")
+    for line in lines:
+        assert controller.note_serial_line(line) is True
+
+    assert controller.status()["info_lines"] == lines
 
 
 def test_compact_telemetry_updates_state_without_flooding_the_log(bridge):

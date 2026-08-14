@@ -167,6 +167,8 @@ BALL_PRESENT_LEVEL = 0
 # Serial pacing. The ESP32 answers a command in well under 300 ms; the pusher
 # suppresses telemetry while it moves, so a reload/shoot needs a longer grace.
 WRITE_SETTLE_S = 0.3
+SERIAL_BOOT_SETTLE_S = 2.0
+SERIAL_RESET_HOLD_S = 0.1
 
 
 class CommandError(Exception):
@@ -370,6 +372,9 @@ class Measurement:
 class ConsoleState:
     port: str = ""
     connected: bool = False
+    # Proven by an exact boot or solicited-info record from the device. Empty is
+    # deliberately "unverified", never inferred from a host filename or port.
+    firmware_id: str = ""
     allow_fire: bool = False
     estop_latched: bool = False
     armed: bool = False
@@ -705,6 +710,11 @@ class BlmController:
         vanished — the more stable the rig, the less visible the confirmation.
         """
         with self._state_lock:
+            # Identity is state, not log decoration, and must therefore be
+            # absorbed before identical INFO replies are deduplicated.
+            firmware_id = parse_firmware_id(raw)
+            if firmware_id is not None:
+                self.state.firmware_id = firmware_id
             # BEFORE the dedup, and not merely as an optimisation: two consecutive
             # shots produce two IDENTICAL acknowledgement lines, so a
             # dedup-first order would swallow the second one and leave a real
@@ -1319,6 +1329,7 @@ class BlmController:
             "schema": SCHEMA,
             "port": state.port,
             "connected": state.connected,
+            "firmware_id": state.firmware_id,
             "allow_fire": state.allow_fire,
             "estop_latched": state.estop_latched,
             "armed": state.armed,
@@ -1401,7 +1412,10 @@ class BlmController:
                           state.pending_shot.rpm_pre_fire_sample_age_s)}
             ),
             "last_refusal": state.last_refusal,
-            "info_lines": state.info_lines[-6:],
+            # control_13's info block is SEVEN lines (FW/Ang/RPM/FDR/LMT/CFG/BLE).
+            # A six-line tail silently dropped the FIRST one, which is the firmware
+            # identity — the exact thing the panel exists to show after a DTR reset.
+            "info_lines": state.info_lines[-7:],
             "measurements": [
                 {"rpm": m.rpm, "distance_m": m.distance_m, "shot_seq": m.shot_seq}
                 for m in state.measurements
@@ -1440,6 +1454,26 @@ def is_noise(line: str) -> bool:
 
 
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+
+# Firmware identity is evidence, so accept only records emitted verbatim by a
+# COMMISSIONED firmware. `control_12`, arbitrary labels and incidental mentions
+# stay unverified rather than being promoted by substring matching.
+#
+# The list is data, not regex syntax, because extending it must stay a
+# deliberate act. Flashing a new generation and finding the panel still reads
+# UNVERIFIED is the correct outcome: it says the running firmware is one nobody
+# has accepted yet, which is exactly what an operator needs to know.
+COMMISSIONED_FIRMWARE = ("control_13", "control_14")
+FIRMWARE_ID_LINE = re.compile(
+    r"^(?:SYS: FW (?P<boot>{ids}) READY|INFO \| FW: (?P<info>{ids}))$".format(
+        ids="|".join(re.escape(name) for name in COMMISSIONED_FIRMWARE)))
+
+
+def parse_firmware_id(line: str) -> Optional[str]:
+    match = FIRMWARE_ID_LINE.fullmatch(line)
+    if match is None:
+        return None
+    return match.group("boot") or match.group("info")
 
 # The 4 Hz stream. `control_12` emits it only to a connected BLE client, so over
 # USB alone it never arrives — which is exactly why the second form below has to
@@ -1534,6 +1568,35 @@ def load_fitter(path: Path):
     return module
 
 
+def open_serial_link(serial_module, port: str, baud: int, *,
+                     sleep: Callable[[float], None] = time.sleep):
+    """Open CP2102, hard-reset into the app, and retain boot evidence.
+
+    pyserial opens this link with DTR and RTS both asserted.  The ESP32
+    auto-reset circuit deliberately ignores that pair, so opening the port is
+    not itself evidence that a reset happened.  DTR deasserted holds IO0 high
+    for a normal application boot; the RTS pulse then drives EN low and releases
+    it using Espressif's 0.1 s UART hard-reset timing.
+    """
+    ser = serial_module.Serial(port, baud, timeout=0.1)
+    ser.setDTR(False)
+    ser.setRTS(True)
+    sleep(SERIAL_RESET_HOLD_S)
+    # The CP2102/kernel can deliver USB URBs that were queued before open just
+    # after an initial flush.  Clear while EN is low and the old firmware cannot
+    # refill the input, immediately before releasing the new boot.
+    ser.reset_input_buffer()
+    ser.setRTS(False)
+    return ser
+
+
+def start_reader_during_boot_settle(reader_thread, *,
+                                    sleep: Callable[[float], None] = time.sleep):
+    """Drain startup output while still delaying operator command acceptance."""
+    reader_thread.start()
+    sleep(SERIAL_BOOT_SETTLE_S)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1582,14 +1645,10 @@ def main() -> int:
 
     log(f"opening {args.serial_port} @ {args.baud}")
     try:
-        ser = serial.Serial(args.serial_port, args.baud, timeout=0.1)
+        ser = open_serial_link(serial, args.serial_port, args.baud)
     except Exception as error:  # noqa: BLE001 - surfaced to the operator log
         emit(f"[BLM] ERROR: could not open {args.serial_port}: {error}")
         return 2
-    # The ESP32 resets when DTR asserts; anything written before it settles is
-    # lost, and the boot banner would otherwise be read as telemetry.
-    time.sleep(2)
-    ser.reset_input_buffer()
 
     write_lock = threading.Lock()
 
@@ -1641,7 +1700,9 @@ def main() -> int:
                 continue
             emit(f"  <- {raw}")
 
-    threading.Thread(target=reader, daemon=True).start()
+    start_reader_during_boot_settle(
+        threading.Thread(target=reader, daemon=True)
+    )
 
     def heartbeat() -> None:
         # Republishes so the UI sees flywheel telemetry, its AGE and the arm

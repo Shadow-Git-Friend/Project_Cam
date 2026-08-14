@@ -431,6 +431,12 @@ export default function LauncherView({
         <SectionLabel>TELEMETRY</SectionLabel>
         <Panel>
           <div className="grid grid-cols-2 gap-2">
+            <div className="col-span-2">
+              <Metric
+                label="FIRMWARE"
+                value={status?.firmware_id || "UNVERIFIED"}
+              />
+            </div>
             {/* Wheel L/R are MEASURED — the firmware reports real flywheel RPM.
                 The angles are NOT: `info` returns the firmware's own internal
                 angle, which ramps to whatever was commanded whether or not the
@@ -530,9 +536,10 @@ export default function LauncherView({
             commanded value whether or not the barrel followed. Confirm the aim by
             eye.
           </p>
-          {/* Disabled while a shoot is unacknowledged: `info` spends 250 ms
-              inside five firmware delay(50) calls, during which the cooperative
-              stepper state machine does not run. */}
+          {/* Disabled while a shoot is unacknowledged: control_12 `info` spends
+              200 ms inside four firmware delay(50) calls, during which the
+              cooperative stepper state machine does not run. control_13 removes
+              those delays, while this gate still preserves command ordering. */}
           <button
             onClick={() => send({ command: "info" })}
             disabled={!live || awaitingAck}
