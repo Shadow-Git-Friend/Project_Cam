@@ -46,7 +46,7 @@ Run this before §2, and note the ORDER — it is not cosmetic.
 That is self-consistent with both wheels reporting ~370 at the same plateau (if
 the encoders were identical hardware, one would have to read double the other),
 but a *common* error in both is invisible in that comparison. Fit reflective
-tape to each tyre and read true RPM with an optical tachometer at every ladder
+tape to each tyre and read true RPM with an independent true-RPM reading (phone slow-motion video, see below) at every ladder
 step below.
 
 Skipping this is the expensive mistake: refitting the map against the firmware's
@@ -85,6 +85,36 @@ measured inside the ±10 % arm band.
 **measured** RPM at the shot (`rpm_left_pre_fire` / `rpm_right_pre_fire`), never
 on the commanded number: no open-loop map can know that the ball is loading the
 wheels as it passes through them.
+
+### Measuring true RPM without a tachometer (2026-08-13)
+
+There is no tachometer on site, so the independent reading comes from a phone.
+`scripts/measure_rpm_from_video.py` does the counting — do not count frames by
+eye.
+
+1. One high-contrast mark on the tyre. **One**, not two: the tool measures the
+   period between pulses, so a second mark halves the answer.
+2. Phone on something solid, framing the mark's path. Slow motion, the highest
+   rate the phone offers.
+3. Film 3-5 s at a steady plateau, per wheel, per ladder step.
+4. `--dump-frame` to grab a still, pick a small box the mark sweeps through,
+   pass it as `--roi x,y,w,h`. **The ROI is not optional**: a mark that stays in
+   frame changes only its position, not the total brightness, so whole-frame
+   analysis has no signal at all.
+5. Pass `--fps` with the TRUE capture rate if the clip is slow motion — the
+   container usually stores the playback rate, and every number scales with it.
+6. Pass `--expect-rpm` with the firmware's own reading for that step.
+
+That last one is a precondition, not a cross-check, and it is the reason the
+tool can be trusted. **Aliasing cannot be detected from a clip.** A wheel past
+half the frame rate folds down to a lower rate: 1500 RPM filmed at 30 fps
+reports 300 RPM with a 0.95 repeat strength, and every internal quality signal
+looks excellent. Since folding pushes the answer DOWN, "comfortably below
+Nyquist" is exactly what a badly aliased clip looks like. Given the expected
+rate the frame rate can be judged BEFORE the answer is believed.
+
+If a step still looks wrong, re-film it at a different frame rate. A true rate
+is unchanged; an alias moves.
 
 ## 2. Preconditions
 
