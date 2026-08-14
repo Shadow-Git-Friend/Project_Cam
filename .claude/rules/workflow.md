@@ -14,6 +14,35 @@
 - **Purge `__pycache__` after restoring (2026-08-03).** A mutation of the SAME byte length — `MIN_HUMAN_REACTION_S = 0.01` for `= 0.10` — leaves a `.pyc` whose recorded source size still matches, and a test run immediately after the sweep can import the **mutated** constant. It produced 4 phantom failures on a tree that sha256 proved byte-identical. `find src tests -name __pycache__ -exec rm -rf {} +`, then re-run.
 - **A missed mutation is usually a real test-quality finding, not sweep noise.** Two misses in the 2026-08-03 sweep were (a) a test that passed for the wrong reason — the recovery floor caught what was meant to pin the *duration* of a phase — and (b) a mutation neutered by an inner reset, so it never changed behaviour for the chosen input. Fix the test or fix the mutation; do not record the guard as covered.
 
+## Uncommitted work and what does not belong in this repo (2026-08-14)
+
+- **Audit every worktree, not just the one you are in.** `gk_save_served` — a
+  whole drill with 580 lines of state machine, desktop wiring and ~500 lines of
+  tests — sat `git add`-ed but uncommitted in the main tree for a week while
+  work proceeded on a branch in `.worktrees/`. It was found only because a merge
+  needed the tree clean, and it had edited the same two rules files the branch
+  had. Run this at the start and end of a session:
+
+  ```bash
+  for wt in $(git worktree list --porcelain | grep '^worktree ' | cut -d' ' -f2); do
+    printf '%-44s %s\n' "$(basename $wt)" "$(git -C "$wt" status --porcelain -uall | wc -l)"
+  done
+  ```
+
+  Also check `git stash list` and `git branch --no-merged` — the same class of
+  quietly-lost work hides there.
+- **Staged is not committed.** `git status --porcelain` shows a staged change as
+  `M ` and an unstaged one as ` M`; the difference is one column and a week of
+  work. Do not read "the index has it" as "git has it".
+- **Personal material lives OUTSIDE the repo.** 952 lines of ML/DS interview prep
+  with zero mentions of the project were sitting in `docs/`, staged for commit
+  and about to be swept into an unrelated merge. It now lives in
+  `~/Desktop/Interview_Prep/`. Do **not** solve this with a gitignored `personal/`
+  directory inside the checkout: `git clean -xdf` deletes exactly those, so a
+  hidden folder is a worse home for something irreplaceable than an obvious one
+  outside. If a note is about the project, it is a doc and it gets committed; if
+  it is about you, it does not go in the repo at all.
+
 ## Read-First Strategy
 - Always read the relevant script/config before proposing changes
 - Never modify code you haven't read in the current session
