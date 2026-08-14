@@ -333,3 +333,69 @@ def test_training_history_uses_the_single_bounded_evidence_reader():
     view = (ROOT / "project-cam-desktop/src/views/TrainingView.tsx").read_text()
     assert 'invoke<string[]>("training_sessions"' not in view
     assert '"load_session_evidence"' in view
+
+
+# --------------------------- the served drill -------------------------------
+
+def test_the_served_drill_is_the_only_one_that_turns_ball_tracking_on():
+    """Found by the mutation sweep, 2026-08-07: nothing pinned this.
+
+    Delete the ball flags from the wrapper and the served drill still LAUNCHES —
+    it simply never sees a delivery, so every serve reads "no serve observed" and
+    the session records nothing. A silent no-op is the worst failure mode for a
+    drill an athlete is standing in a goal for, and it is invisible in the code
+    because the drill degrades politely.
+
+    Equally the ball must stay OFF for the other nine: the ball engine costs a
+    TensorRT context on an 11 GB card shared with pose.
+    """
+    text = WRAPPER.read_text(encoding="utf-8")
+    served = re.search(r"gk_save_served\)(.*?);;", text, re.DOTALL)
+    assert served, "the wrapper no longer has a served-drill case"
+    for flag in ("--track-ball", "--udp-ball"):
+        assert flag in served.group(1), f"the served case must pass {flag}"
+    # Enabled per-drill, never for everyone. Checked against the lines that
+    # actually BUILD the argument vector, not against prose — the explanatory
+    # comment above the case necessarily names these flags.
+    appended = [line for line in text.splitlines() if "VIEWER_ARGS+=(" in line]
+    for line in appended:
+        if "--track-ball" in line or "--udp-ball" in line:
+            assert line.strip() in served.group(1), (
+                f"ball flags appended outside the served case: {line.strip()}")
+    # Inference imgsz is LOCKED to the engine's export size (perf.md): an
+    # off-size run yields ~300 garbage detections per frame rather than an error.
+    assert "--ball-imgsz 672" in served.group(1)
+
+
+def test_the_served_drill_stays_view_only_like_every_other():
+    """A ball-served drill is the closest a drill comes to the launcher, so the
+    view-only guarantee matters most here. The serve is an operator act through
+    the gated console; this path only measures what arrived."""
+    text = WRAPPER.read_text(encoding="utf-8")
+    for forbidden in ("--shoot-enabled", "/dev/tty", "live_aim_test",
+                      "blm_follow", "blm_bridge", "send_launcher_command"):
+        assert forbidden not in text, forbidden
+    # Checked as CODE, not as prose: the board's own docstring explains that it
+    # never opens a serial port, so a bare substring search for "serial" fails on
+    # the very sentence that documents the guarantee.
+    board = RUNNER.read_text(encoding="utf-8")
+    for forbidden in ("import serial", "/dev/tty", '"shoot"', "'shoot'",
+                      "pyserial"):
+        assert forbidden not in board, f"the drill board must not contain {forbidden}"
+
+
+def test_the_served_drill_id_matches_across_python_rust_and_typescript():
+    rust = (ROOT / "project-cam-desktop/src-tauri/src/launch_profiles.rs").read_text(
+        encoding="utf-8")
+    assert 'Self::GkSaveServed { .. } => "gk_save_served"' in rust
+    drills_ts = DRILLS_TS.read_text(encoding="utf-8")
+    assert 'id: "gk_save_served"' in drills_ts
+    launch_ts = (ROOT / "project-cam-desktop/src/launch.ts").read_text(
+        encoding="utf-8")
+    assert 'drill: "gk_save_served"' in launch_ts
+    # The catalog tells the athlete this is served by the launcher AND that
+    # serving toward an occupied goal is not commissioned yet.
+    entry = drills_ts[drills_ts.index('id: "gk_save_served"'):]
+    entry = entry[:entry.index("\n  },")]
+    assert "commissioning" in entry.lower(), (
+        "the catalog must not imply a keeper may stand in front of a serve today")

@@ -265,8 +265,12 @@ def test_reaction_zones_projector_is_typed_boolean_not_a_raw_flag():
     profiles = PROFILES_RS.read_text(encoding="utf-8")
     request = profiles[profiles.index("pub enum TrainingDrillRequest {"):]
     request = request[:request.index("\n}")]
+    # The property is the TYPE, not rustfmt's line breaking. Adding a doc comment
+    # to any variant makes rustfmt expand every variant in the enum to multi-line
+    # with trailing commas, which broke a regex that had been pinned to the
+    # one-line form — so the trailing comma and the newlines are both optional.
     assert re.search(
-        r"ReactionZones\s*\{\s*rounds:\s*u32,\s*projector:\s*bool\s*\}",
+        r"ReactionZones\s*\{\s*rounds:\s*u32,\s*projector:\s*bool,?\s*\}",
         request,
     )
     assert "projector: String" not in request

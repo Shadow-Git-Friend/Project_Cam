@@ -52,9 +52,12 @@ from statistics import fmean, median
 from .plausibility import (
     MAX_PELVIS_RISE_MM,
     MIN_DOWN_UP_S,
+    MIN_FLIGHT_S,
     MIN_HUMAN_REACTION_S,
+    MIN_SERVE_SPEED_MM_S,
     PositionGate,
     is_plausible_reaction,
+    is_plausible_serve_speed,
 )
 
 # ----------------------------------------------------------------------------
@@ -113,6 +116,98 @@ def zone_of(coord_mm, span_mm, n=3, flip=False):
 
 def _round(value, digits=1):
     return None if value is None else round(float(value), digits)
+
+
+# ----------------------------------------------------------------------------
+# ball helpers (served drills)
+# ----------------------------------------------------------------------------
+#
+# Everything here works on SEGMENTS between consecutive samples rather than on
+# the samples themselves, and that is not refinement — it is the difference
+# between a drill that works and one that cannot.
+#
+# At the rig's ~15 Hz a 10 m/s delivery advances ~667 mm per packet, and the
+# measured ball detection rate on fast sequences is 46-52 %, so consecutive
+# samples can be a metre apart. A point-to-point test for "did the hand touch the
+# ball" would then miss almost every genuine save, and a sample-equality test for
+# "did it cross the goal plane" would miss the crossing entirely. Same sub-frame
+# reasoning the shuttle drill already uses for its line crossings.
+
+def ball_xyz(ball):
+    """(x, y, z) of a usable ball sample, or None.
+
+    A COASTING sample is refused: that position is the Kalman filter predicting
+    through a detection drop, so scoring a save on it would be scoring an
+    extrapolation. The viewer labels it for exactly this reason.
+    """
+    if not ball:
+        return None
+    if ball.get("coasting"):
+        return None
+    try:
+        return (float(ball["x_mm"]), float(ball["y_mm"]), float(ball["z_mm"]))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def ball_speed_mm_s(ball):
+    """Speed from the reported velocity, or None when it was not sent."""
+    if not ball:
+        return None
+    try:
+        vx, vy, vz = (float(ball["vx_mm_s"]), float(ball["vy_mm_s"]),
+                      float(ball["vz_mm_s"]))
+    except (TypeError, ValueError, KeyError):
+        return None
+    speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+    return speed if math.isfinite(speed) else None
+
+
+def segment_point_distance(a, b, p):
+    """Shortest distance from point ``p`` to the segment ``a``->``b``.
+
+    This is what makes a save detectable at delivery speed: the hand is compared
+    against the path the ball travelled between two packets, not against the two
+    endpoints.
+    """
+    ax, ay, az = a
+    bx, by, bz = b
+    px, py, pz = p
+    dx, dy, dz = bx - ax, by - ay, bz - az
+    denom = dx * dx + dy * dy + dz * dz
+    if denom <= 0.0:
+        t = 0.0
+    else:
+        t = ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / denom
+        t = min(max(t, 0.0), 1.0)
+    cx, cy, cz = ax + t * dx, ay + t * dy, az + t * dz
+    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2 + (pz - cz) ** 2)
+
+
+def plane_crossing(a, b, plane_x_mm):
+    """Where the segment ``a``->``b`` crosses ``x = plane_x_mm``, or None.
+
+    Returns ``(y_mm, z_mm, frac)`` with ``frac`` the position along the segment,
+    so a caller can interpolate the crossing TIME as well as the point. None when
+    the segment does not straddle the plane, which is the honest answer — a
+    crossing inferred from two samples on the same side is invented.
+    """
+    ax, ay, az = a
+    bx, by, bz = b
+    plane = float(plane_x_mm)
+    if (ax - plane) * (bx - plane) > 0.0:
+        # Both endpoints on the same side. This is the ONLY straddle gate: an
+        # earlier version also bounded `frac` to [0, 1], which is exactly
+        # equivalent — a non-straddling segment always produces a fraction
+        # outside it. Two checks for one property meant neither could be removed
+        # by mistake and neither was testable in isolation, so the redundant one
+        # is gone and this one carries the guarantee.
+        return None
+    if ax == bx:
+        # Straddles only by touching it; no unique crossing to interpolate.
+        return (ay, az, 0.0) if ax == plane else None
+    frac = (plane - ax) / (bx - ax)
+    return (ay + frac * (by - ay), az + frac * (bz - az), frac)
 
 
 # ----------------------------------------------------------------------------
@@ -947,6 +1042,472 @@ class GkSaveDrill:
             return f"{s['saves']}/{s['rounds_completed']} saves"
         return (f"{s['saves']}/{s['rounds_completed']} saves · "
                 f"avg {s['avg_reaction_s']:.2f} s")
+
+
+# ----------------------------------------------------------------------------
+# GK 1b — SAVE THE CORNERS, ball-served (BLM delivers, this drill measures)
+# ----------------------------------------------------------------------------
+
+class GkSaveServedDrill:
+    """SAVE THE CORNERS against a real delivery instead of a screen cue.
+
+    Why this is a different drill rather than a mode of ``gk_save``
+    --------------------------------------------------------------
+    ``gk_save`` cues a corner on the scoreboard and scores a save when the
+    keeper's wrist enters a region defined relative to the keeper's OWN
+    shoulder/hip height. Two consequences follow, and both are artifacts:
+
+    * the keeper has to be watching the board, so the drill measures reaction to
+      a screen — something a keeper never does while facing a shot;
+    * a "corner" is a body-relative region, so the same physical place is a
+      different corner for a taller keeper.
+
+    Served, both disappear. The stimulus is the ball, which is what a keeper
+    actually reads, and the corner is a place in the GOAL, so it means the same
+    thing for everybody. The reaction time this drill reports is therefore the
+    first honest one in the family.
+
+    What it does NOT do
+    -------------------
+    It never commands the launcher, and there is no code path here that could.
+    Like every other drill it is a pure consumer of the viewer's UDP stream: the
+    serve is an operator act through the gated console, and this drill measures
+    whatever was served. Firing toward an occupied goal additionally needs the
+    commissioning gates in ``.claude/rules/safety.md`` (measured v(RPM) with its
+    spread, validated aiming, an energy limit) which are not met yet — so until
+    they are, this runs against serves into an EMPTY goal to characterise the
+    delivery, and the keeper works without a ball.
+
+    Corners are the four quadrants of a declared goal rectangle on the goal
+    plane. Only the operator can measure that rectangle, so it is declared rather
+    than guessed, and the constructor refuses one that does not fit the room.
+    """
+
+    kind = "gk_save_served"
+    title = "SAVE THE CORNERS · SERVED"
+    role = "gk"
+    # The board passes the ball stream only to a drill that asks for it, so the
+    # eight pose-only machines keep their two-argument `update` and cannot start
+    # depending on a stream they were not designed around.
+    wants_ball = True
+
+    def __init__(self, serves=10, arena_x_mm=6230.0, arena_y_mm=3050.0,
+                 goal_x_mm=None, goal_w_mm=2400.0, goal_h_mm=2000.0,
+                 goal_center_y_mm=None, keeper_depth_mm=1200.0,
+                 set_hold_s=0.6, flight_timeout_s=3.0, result_s=1.6,
+                 save_radius_mm=250.0, commit_mm=120.0, max_segment_s=0.15,
+                 corner_margin_mm=200.0,
+                 min_serve_speed_mm_s=MIN_SERVE_SPEED_MM_S,
+                 min_reaction_s=MIN_HUMAN_REACTION_S, min_flight_s=MIN_FLIGHT_S,
+                 flip=False, seed=None):
+        self.serves = max(1, int(serves))
+        self.arena_x_mm = float(arena_x_mm)
+        self.arena_y_mm = float(arena_y_mm)
+        # Default goal plane is the south wall the projector goal already uses
+        # (X = 6230 mm), so the two products describe the same surface.
+        self.goal_x_mm = float(arena_x_mm if goal_x_mm is None else goal_x_mm)
+        self.goal_w_mm = float(goal_w_mm)
+        self.goal_h_mm = float(goal_h_mm)
+        self.goal_center_y_mm = float(self.arena_y_mm / 2.0 if goal_center_y_mm is None
+                             else goal_center_y_mm)
+        self.keeper_depth_mm = float(keeper_depth_mm)
+        self.set_hold_s = float(set_hold_s)
+        self.flight_timeout_s = float(flight_timeout_s)
+        self.result_s = float(result_s)
+        self.save_radius_mm = float(save_radius_mm)
+        self.commit_mm = float(commit_mm)
+        # The longest gap between two ball packets that may still be treated as an
+        # OBSERVED stretch of flight. This is not a tuning knob; without it the
+        # segment tests are unsound. Measured ball detection on fast sequences is
+        # 46-52 %, so consecutive samples can be half a second apart, and a
+        # 10 m/s delivery covers 5 m in that time. Comparing the keeper's hand at
+        # NOW against a 5 m segment would call a save wherever the hand happens to
+        # sit near the ball's earlier path — a save the keeper never made.
+        self.max_segment_s = float(max_segment_s)
+        # How far from a centre line a crossing must be before it counts as
+        # CORNER evidence rather than a centre ball. See corner_of.
+        self.corner_margin_mm = float(corner_margin_mm)
+        self.min_serve_speed_mm_s = float(min_serve_speed_mm_s)
+        self.min_reaction_s = float(min_reaction_s)
+        self.min_flight_s = float(min_flight_s)
+        self.flip = bool(flip)
+        # Recorded for audit, never used to schedule anything: the operator's own
+        # timing is this drill's anti-anticipation mechanism, which is stronger
+        # than an RNG because it is not drawn from a distribution the keeper can
+        # learn. Kept only so the session record can say a seed was pinned.
+        self.seed = seed
+
+        # Refuse an impossible protocol rather than clamping it — a clamped goal
+        # would silently score corners that are not where the operator measured.
+        if self.goal_w_mm <= 0.0 or self.goal_h_mm <= 0.0:
+            raise ValueError(
+                f"goal must have positive extent, got {self.goal_w_mm:g} x "
+                f"{self.goal_h_mm:g} mm")
+        if self.goal_w_mm > self.arena_y_mm:
+            raise ValueError(
+                f"goal width {self.goal_w_mm:g} mm exceeds the arena width "
+                f"{self.arena_y_mm:g} mm")
+        left, right = self.goal_left(), self.goal_right()
+        if left < 0.0 or right > self.arena_y_mm:
+            raise ValueError(
+                f"goal spans [{left:g}, {right:g}] mm, outside the arena width "
+                f"[0, {self.arena_y_mm:g}] — re-measure the centre or the width")
+        if self.save_radius_mm <= 0.0:
+            raise ValueError("save_radius_mm must be positive")
+        self.reset()
+
+    # ---- declared geometry ------------------------------------------------
+
+    def goal_left(self):
+        return self.goal_center_y_mm - self.goal_w_mm / 2.0
+
+    def goal_right(self):
+        return self.goal_center_y_mm + self.goal_w_mm / 2.0
+
+    def corner_of(self, y_mm, z_mm):
+        """Where in the goal a crossing landed: a corner, ``"CENTRE"``, or None.
+
+        Three distinct answers, and the middle one exists because of a real
+        finding. A pure 2x2 partition labels a ball that crossed exactly on the
+        centre line as a corner — the first scripted delivery down the middle came
+        back ``HIGH-RIGHT`` from 0 mm off centre. That result is not wrong about
+        save-or-goal, but it is worthless as corner evidence, and it would have
+        quietly polluted the per-corner record a coach reads to pick the keeper's
+        weak side. A crossing within ``corner_margin_mm`` of either centre line is
+        therefore ``"CENTRE"``: still a real chance, still scored, simply not
+        attributed to a corner.
+
+        ``None`` means outside the posts or over the bar — a statement about the
+        launcher, not about the keeper.
+        """
+        if not (self.goal_left() <= y_mm <= self.goal_right()):
+            return None
+        if not (0.0 <= z_mm <= self.goal_h_mm):
+            return None
+        dy = y_mm - self.goal_center_y_mm
+        dz = z_mm - self.goal_h_mm / 2.0
+        if abs(dy) < self.corner_margin_mm or abs(dz) < self.corner_margin_mm:
+            return "CENTRE"
+        left = dy < 0.0
+        if self.flip:
+            left = not left
+        high = dz >= 0.0
+        return ("HIGH" if high else "LOW") + "-" + ("LEFT" if left else "RIGHT")
+
+    def keeper_is_set(self, joints):
+        """Keeper present, in the goal mouth, on the goal side of the room."""
+        p = pelvis_mm(joints)
+        if p is None:
+            return False
+        if abs(p[0] - self.goal_x_mm) > self.keeper_depth_mm:
+            return False
+        return self.goal_left() <= p[1] <= self.goal_right()
+
+    # ---- lifecycle --------------------------------------------------------
+
+    def reset(self):
+        self.state = "idle"
+        self.t_state = 0.0
+        self.round_idx = 0
+        self.saves = 0
+        self.goals = 0
+        self.wide_serves = 0
+        self.anticipated = 0
+        self.voided_rounds = 0
+        self.results = []
+        self.last_result = None
+        self.corner = None
+        self.go_time = None
+        self.serve_speed = None
+        self.min_hand_mm = None
+        self.reaction_s = None
+        self._set_since = None
+        self._set_ref = None
+        self._prev_ball = None
+        self._prev_ball_t = None
+        self._flight_samples = 0
+        # Set when any stretch of this flight went unobserved for longer than
+        # max_segment_s. A SAVE stays trustworthy through a gap (a touch was
+        # positively observed on a tight segment); a GOAL does not, because the
+        # touch could have happened inside the gap — so the verdict is voided
+        # rather than credited to the launcher.
+        self._track_gap = False
+        self._events = []
+
+    def start(self, now):
+        if self.state in ("idle", "done"):
+            self.reset()
+            self.state = "set_wait"
+            self.t_state = now
+
+    # ---- serve detection --------------------------------------------------
+
+    def _is_serve(self, pos, speed, keeper_x):
+        """Whether this sample is a delivery on its way to the goal.
+
+        Direction is DERIVED from the geometry (does the ball approach the goal
+        plane?) rather than assumed, so the launcher may stand at either end of
+        the room without a flag.
+        """
+        if speed is None or not is_plausible_serve_speed(
+                speed, min_speed_mm_s=self.min_serve_speed_mm_s):
+            return False
+        if self._prev_ball is None:
+            return False
+        closing = abs(self.goal_x_mm - pos[0]) < abs(self.goal_x_mm - self._prev_ball[0])
+        if not closing:
+            return False
+        # The ball must still be in front of the keeper. Acquiring it after it has
+        # already passed leaves no reaction to measure — the same defect class as
+        # cueing a corner the keeper already occupies.
+        if keeper_x is None:
+            return True
+        return abs(self.goal_x_mm - pos[0]) > abs(self.goal_x_mm - keeper_x)
+
+    def update(self, now, joints=None, ball=None):
+        pos = ball_xyz(ball)
+        speed = ball_speed_mm_s(ball)
+        p = pelvis_mm(joints)
+        keeper_x = None if p is None else p[0]
+
+        if self.state == "set_wait":
+            if self.keeper_is_set(joints):
+                if self._set_since is None:
+                    self._set_since = now
+                if now - self._set_since >= self.set_hold_s:
+                    self.state = "armed"
+                    # Frozen so "the keeper committed" is measured against where
+                    # they actually stood, not against a moving average.
+                    self._set_ref = self._hand_anchor(joints) or p
+            else:
+                self._set_since = None
+
+        elif self.state == "armed":
+            if not self.keeper_is_set(joints) and p is not None:
+                # POSITIVE evidence of leaving the set position, never a dropout.
+                self.state = "set_wait"
+                self._set_since = None
+            elif pos is not None and self._is_serve(pos, speed, keeper_x):
+                self.corner = None
+                self.go_time = now
+                self.serve_speed = speed
+                self.min_hand_mm = None
+                self.reaction_s = None
+                self._flight_samples = 1
+                self._track_gap = False
+                self.state = "flight"
+                self.t_state = now
+
+        elif self.state == "flight":
+            self._track_flight(now, joints, pos)
+
+        elif self.state == "result":
+            if now - self.t_state >= self.result_s:
+                self.round_idx += 1
+                if self.round_idx >= self.serves:
+                    self.state = "done"
+                else:
+                    self.state = "set_wait"
+                    self._set_since = None
+
+        if pos is not None:
+            self._prev_ball, self._prev_ball_t = pos, now
+        return self.state
+
+    def _hand_anchor(self, joints):
+        return midpoint(get_joint(joints, "left_wrist"),
+                        get_joint(joints, "right_wrist"))
+
+    def _track_flight(self, now, joints, pos):
+        elapsed = now - self.go_time
+
+        # Reaction: the first committed movement of the hands away from where
+        # they were at set. Measured against the real serve instant, so a value
+        # below the human floor is anticipation rather than a fast keeper.
+        if self.reaction_s is None and self._set_ref is not None:
+            hands = self._hand_anchor(joints)
+            if hands is not None:
+                moved = math.dist(hands, self._set_ref)
+                if moved >= self.commit_mm:
+                    self.reaction_s = elapsed
+
+        if pos is not None and self._prev_ball is not None:
+            self._flight_samples += 1
+            segment_s = (now - self._prev_ball_t
+                         if self._prev_ball_t is not None else 0.0)
+            observed = segment_s <= self.max_segment_s
+            if not observed:
+                self._track_gap = True
+
+            # Closest approach of either hand to the path the ball travelled
+            # between the two packets — only for a stretch short enough that the
+            # hand has not meaningfully moved across it.
+            if observed:
+                for name in ("left_wrist", "right_wrist"):
+                    hand = get_joint(joints, name)
+                    if hand is None:
+                        continue
+                    gap = segment_point_distance(self._prev_ball, pos, hand)
+                    if self.min_hand_mm is None or gap < self.min_hand_mm:
+                        self.min_hand_mm = gap
+
+            crossing = plane_crossing(self._prev_ball, pos, self.goal_x_mm)
+            if crossing is not None:
+                if not observed:
+                    # The crossing point is interpolated across an unobserved
+                    # stretch, so the corner it lands in is a guess.
+                    self._record_void(now, "ball_track_gap_at_crossing")
+                    return
+                y_mm, z_mm, _frac = crossing
+                self._resolve(now, elapsed, y_mm, z_mm)
+                return
+
+        if elapsed >= self.flight_timeout_s:
+            # Never reached the goal plane in a plausible time: the delivery fell
+            # short, or the track was lost through the decisive moment. Either
+            # way there is nothing to score.
+            self._record_void(now, "no_goal_plane_crossing")
+
+    def _resolve(self, now, elapsed, y_mm, z_mm):
+        if elapsed < self.min_flight_s or self._flight_samples < 2:
+            self._record_void(now, "flight_too_short_to_observe")
+            return
+        corner = self.corner_of(y_mm, z_mm)
+        self.corner = corner
+        touched = (self.min_hand_mm is not None
+                   and self.min_hand_mm <= self.save_radius_mm)
+
+        if corner is None:
+            # The serve missed the goal. Recorded as its own outcome and kept out
+            # of the keeper's save rate — scoring it against the keeper would
+            # blame them for the launcher's aim, which is not even commissioned.
+            self.wide_serves += 1
+            self._record(now, "wide", y_mm, z_mm, elapsed)
+            return
+        if (touched and self.reaction_s is not None
+                and not is_plausible_reaction(self.reaction_s,
+                                              self.min_reaction_s)):
+            # The hand was on the ball, but the keeper had already committed
+            # before a human could have read the serve.
+            #
+            # `reaction_s is not None` matters and is not defensive: an unmeasured
+            # reaction is NOT an anticipation. A ball served straight at a keeper
+            # who catches it without displacing their hands by `commit_mm` is a
+            # save with no reaction to report — real goalkeeping, and the first
+            # version of this branch scored it as a fault.
+            self.anticipated += 1
+            self._record(now, "anticipated", y_mm, z_mm, elapsed)
+            return
+        if touched:
+            # A positively observed touch on a tight segment survives a gap
+            # elsewhere in the flight: the evidence for it does not depend on
+            # what was missed.
+            self.saves += 1
+            self._record(now, "save", y_mm, z_mm, elapsed)
+        elif self._track_gap:
+            # "No touch" is the one verdict a gap can fabricate, so it is not
+            # awarded. Voiding costs a rep; crediting a goal the keeper may have
+            # saved corrupts the save rate the session is judged on.
+            self._record_void(now, "ball_track_gap_unresolved")
+        else:
+            self.goals += 1
+            self._record(now, "goal", y_mm, z_mm, elapsed)
+
+    def _record(self, now, result, y_mm, z_mm, elapsed):
+        row = {
+            "corner": self.corner,
+            "result": result,
+            "reaction_s": _round(self.reaction_s, 3),
+            "flight_s": _round(elapsed, 3),
+            "serve_speed_mm_s": _round(self.serve_speed, 0),
+            "min_hand_mm": _round(self.min_hand_mm, 0),
+            "cross_y_mm": _round(y_mm, 0),
+            "cross_z_mm": _round(z_mm, 0),
+            "ball_samples": self._flight_samples,
+        }
+        self.results.append(row)
+        self._events.append({"event": "round", "round": self.round_idx + 1, **row})
+        self.last_result = (result, self.reaction_s)
+        self.state = "result"
+        self.t_state = now
+
+    def _record_void(self, now, reason):
+        self.voided_rounds += 1
+        self._events.append({"event": "round_void", "round": self.round_idx + 1,
+                             "corner": None, "reason": reason,
+                             "ball_samples": self._flight_samples})
+        self.last_result = ("void", None)
+        self.corner = None
+        self.state = "result"
+        self.t_state = now
+
+    def pop_events(self):
+        ev, self._events = self._events, []
+        return ev
+
+    # ---- reporting --------------------------------------------------------
+
+    @staticmethod
+    def _save_reactions(rows):
+        return [r["reaction_s"] for r in rows
+                if r["result"] == "save" and r["reaction_s"] is not None]
+
+    def per_corner(self):
+        """Save record per CORNER. Centre balls and wide serves are not corners.
+
+        Keeping a centre ball out of here is the point: this table is what a coach
+        reads to choose the keeper's weak side, and a delivery down the middle is
+        evidence about neither side.
+        """
+        out = {}
+        for row in self.results:
+            corner = row["corner"]
+            if corner is None or corner == "CENTRE":
+                continue
+            slot = out.setdefault(corner, {"faced": 0, "saves": 0})
+            slot["faced"] += 1
+            if row["result"] == "save":
+                slot["saves"] += 1
+        return out
+
+    def summary(self):
+        # A wide serve was never a chance, so it is excluded from the denominator
+        # the save rate is quoted against. It is reported separately instead,
+        # because a session full of them is a launcher finding.
+        faced = [r for r in self.results if r["result"] in ("save", "goal")]
+        reactions = self._save_reactions(self.results)
+        return {
+            "rounds_completed": len(faced),
+            "serves_observed": len(self.results),
+            "saves": self.saves,
+            "goals": self.goals,
+            "wide_serves": self.wide_serves,
+            "anticipated": self.anticipated,
+            "voided_rounds": self.voided_rounds,
+            "save_rate": (_round(self.saves / len(faced), 3) if faced else None),
+            "avg_reaction_s": (_round(fmean(reactions), 3) if reactions else None),
+            "best_reaction_s": (_round(min(reactions), 3) if reactions else None),
+            "avg_serve_speed_mm_s": (
+                _round(fmean([r["serve_speed_mm_s"] for r in self.results
+                              if r["serve_speed_mm_s"] is not None]), 0)
+                if any(r["serve_speed_mm_s"] is not None for r in self.results)
+                else None),
+            "per_corner": self.per_corner(),
+            "results": self.results,
+            "goal_mm": {"plane_x": self.goal_x_mm, "width": self.goal_w_mm,
+                        "height": self.goal_h_mm, "center_y": self.goal_center_y_mm},
+        }
+
+    def headline(self):
+        s = self.summary()
+        if not s["rounds_completed"]:
+            if s["wide_serves"]:
+                return f"{s['wide_serves']} serve(s) missed the goal"
+            return "no measured serve"
+        text = f"{s['saves']}/{s['rounds_completed']} saves"
+        if s["avg_reaction_s"] is not None:
+            text += f" · avg {s['avg_reaction_s']:.2f} s"
+        return text
 
 
 # ----------------------------------------------------------------------------
@@ -1933,6 +2494,7 @@ DRILL_REGISTRY = {
     "shuttle": ShuttleDrill,
     "line_hops": LineHopsDrill,
     "gk_save": GkSaveDrill,
+    "gk_save_served": GkSaveServedDrill,
     "gk_updown": GkUpDownDrill,
     "reaction_zones": ReactionZonesDrill,
     "cmj": CmjDrill,
@@ -1965,6 +2527,24 @@ PROTOCOL_CATALOG = {
     "gk_save":   {"protocol_id": "gk_save.v1",
                   "workload": ("rounds", "--rounds", 5, 20),
                   "fixed": ()},
+    "gk_save_served": {
+        "protocol_id": "gk_save_served.v1",
+        "workload": ("serves", "--rounds", 3, 20),
+        # The goal rectangle DEFINES this protocol: the same save rate against a
+        # 2.4 m goal and a 3.0 m goal are not comparable numbers. It is not
+        # settable through the wrapper allowlist, but it enters the fingerprint,
+        # so re-measuring the goal rolls the baseline epoch on its own.
+        "fixed": (
+            "goal_x_mm",
+            "goal_w_mm",
+            "goal_h_mm",
+            "goal_center_y_mm",
+            "keeper_depth_mm",
+            "save_radius_mm",
+            "max_segment_s",
+            "min_serve_speed_mm_s",
+        ),
+    },
     "gk_updown": {"protocol_id": "gk_updown.v1",
                   "workload": ("duration_s", "--duration", 15.0, 120.0),
                   "fixed": ()},

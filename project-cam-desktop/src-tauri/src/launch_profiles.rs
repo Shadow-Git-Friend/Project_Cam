@@ -104,15 +104,43 @@ impl AppPaths {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "drill", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrainingDrillRequest {
-    Balance { holds: u32 },
-    Shuttle { reps: u32 },
-    LineHops { sets: u32 },
-    GkSave { rounds: u32, flip: bool },
-    GkUpdown { duration_s: f64 },
-    ReactionZones { rounds: u32, projector: bool },
-    Cmj { jumps: u32 },
-    HopSymmetry { hops_per_leg: u32 },
-    ReactiveCut { reps: u32, projector: bool },
+    Balance {
+        holds: u32,
+    },
+    Shuttle {
+        reps: u32,
+    },
+    LineHops {
+        sets: u32,
+    },
+    GkSave {
+        rounds: u32,
+        flip: bool,
+    },
+    /// SAVE THE CORNERS against a real BLM delivery. The wrapper turns ball
+    /// tracking on for this drill only; it still opens no serial and cannot
+    /// request a serve — the operator delivers through the gated console.
+    GkSaveServed {
+        serves: u32,
+        flip: bool,
+    },
+    GkUpdown {
+        duration_s: f64,
+    },
+    ReactionZones {
+        rounds: u32,
+        projector: bool,
+    },
+    Cmj {
+        jumps: u32,
+    },
+    HopSymmetry {
+        hops_per_leg: u32,
+    },
+    ReactiveCut {
+        reps: u32,
+        projector: bool,
+    },
 }
 
 impl TrainingDrillRequest {
@@ -122,6 +150,7 @@ impl TrainingDrillRequest {
             Self::Shuttle { .. } => "shuttle",
             Self::LineHops { .. } => "line_hops",
             Self::GkSave { .. } => "gk_save",
+            Self::GkSaveServed { .. } => "gk_save_served",
             Self::GkUpdown { .. } => "gk_updown",
             Self::ReactionZones { .. } => "reaction_zones",
             Self::Cmj { .. } => "cmj",
@@ -167,6 +196,14 @@ impl TrainingDrillRequest {
                 Self::check(rounds as f64, 5.0, 20.0, id, "rounds")?;
                 args.push("--rounds".into());
                 args.push(rounds.to_string());
+                if flip {
+                    args.push("--flip".into());
+                }
+            }
+            Self::GkSaveServed { serves, flip } => {
+                Self::check(serves as f64, 3.0, 20.0, id, "serves")?;
+                args.push("--rounds".into());
+                args.push(serves.to_string());
                 if flip {
                     args.push("--flip".into());
                 }

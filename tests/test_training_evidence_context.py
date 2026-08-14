@@ -13,6 +13,7 @@ session record carries the protocol + the parameters actually used.
 
 import importlib.util
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -20,9 +21,9 @@ from pathlib import Path
 import pytest
 
 from project_cam.training.drills import (
+    DRILL_REGISTRY,
     FINGERPRINT_EXCLUDED,
     PROTOCOL_CATALOG,
-    DRILL_REGISTRY,
     applied_parameters,
     build_session_record,
     protocol_parameters_fingerprint,
@@ -129,6 +130,71 @@ def test_pinned_seed_is_recorded_for_audit():
     assert "seed_pinned" not in board.session_evidence_context(free, None)
 
 
+
+def test_a_ball_packet_does_not_pretend_a_person_was_tracked():
+    """A ball is not a body, and it gets its own clock.
+
+    The served drill needs the delivery even when the keeper drops out of
+    tracking for a frame, so a ball must not depend on joints. Equally it must
+    never advance the TRACKING clock: an armed drill state reading a ball-only
+    packet as a fresh observation of the athlete would be the same defect the
+    heartbeat rule exists to prevent.
+    """
+    board = load_board()
+    listener = make_listener(board)
+    now = time.time()
+    ball = {"x_mm": 1000.0, "y_mm": 1500.0, "z_mm": 1200.0,
+            "vx_mm_s": 9000.0, "vy_mm_s": 0.0, "vz_mm_s": 0.0,
+            "mode": "AIRBORNE", "cams": 3, "coasting": False}
+    listener._observe_packet({"ball": ball}, {}, {}, {}, now=now)
+
+    assert listener.last_ball_ts == now
+    assert listener.last_ts == 0.0, "the tracking clock must stay untouched"
+    assert listener.get(max_age=0.6)[0] is None
+    assert listener.get_ball(max_age=1.0) == ball
+
+
+def test_a_stale_ball_sample_is_withheld_rather_than_interpolated():
+    """A served drill measures SEGMENTS between consecutive ball packets. A stale
+    sample would stretch one across metres of unobserved flight, so the listener
+    withholds it and the drill treats the stretch as unobserved."""
+    board = load_board()
+    listener = make_listener(board)
+    listener._observe_packet(
+        {"ball": {"x_mm": 1.0, "y_mm": 2.0, "z_mm": 3.0}}, {}, {}, {},
+        now=time.time() - 5.0)
+    assert listener.get_ball(max_age=0.25) is None
+    assert listener.get_ball(max_age=10.0) is not None
+
+
+def test_only_a_drill_that_declares_it_receives_the_ball():
+    """The eight pose-only machines keep a two-argument `update`, so they cannot
+    start depending on a stream they were never designed around."""
+    board = load_board()
+    ball = {"x_mm": 1000.0, "y_mm": 1500.0, "z_mm": 1200.0,
+            "vx_mm_s": 9000.0, "vy_mm_s": 0.0, "vz_mm_s": 0.0,
+            "mode": "AIRBORNE", "cams": 3, "coasting": False}
+
+    assert DRILL_REGISTRY["gk_save_served"].wants_ball is True
+    for kind, cls in DRILL_REGISTRY.items():
+        if kind == "gk_save_served":
+            continue
+        assert getattr(cls, "wants_ball", False) is False, kind
+
+    # Behaviour, not a source string: a mutation sweep showed the grep version of
+    # this contract survived making the dispatch unconditional, which would hand a
+    # third argument to eight `update`s that take two.
+    pose_only = DRILL_REGISTRY["balance"](holds=2)
+    pose_only.start(0.0)
+    board.drill_tick(pose_only, 0.1, None, ball)      # must not raise
+
+    served = DRILL_REGISTRY["gk_save_served"](serves=3, goal_x_mm=6230.0)
+    seen = {}
+    served.update = lambda now, joints=None, b=None: seen.setdefault("ball", b)
+    board.drill_tick(served, 0.1, None, ball)
+    assert seen["ball"] is ball, "a served drill must actually receive the ball"
+
+
 # ------------------------- listener liveness vs tracking -------------------
 
 def make_listener(board):
@@ -146,6 +212,9 @@ def make_listener(board):
     listener._packets_with_joints = 0
     listener._cams_seen = []
     listener._role_open_packets = {}
+    listener.ball = None
+    listener.last_ball_ts = 0.0
+    listener._packets_with_ball = 0
     return listener
 
 
@@ -313,13 +382,69 @@ def test_capture_context_is_opt_in():
     assert "default=True" not in source.split("--udp-capture-context")[1][:400]
 
 
-def test_default_send_gate_is_unchanged_when_context_is_off():
-    """With the flag off the guard must reduce to the original `if
-    joints_payload:` — the UDP payload path is protected geometry."""
+def test_default_send_gate_reduces_to_joints_only_with_every_extra_off():
+    """With every opt-in flag off the guard must reduce to the original
+    `if joints_payload:` — the UDP payload path is protected geometry.
+
+    Rewritten 2026-08-07, when `--udp-ball` added a second opt-in disjunct. The
+    property is NOT "the guard reads exactly this string": it is that every extra
+    term is falsy unless its own `store_true` flag was passed, so the launcher's
+    packet stream is byte-identical by default. A test pinned to the literal line
+    would have to be rewritten for each new consumer channel and would say
+    nothing about the guarantee.
+    """
     source = LIVE.read_text(encoding="utf-8")
-    assert "if joints_payload or capture_context is not None:" in source
-    # And the block only attaches `capture` when a context exists.
+    match = re.search(r"\n\s*if (joints_payload[^\n]*):\n\s*pkt = \{", source)
+    assert match, "the send guard moved — re-read the UDP block"
+    terms = [term.strip() for term in match.group(1).split(" or ")]
+    assert terms[0] == "joints_payload", terms
+    # Each additional term is gated by an opt-in flag, so it is falsy by default.
+    extras = {
+        "capture_context is not None": "--udp-capture-context",
+        "ball_payload": "--udp-ball",
+    }
+    assert set(terms[1:]) <= set(extras), (
+        f"undeclared disjunct in the send guard: {set(terms[1:]) - set(extras)}")
+    for term in terms[1:]:
+        flag = extras[term]
+        assert f'"{flag}", action="store_true"' in source, flag
+        assert "default=True" not in source.split(flag)[1][:400], flag
+    # And each block attaches its key only when it actually has one.
     assert 'if capture_context is not None:\n                        pkt["capture"]' in source
+    assert 'if ball_payload is not None:\n                        pkt["ball"]' in source
+
+
+def test_the_ball_channel_is_opt_in_and_never_reaches_the_launcher():
+    """Same fail-closed reasoning as the capture-context heartbeat.
+
+    A packet without a `safety` block disarms the runtime by design, so any extra
+    packet this channel causes must never appear on a launcher-facing profile. The
+    served drill is the only consumer, and it is view-only.
+    """
+    source = LIVE.read_text(encoding="utf-8")
+    assert '"--udp-ball", action="store_true"' in source
+    assert "default=True" not in source.split("--udp-ball")[1][:400]
+    wrapper = WRAPPER.read_text(encoding="utf-8")
+    assert "--udp-ball" in wrapper, "the served drill needs the ball channel"
+    for script in sorted((ROOT / "Parallel_working").glob("run_live*blm*.sh")):
+        assert "--udp-ball" not in script.read_text(encoding="utf-8"), script
+
+
+def test_the_ball_velocity_is_mirrored_as_a_displacement_not_as_a_point():
+    """The Y mirror is `y -> Y_max - y`, so a POSITION gets the offset and a
+    VELOCITY only gets its sign flipped. Passing a velocity through
+    `transform_world_point_y` would add Y_max to it — a silent axis error of
+    exactly the kind geometry.md forbids, and one that would place every serve on
+    the wrong side of the goal.
+    """
+    source = LIVE.read_text(encoding="utf-8")
+    block = source[source.index("ball_payload = None"):]
+    block = block[:block.index("# With capture context on")]
+    assert "transform_world_point_y(" in block, "the position must be mirrored"
+    assert '"vy_mm_s": -vy if udp_world_y_mirror else vy' in block
+    # The velocity must NOT be routed through the point transform.
+    assert "transform_world_point_y(vel" not in block
+    assert "transform_world_point_y(ball_kf" not in block
 
 
 def test_only_the_view_only_drill_wrapper_enables_the_heartbeat():

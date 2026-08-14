@@ -109,6 +109,25 @@ VIEWER_ARGS=(
   --kalman-measured-dt
   --pose-latency-comp-ms 120
 )
+# A SERVED drill scores the real delivery, so it is the one profile that needs
+# ball tracking. Every other drill keeps the base launcher's --no-track-ball,
+# which leaves the ball engine off the GPU entirely.
+#
+# Still VIEW-ONLY: --udp-ball only ADDS the tracked ball to the outgoing
+# broadcast. Nothing here opens serial, and the launcher is served by the
+# operator through the gated desktop console — the drill measures whatever was
+# delivered and can neither request nor authorize a shot.
+#
+# --ball-imgsz stays at the engine's export size: inference imgsz is LOCKED to
+# it (see .claude/rules/perf.md), and an off-size run produces ~300 garbage
+# detections per frame rather than an error.
+case "$DRILL" in
+  gk_save_served)
+    VIEWER_ARGS+=(--track-ball --udp-ball --ball-imgsz 672 --ball-every 1)
+    echo "[drill] served drill: ball tracking ON (view-only broadcast)"
+    ;;
+esac
+
 if [ "$PEOPLE" -gt 1 ] 2>/dev/null; then
   VIEWER_ARGS+=(--multi-person "$PEOPLE")
 fi

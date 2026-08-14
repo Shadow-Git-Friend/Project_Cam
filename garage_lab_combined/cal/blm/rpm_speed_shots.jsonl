@@ -1,0 +1,4 @@
+{"schema": "project_cam.blm_console.v1", "event": "shot_fired", "method": "A_landing_distance", "rpm": 500.0, "shot_seq": 1, "at": "2026-08-07T11:39:08", "session_id": "s-20260807T063721410Z-20afb320a1714971a289f691f72530b4"}
+{"schema": "project_cam.blm_console.v1", "event": "shot_fired", "method": "A_landing_distance", "rpm": 650.0, "shot_seq": 1, "at": "2026-08-07T11:41:29", "session_id": "s-20260807T064028935Z-58d2ab0a1b134966831961e456b3e1fc"}
+{"schema": "project_cam.blm_console.v1", "event": "shot_fired", "method": "A_landing_distance", "rpm": 650.0, "shot_seq": 2, "at": "2026-08-07T11:42:45", "session_id": "s-20260807T064028935Z-58d2ab0a1b134966831961e456b3e1fc"}
+{"schema": "project_cam.blm_console.v1", "event": "shot_fired", "method": "A_landing_distance", "rpm": 800.0, "shot_seq": 3, "at": "2026-08-07T11:43:51", "session_id": "s-20260807T064028935Z-58d2ab0a1b134966831961e456b3e1fc"}

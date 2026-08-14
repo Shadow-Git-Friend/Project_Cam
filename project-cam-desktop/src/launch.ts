@@ -12,6 +12,7 @@ export type TrainingDrillRequest =
   | { drill: "shuttle"; reps: number }
   | { drill: "line_hops"; sets: number }
   | { drill: "gk_save"; rounds: number; flip: boolean }
+  | { drill: "gk_save_served"; serves: number; flip: boolean }
   | { drill: "gk_updown"; duration_s: number }
   | { drill: "reaction_zones"; rounds: number; projector: boolean }
   | { drill: "cmj"; jumps: number }
@@ -80,6 +81,8 @@ export function drillRequest(
       return { drill: "line_hops", sets: workload };
     case "gk_save":
       return { drill: "gk_save", rounds: workload, flip };
+    case "gk_save_served":
+      return { drill: "gk_save_served", serves: workload, flip };
     case "gk_updown":
       return { drill: "gk_updown", duration_s: workload };
     case "cmj":

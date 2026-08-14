@@ -153,6 +153,13 @@ class UDPJointListener:
         self.last_ts = 0.0          # last joint observation (tracking)
         self.last_packet_ts = 0.0   # last packet of any kind (liveness)
         self.capture = None
+        # The tracked ball, for a served drill. Its own clock, because a ball is
+        # stale on a completely different timescale from a body: at delivery
+        # speed a 0.6 s-old joint is a slightly lagging limb, while a 0.6 s-old
+        # ball is six metres away from where the packet says it is.
+        self.ball = None
+        self.last_ball_ts = 0.0
+        self._packets_with_ball = 0
         self._packets = 0
         self._packets_with_joints = 0
         self._cams_seen = []
@@ -243,6 +250,11 @@ class UDPJointListener:
         """Record one packet under the lock. Caller holds self.lock."""
         self._packets += 1
         self.last_packet_ts = now
+        ball = pkt.get("ball")
+        if isinstance(ball, dict) and "x_mm" in ball:
+            self.ball = ball
+            self.last_ball_ts = now
+            self._packets_with_ball += 1
         capture = pkt.get("capture")
         if isinstance(capture, dict):
             self.capture = capture
@@ -273,6 +285,22 @@ class UDPJointListener:
             if not self.joints or age > max_age:
                 return None, age
             return dict(self.joints), age
+
+    def get_ball(self, max_age=0.25):
+        """The last ball sample, or None when there is none fresh enough.
+
+        Tighter than the joint age by default and deliberately so: a served drill
+        measures segments between consecutive ball packets, and a stale sample
+        would stretch one across metres of unobserved flight. Returning None is
+        the honest answer — the drill then treats the stretch as unobserved
+        instead of interpolating through it.
+        """
+        with self.lock:
+            if not self.last_ball_ts or self.ball is None:
+                return None
+            if time.time() - self.last_ball_ts > max_age:
+                return None
+            return dict(self.ball)
 
     def viewer_alive(self, max_age=2.0):
         """Did any packet (including a heartbeat) arrive recently?"""
@@ -1360,6 +1388,167 @@ def draw_gk_save(img, d, now, joints, args, W, H):
     note_right(img, W, H, "HIGH/LOW bands measured from your own shoulder and hip")
 
 
+SERVED_STAGE = (0.20, 0.46, 0.80, 0.83)
+
+
+def draw_gk_save_served(img, d, now, joints, args, W, H):
+    """Served save matrix: the goal is drawn to SCALE and the ball is the cue.
+
+    Two differences from the virtual drill drive this layout. There is no corner
+    to light, because the stimulus is the delivery — so nothing is cue-yellow
+    except the live ball itself. And the goal is a measured rectangle rather than
+    body-relative bands, so the stage maps declared millimetres onto the frame and
+    the last crossing is plotted where it actually crossed. That plotted point is
+    the drill's whole claim; drawing a lit quadrant instead would hide whether the
+    serve was 50 mm inside the post or 500.
+    """
+    gx0, gy0f, gx1, gy1f = SERVED_STAGE
+    gx0, gx1 = int(W * gx0), int(W * gx1)
+    gy0, gy1 = int(H * gy0f), int(H * gy1f)
+    goal_frame(img, gx0, gy0, gx1, gy1, H)
+
+    def to_frame(y_mm, z_mm):
+        """Declared goal millimetres -> stage pixels, honouring --flip."""
+        span = max(1.0, d.goal_w_mm)
+        t = (float(y_mm) - d.goal_left()) / span
+        if d.flip:
+            t = 1.0 - t
+        u = gx0 + t * (gx1 - gx0)
+        v = gy1 - max(0.0, min(1.0, float(z_mm) / max(1.0, d.goal_h_mm))) * (gy1 - gy0)
+        return int(u), int(v)
+
+    # Quadrant guides only — thin, unlit. They name the corners without competing
+    # with the ball or the crossing.
+    cv2.line(img, ((gx0 + gx1) // 2, gy0), ((gx0 + gx1) // 2, gy1),
+             (40, 44, 48), 1, cv2.LINE_AA)
+    cv2.line(img, (gx0, (gy0 + gy1) // 2), (gx1, (gy0 + gy1) // 2),
+             (40, 44, 48), 1, cv2.LINE_AA)
+    per = d.per_corner()
+    for name, short in CORNER_ROWS:
+        high = name.startswith("HIGH")
+        left = name.endswith("LEFT")
+        ly = d.goal_center_y_mm + (-1 if left else 1) * d.goal_w_mm * 0.25
+        lz = d.goal_h_mm * (0.75 if high else 0.25)
+        u, v = to_frame(ly, lz)
+        rec = per.get(name)
+        lcol = STEEL if not rec else (
+            GREEN if rec["saves"] == rec["faced"]
+            else RED if rec["saves"] == 0 else AMBER)
+        text_c(img, short, u, v, sc(H, 0.85), lcol, 2, shadow=False)
+        if rec:
+            text_c(img, f"{rec['saves']}/{rec['faced']}", u, v + int(sc(H, 30)),
+                   sc(H, 0.5), STEEL, 1, shadow=False)
+
+    # The keeper's hands, on the same scale as the goal.
+    if joints and d.state in ("set_wait", "armed", "flight"):
+        for wn, col in (("left_wrist", (255, 200, 40)),
+                        ("right_wrist", (40, 200, 255))):
+            w = get_joint(joints, wn)
+            if w is None:
+                continue
+            u, v = to_frame(w[1], w[2])
+            cv2.circle(img, (u, v), int(sc(H, 9)), col, -1, cv2.LINE_AA)
+            cv2.circle(img, (u, v), int(sc(H, 9)), (0, 0, 0), 2, cv2.LINE_AA)
+
+    # Where the last serve actually crossed. Plotted even when it was WIDE — the
+    # point outside the posts is the finding, and clamping it into the frame would
+    # erase the only evidence that the launcher missed.
+    last = d.results[-1] if d.results else None
+    if d.state == "result" and last and last.get("cross_y_mm") is not None:
+        verdict = {"save": GREEN, "goal": RED, "wide": AMBER,
+                   "anticipated": AMBER}.get(last["result"], STEEL)
+        u, v = to_frame(last["cross_y_mm"], last["cross_z_mm"])
+        u = max(int(W * 0.06), min(int(W * 0.94), u))
+        v = max(int(H * 0.40), min(int(H * 0.87), v))
+        glow(img, u, v, int(sc(H, 34)), verdict, 0.5)
+        cv2.circle(img, (u, v), int(sc(H, 13)), verdict, 3, cv2.LINE_AA)
+        cv2.line(img, (u - int(sc(H, 22)), v), (u + int(sc(H, 22)), v), verdict, 1)
+        cv2.line(img, (u, v - int(sc(H, 22))), (u, v + int(sc(H, 22))), verdict, 1)
+
+    # ---- hero band -----------------------------------------------------------
+    if d.state == "set_wait":
+        prompt(img, W, H, "GET SET - IN THE GOAL, HANDS READY", y_frac=0.26,
+               scale=1.2, sub=f"hold it for {d.set_hold_s:.1f} s to arm")
+    elif d.state == "armed":
+        prompt(img, W, H, "READY - WATCH THE BALL", y_frac=0.26, scale=1.4,
+               color=WHITE, sub="the delivery is the cue, not this board")
+    elif d.state == "flight":
+        # The one thing that may be cue-yellow: the ball is live and being asked
+        # about right now.
+        text_c(img, "BALL", W // 2, int(H * 0.28), sc(H, 2.4), YELLOW, 6)
+        speed = d.serve_speed
+        if speed:
+            text_c(img, f"{speed / 1000.0:.1f} m/s", W // 2, int(H * 0.355),
+                   sc(H, 0.7), YELLOW, 2, shadow=False)
+    elif d.state == "result" and d.last_result:
+        kind, rt = d.last_result
+        if kind == "save":
+            if rt is None:
+                # A save with no measured reaction is real goalkeeping — the ball
+                # came to hands that were already there. Say that rather than
+                # printing a number the drill does not have.
+                hero(img, W, H, "SAVE", "", caption="HANDS ON THE BALL",
+                     verdict=("NO MOVEMENT NEEDED", GREEN), color=GREEN,
+                     y_frac=0.26, scale=2.2)
+            else:
+                hero(img, W, H, f"{rt:.2f}", "s",
+                     caption="SERVE TO FIRST COMMITTED MOVEMENT",
+                     verdict=tier_of(rt), color=tier_of(rt)[1], y_frac=0.26,
+                     scale=2.7)
+        elif kind == "goal":
+            text_c(img, "GOAL", W // 2, int(H * 0.27), sc(H, 2.4), RED, 6)
+            text_c(img, "the ball crossed the line untouched", W // 2,
+                   int(H * 0.35), sc(H, 0.55), STEEL, 2, shadow=False)
+        elif kind == "wide":
+            prompt(img, W, H, "SERVE MISSED THE GOAL", y_frac=0.26, scale=1.25,
+                   color=AMBER,
+                   sub="not scored against you - the delivery was off target")
+        elif kind == "anticipated":
+            hero(img, W, H, f"{rt:.2f}", "s", caption="TOO EARLY - NOT SCORED",
+                 verdict=("ANTICIPATED", AMBER), color=AMBER, y_frac=0.26,
+                 scale=2.7)
+        elif kind == "void":
+            prompt(img, W, H, "NOT MEASURED", y_frac=0.26, scale=1.3,
+                   color=AMBER,
+                   sub="the ball was not tracked through the save - back to set")
+    elif d.state == "done":
+        s = d.summary()
+        if s["rounds_completed"]:
+            hero(img, W, H, f"{s['saves']}/{s['rounds_completed']}", "saves",
+                 caption="SERVES THAT ENTERED THE GOAL", y_frac=0.24,
+                 color=YELLOW, scale=2.4, thick=5)
+            if s["avg_reaction_s"] is not None:
+                word, tcol = tier_of(s["avg_reaction_s"])
+                text_c(img, f"average {s['avg_reaction_s']:.2f} s   |   {word}",
+                       W // 2, int(H * 0.375), sc(H, 0.9), tcol, 2)
+        else:
+            prompt(img, W, H, "NO MEASURED SERVE", y_frac=0.26, scale=1.2,
+                   color=AMBER,
+                   sub="no delivery both entered the goal and stayed tracked")
+
+    # ---- rail + protocol note ------------------------------------------------
+    s = d.summary()
+    rows = [
+        ("SAVES", f"  {s['saves']}", GREEN if s["saves"] else STEEL),
+        ("GOALS", f"  {s['goals']}", RED if s["goals"] else STEEL),
+    ]
+    # Every non-scoring outcome stays visible. A pass that produced two saves and
+    # nine voids is a ball-tracking finding, and a save rate alone would hide it.
+    if s["wide_serves"]:
+        rows.append(("WIDE ", f"  {s['wide_serves']}", AMBER))
+    if s["anticipated"]:
+        rows.append(("EARLY", f"  {s['anticipated']}", AMBER))
+    if s["voided_rounds"]:
+        rows.append(("VOID ", f"  {s['voided_rounds']}", AMBER))
+    if s["avg_serve_speed_mm_s"]:
+        rows.append(("SERVE", f"  {s['avg_serve_speed_mm_s'] / 1000.0:.1f} m/s",
+                     STEEL))
+    stat_rail(img, W, H, "SERVES", rows)
+    note_right(img, W, H,
+               f"goal {d.goal_w_mm / 1000.0:.2f} x {d.goal_h_mm / 1000.0:.2f} m "
+               f"as measured | save = hand within {d.save_radius_mm:.0f} mm")
+
+
 def recovery_decay(img, x0, y0, width, height, recoveries, H, max_bars=24):
     """Per-rep get-up time, oldest to newest.
 
@@ -1957,6 +2146,7 @@ DRAWERS = {
     "shuttle": draw_shuttle,
     "line_hops": draw_line_hops,
     "gk_save": draw_gk_save,
+    "gk_save_served": draw_gk_save_served,
     "gk_updown": draw_gk_updown,
     "reaction_zones": draw_reaction_zones,
     "cmj": draw_cmj,
@@ -1974,6 +2164,8 @@ def progress_text(d):
         return f"SET {min(d.set_idx + 1, d.sets)}/{d.sets}"
     if d.kind == "gk_save":
         return f"ROUND {min(d.round_idx + 1, d.rounds)}/{d.rounds}"
+    if d.kind == "gk_save_served":
+        return f"SERVE {min(d.round_idx + 1, d.serves)}/{d.serves}"
     if d.kind == "gk_updown":
         return f"{d.duration_s:.0f}s BLOCK"
     if d.kind == "reaction_zones":
@@ -2132,6 +2324,19 @@ def build_drill(args):
         return DRILL_REGISTRY[kind](rounds=workload or 10,
                                     arena_y_mm=args.arena_y_mm,
                                     flip=args.flip, seed=args.seed)
+    if kind == "gk_save_served":
+        # The goal rectangle is measured by the operator, never inferred: the
+        # constructor refuses one that does not fit the room rather than clamping
+        # it, because a clamped goal would score corners that are not where the
+        # tape says they are.
+        return DRILL_REGISTRY[kind](serves=workload or 10,
+                                    arena_x_mm=args.arena_x_mm,
+                                    arena_y_mm=args.arena_y_mm,
+                                    goal_x_mm=args.goal_x_mm,
+                                    goal_w_mm=args.goal_w_mm,
+                                    goal_h_mm=args.goal_h_mm,
+                                    goal_center_y_mm=args.goal_center_y_mm,
+                                    flip=args.flip, seed=args.seed)
     if kind == "gk_updown":
         return DRILL_REGISTRY[kind](duration_s=workload or 30.0)
     if kind == "cmj":
@@ -2181,6 +2386,30 @@ def event_line(drill, ev):
     if k == "round_void":
         return (f"round {ev['round']}: VOID "
                 f"({str(ev.get('reason', 'unknown')).replace('_', ' ')})")
+    if k == "round" and drill.kind == "gk_save_served":
+        # A served round has outcomes the virtual drill does not, and letting a
+        # new result value fall through to the generic branch below would have
+        # printed a serve that missed the goal as the keeper's MISS.
+        speed = ev.get("serve_speed_mm_s")
+        served = "" if speed is None else f" @ {float(speed) / 1000.0:.1f} m/s"
+        rt = ev.get("reaction_s")
+        timing = "" if rt is None else f" {float(rt):.2f}s"
+        if ev["result"] == "save":
+            reach = ev.get("min_hand_mm")
+            gap = "" if reach is None else f", hand {float(reach):.0f} mm"
+            return (f"serve {ev['round']} {ev['corner']}: SAVE{timing}"
+                    f"{served}{gap}")
+        if ev["result"] == "goal":
+            return f"serve {ev['round']} {ev['corner']}: GOAL{served}"
+        if ev["result"] == "wide":
+            # Not the keeper's failure, and it is kept out of the save rate.
+            return (f"serve {ev['round']}: WIDE — crossed at y="
+                    f"{ev['cross_y_mm']:.0f} z={ev['cross_z_mm']:.0f} mm, "
+                    f"outside the goal{served}")
+        if ev["result"] == "anticipated":
+            return (f"serve {ev['round']} {ev['corner']}: TOO EARLY"
+                    f"{timing} (not scored)")
+        return json.dumps(ev, ensure_ascii=False)
     if k == "round":
         if ev["result"] == "save":
             return f"round {ev['round']} {ev['corner']}: SAVE {ev['reaction_s']:.2f}s"
@@ -2212,6 +2441,20 @@ def event_line(drill, ev):
     return json.dumps(ev, ensure_ascii=False)
 
 
+def drill_tick(drill, now, joints, ball):
+    """Advance a drill, handing it the ball only if it declared it wants one.
+
+    Extracted from the main loop so this dispatch is testable by BEHAVIOUR rather
+    than by grepping the loop for a `getattr`. A mutation sweep showed why that
+    matters: the source-string version of this contract survived making the
+    dispatch unconditional, which would hand a third argument to eight state
+    machines whose `update` takes two.
+    """
+    if getattr(drill, "wants_ball", False):
+        return drill.update(now, joints, ball)
+    return drill.update(now, joints)
+
+
 def has_data(drill):
     return (
         bool(getattr(drill, "results", None))
@@ -2225,7 +2468,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--drill", required=True, choices=sorted(DRILL_REGISTRY),
                     help="which drill to run: balance | shuttle | line_hops | "
-                         "gk_save | gk_updown | reaction_zones")
+                         "gk_save | gk_save_served | gk_updown | reaction_zones")
     ap.add_argument("--athlete", default="", help="athlete name for the logs/HUD")
     ap.add_argument("--rounds", type=int, default=None,
                     help="holds/reps/sets/rounds (drill-appropriate default)")
@@ -2237,8 +2480,27 @@ def main():
                     help="RNG seed (gk_save/reaction_zones cues; audit only)")
     ap.add_argument("--udp-port", type=int, default=5005)
     ap.add_argument("--udp-max-age", type=float, default=0.6)
+    ap.add_argument("--ball-max-age", type=float, default=0.25,
+                    help="Freshness limit for a ball sample (served drills). "
+                         "Tighter than --udp-max-age on purpose: a served drill "
+                         "measures segments between consecutive ball packets, and "
+                         "a 10 m/s delivery covers 2.5 m in 0.25 s, so an older "
+                         "sample would stretch a segment across unobserved "
+                         "flight. A dropped sample is reported as unobserved "
+                         "rather than interpolated through.")
     ap.add_argument("--arena-x-mm", type=float, default=6230.0)
     ap.add_argument("--arena-y-mm", type=float, default=3050.0)
+    # The served goal: MEASURE it and pass it. The default plane is the south
+    # wall the projector goal game already uses (X = 6230 mm), so both products
+    # describe the same physical surface.
+    ap.add_argument("--goal-x-mm", type=float, default=None,
+                    help="goal plane (gk_save_served); defaults to --arena-x-mm")
+    ap.add_argument("--goal-w-mm", type=float, default=2400.0,
+                    help="measured goal width (gk_save_served)")
+    ap.add_argument("--goal-h-mm", type=float, default=2000.0,
+                    help="measured goal height (gk_save_served)")
+    ap.add_argument("--goal-center-y-mm", type=float, default=None,
+                    help="goal centre across the room; defaults to the middle")
     ap.add_argument("--wall-margin-mm", type=float, default=500.0,
                     help="minimum pelvis-target clearance from side walls")
     ap.add_argument("--shuttle-center-mm", type=float, default=3115.0)
@@ -2376,8 +2638,13 @@ def main():
         while not stop["flag"]:
             now = time.time()
             joints, age = listener.get(args.udp_max_age)
+            # Only a drill that declares it gets the ball, so the eight
+            # pose-only state machines keep an unchanged call signature and
+            # cannot start depending on a stream they were never designed for.
+            ball = (listener.get_ball(args.ball_max_age)
+                    if getattr(drill, "wants_ball", False) else None)
             if not paused:
-                drill.update(now, joints)
+                drill_tick(drill, now, joints, ball)
             for ev in drill.pop_events():
                 if events_fh is None:
                     log_dir.mkdir(parents=True, exist_ok=True)

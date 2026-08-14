@@ -53,6 +53,42 @@ MAX_PELVIS_RISE_MM = 700.0
 # takes appreciably longer than half a second even at professional pace.
 MIN_DOWN_UP_S = 0.5
 
+# --- served-delivery gates (a BLM serve, not a body) ------------------------
+#
+# A ball is not a body, so it gets its own ceiling. 40 m/s matches the live
+# viewer's own discard threshold (``--ball-max-speed-mps 40``): above it the
+# triangulation is wrong, not the delivery fast. Again a garbage filter — the
+# launcher's measured exit speed is a fraction of this.
+MAX_BALL_SPEED_MM_S = 40000.0
+
+# Below this a "delivery" is a ball rolling or being carried, and treating it as
+# a serve would start a reaction clock against a stimulus the keeper cannot
+# read. Well under any flywheel serve above the firmware's 400 RPM gate.
+MIN_SERVE_SPEED_MM_S = 3000.0
+
+# The arena is 6.23 m end to end, so even a 40 m/s flier needs ~0.16 s to cross
+# it and a real serve needs several times that. A delivery that "arrives" faster
+# than this was resolved inside the tracking noise, not observed.
+MIN_FLIGHT_S = 0.08
+
+
+def is_plausible_serve_speed(speed_mm_s,
+                             min_speed_mm_s=MIN_SERVE_SPEED_MM_S,
+                             max_speed_mm_s=MAX_BALL_SPEED_MM_S):
+    """True when a tracked ball speed could be a real delivery.
+
+    Two-sided on purpose. The upper bound rejects a triangulation flier that
+    would otherwise start a reaction clock at an arbitrary instant; the lower one
+    rejects a ball that is merely moving, which is why a drill cannot be fooled
+    by someone walking the ball back to the launcher.
+    """
+    if speed_mm_s is None:
+        return False
+    value = float(speed_mm_s)
+    if not math.isfinite(value):
+        return False
+    return float(min_speed_mm_s) <= value <= float(max_speed_mm_s)
+
 
 def is_plausible_reaction(reaction_s, min_reaction_s=MIN_HUMAN_REACTION_S):
     """True when ``reaction_s`` could be a genuine response to a cue.

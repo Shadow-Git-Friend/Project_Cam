@@ -3322,6 +3322,15 @@ def main():
              "runtime by design, so heartbeats would fight fire control. "
              "Enable only for view-only consumers (training drill board).")
     ap.add_argument(
+        "--udp-ball", action="store_true",
+        help="Attach the tracked ball (position, velocity, flight mode, camera "
+             "count, whether the position is a coasted PREDICTION) to every UDP "
+             "target packet. Needed by a ball-served drill, which measures the "
+             "athlete against the real delivery instead of a screen cue. OFF by "
+             "default and never for the launcher, for the same reason as "
+             "--udp-capture-context: this is a view-only consumer channel. "
+             "Requires --track-ball; the block is simply absent otherwise.")
+    ap.add_argument(
         "--session-id",
         default="",
         help="Optional session identifier. Embedded in --event-log-output records "
@@ -5626,10 +5635,43 @@ def main():
                             # Missing/invalid safety telemetry cannot authorize
                             # fire, but it must not terminate the live viewer.
                             pass
+                # The tracked ball, for a consumer that scores a real delivery
+                # rather than a screen cue. Same frame as `joints`: the position
+                # goes through transform_world_point_y, and the VELOCITY's Y
+                # component is negated instead — the mirror is y -> Y_max - y, so
+                # a displacement's sign flips while no offset applies. Doing this
+                # by hand rather than reusing the point transform is deliberate;
+                # passing a velocity through it would add Y_max to it.
+                ball_payload = None
+                if args.udp_ball and ball_state is not None:
+                    b_udp = transform_world_point_y(
+                        ball_state, dims["Y"], enabled=udp_world_y_mirror)
+                    vel = (ball_kf.get_velocity()
+                           if ball_kf is not None and ball_kf.initialized else None)
+                    ball_payload = {
+                        "x_mm": float(b_udp[0]),
+                        "y_mm": float(b_udp[1]),
+                        "z_mm": float(b_udp[2]),
+                        "mode": ball_flight_state.mode,
+                        "cams": int(len(ball_obs)),
+                        # A coasted position is the KF PREDICTING through a
+                        # detection drop, not a measurement. A consumer that
+                        # scored a save on one would be scoring an extrapolation,
+                        # so it is labelled rather than smoothed over.
+                        "coasting": bool(ball_coast_count > 0),
+                    }
+                    if vel is not None:
+                        vy = float(vel[1])
+                        ball_payload.update({
+                            "vx_mm_s": float(vel[0]),
+                            "vy_mm_s": -vy if udp_world_y_mirror else vy,
+                            "vz_mm_s": float(vel[2]),
+                        })
+
                 # With capture context on we also emit the EMPTY-joints case, so a
                 # view-only consumer can separate "nobody was tracked this frame"
                 # from "the viewer stopped sending". Default path unchanged.
-                if joints_payload or capture_context is not None:
+                if joints_payload or capture_context is not None or ball_payload:
                     pkt = {
                         "type": "joints",
                         "ts": time.time(),
@@ -5638,6 +5680,8 @@ def main():
                     }
                     if capture_context is not None:
                         pkt["capture"] = capture_context
+                    if ball_payload is not None:
+                        pkt["ball"] = ball_payload
                     if latest_safety_snapshot is not None:
                         pkt["safety"] = latest_safety_snapshot
                     # Add predicted positions when prediction is active

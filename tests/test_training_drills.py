@@ -19,7 +19,9 @@ from project_cam.training import (
 from project_cam.training.drills import (
     PROTOCOL_CATALOG,
     applied_parameters,
+    plane_crossing,
     protocol_parameters_fingerprint,
+    segment_point_distance,
     validate_workload,
 )
 
@@ -56,7 +58,7 @@ def test_registry_ids_and_roles():
         "balance", "shuttle", "line_hops", "reaction_zones",
         "cmj", "hop_symmetry", "reactive_cut",
         # goalkeeper
-        "gk_save", "gk_updown",
+        "gk_save", "gk_save_served", "gk_updown",
     }
     roles = {cls.role for cls in DRILL_REGISTRY.values()}
     assert roles == {"field", "gk"}
@@ -67,6 +69,8 @@ def test_registry_ids_and_roles():
         if kind == "reaction_zones":
             drill = cls(arena_y_mm=3050.0)
         elif kind == "reactive_cut":
+            drill = cls(arena_x_mm=6230.0, arena_y_mm=3050.0)
+        elif kind == "gk_save_served":
             drill = cls(arena_x_mm=6230.0, arena_y_mm=3050.0)
         else:
             drill = cls()
@@ -890,3 +894,298 @@ def test_a_gate_wider_than_the_arena_is_refused():
     with pytest.raises(ValueError, match="exceeds half the arena width"):
         DRILL_REGISTRY["reactive_cut"](arena_x_mm=6230.0, arena_y_mm=1200.0,
                                        gate_mm=700.0)
+
+
+# ---------------------------------------------------------------------------
+# GK 1b — SAVE THE CORNERS, served by the launcher
+# ---------------------------------------------------------------------------
+#
+# The point of this drill is that a REAL delivery is the cue, so nearly every
+# property below is about refusing to score what the ball track did not show.
+
+GOAL_X = 6230.0
+KEEPER_X = 5400.0
+
+
+def served(**kw):
+    kw.setdefault("serves", 3)
+    kw.setdefault("goal_x_mm", GOAL_X)
+    return DRILL_REGISTRY["gk_save_served"](**kw)
+
+
+def keeper(y_hand=1525.0, z_hand=1200.0, x=KEEPER_X, y_pelvis=1525.0):
+    return J(
+        left_hip=(x, y_pelvis - 90, 900.0), right_hip=(x, y_pelvis + 90, 900.0),
+        left_shoulder=(x, y_pelvis - 160, 1300.0),
+        right_shoulder=(x, y_pelvis + 160, 1300.0),
+        left_wrist=(x, y_hand, z_hand), right_wrist=(x, y_hand + 200, z_hand),
+    )
+
+
+def ball_at(x, y, z, vx=10000.0, coasting=False):
+    return {"x_mm": x, "y_mm": y, "z_mm": z, "vx_mm_s": vx, "vy_mm_s": 0.0,
+            "vz_mm_s": 0.0, "mode": "AIRBORNE", "cams": 3, "coasting": coasting}
+
+
+def arm_served(d, t=100.0):
+    d.start(t)
+    for _ in range(15):
+        t += 1 / 15
+        d.update(t, keeper(), None)
+    assert d.state == "armed", d.state
+    return t
+
+
+def deliver(d, t, target_y, target_z, *, hand="still", speed=10000.0,
+            react_after=4, drop=(), coasting=False, dt=1 / 15):
+    """One scripted delivery from x=300 to the goal plane."""
+    duration = (GOAL_X - 300.0) / speed
+    y0, z0 = 1525.0, 1200.0
+    for i in range(int(duration / dt) + 2):
+        frac = min(1.0, (i * dt) / duration)
+        x = 300.0 + frac * (GOAL_X - 300.0)
+        y, z = y0 + frac * (target_y - y0), z0 + frac * (target_z - z0)
+        if hand == "follow" and i >= react_after:
+            k = min(1.0, (i - react_after) / 3.0)
+            j = keeper(y0 + k * (y - y0), z0 + k * (z - z0))
+        elif hand == "prepositioned":
+            j = keeper(target_y, target_z)
+        else:
+            j = keeper()
+        b = None if i in drop else ball_at(x, y, z, speed, coasting=coasting)
+        t += dt
+        d.update(t, j, b)
+        if d.state == "result":
+            break
+    return t
+
+
+def one_serve(**kw):
+    d = served()
+    t = arm_served(d)
+    deliver(d, t, **kw)
+    return d
+
+
+def last_void(d):
+    voids = [e for e in d._events if e["event"] == "round_void"]
+    return voids[-1]["reason"] if voids else None
+
+
+def test_a_served_save_measures_reaction_from_the_delivery_not_a_screen():
+    """The whole reason this drill exists: the virtual version measures reaction
+    to a scoreboard, which a keeper never watches while facing a shot."""
+    d = one_serve(target_y=2400.0, target_z=1600.0, hand="follow")
+    row = d.results[-1]
+    assert row["result"] == "save"
+    assert row["corner"] == "HIGH-RIGHT"
+    assert row["reaction_s"] >= 0.10, row
+    assert row["min_hand_mm"] < d.save_radius_mm
+    assert d.summary()["saves"] == 1
+
+
+def test_an_untouched_delivery_is_a_goal():
+    d = one_serve(target_y=600.0, target_z=400.0)
+    assert d.results[-1]["result"] == "goal"
+    assert d.results[-1]["corner"] == "LOW-LEFT"
+    assert d.summary()["save_rate"] == 0.0
+
+
+def test_a_serve_outside_the_posts_is_not_charged_to_the_keeper():
+    """The launcher's aim is not commissioned, so a delivery that missed the goal
+    is a launcher finding — scoring it as the keeper's miss would blame them for
+    it and quietly depress the save rate."""
+    d = one_serve(target_y=2900.0, target_z=1600.0)
+    row = d.results[-1]
+    assert row["result"] == "wide"
+    assert row["corner"] is None
+    s = d.summary()
+    assert s["wide_serves"] == 1
+    assert s["rounds_completed"] == 0, "a wide serve was never a chance"
+    assert s["save_rate"] is None
+    assert "missed the goal" in d.headline()
+
+
+def test_a_ball_over_the_bar_is_also_wide():
+    d = one_serve(target_y=1525.0, target_z=2400.0)
+    assert d.results[-1]["result"] == "wide"
+
+
+def test_a_centre_ball_is_scored_but_never_credited_to_a_corner():
+    """Found by the first scripted delivery: a pure 2x2 partition labelled a ball
+    crossing exactly on the centre line as HIGH-RIGHT. That is worthless as
+    corner evidence and would have polluted the per-corner table a coach reads to
+    pick the keeper's weak side."""
+    d = one_serve(target_y=1525.0, target_z=1200.0, hand="prepositioned")
+    row = d.results[-1]
+    assert row["corner"] == "CENTRE"
+    assert row["result"] == "save"
+    assert d.summary()["saves"] == 1, "still a real chance and a real save"
+    assert d.per_corner() == {}, "a centre ball is evidence about neither side"
+
+
+def test_a_save_with_no_committed_movement_is_a_save_not_an_anticipation():
+    """A ball served straight at hands that are already there is goalkeeping. The
+    first version of the resolve branch scored it as a fault, because an
+    unmeasured reaction failed the plausibility floor."""
+    d = one_serve(target_y=1525.0, target_z=1200.0, hand="prepositioned")
+    row = d.results[-1]
+    assert row["result"] == "save"
+    assert row["reaction_s"] is None
+    assert d.summary()["anticipated"] == 0
+    assert d.summary()["avg_reaction_s"] is None, "nothing to average"
+
+
+def test_a_hand_that_moved_before_a_human_could_read_the_serve_is_not_scored():
+    d = one_serve(target_y=2400.0, target_z=1600.0, hand="follow", react_after=0)
+    row = d.results[-1]
+    assert row["result"] == "anticipated"
+    assert d.summary()["saves"] == 0
+    assert d.summary()["anticipated"] == 1
+
+
+def test_a_gap_in_the_ball_track_voids_a_goal_but_not_a_save():
+    """The asymmetry that keeps the save rate honest.
+
+    A touch is positively observed on a tight segment, so a gap elsewhere cannot
+    invent it. "No touch" is exactly the verdict a gap CAN fabricate, so it is
+    voided rather than credited.
+    """
+    missed = one_serve(target_y=600.0, target_z=400.0, drop=(2, 3, 4, 5, 6, 7))
+    assert missed.results == []
+    assert last_void(missed) == "ball_track_gap_unresolved"
+    assert missed.summary()["goals"] == 0
+
+    saved = one_serve(target_y=2400.0, target_z=1600.0, hand="follow",
+                      drop=(1, 2))
+    assert saved.results[-1]["result"] == "save", (
+        "an observed touch survives a gap elsewhere in the flight")
+
+
+def test_a_coasted_position_is_never_treated_as_a_measurement():
+    """A coasting sample is the Kalman filter predicting through a detection
+    drop. Scoring a save on one would be scoring an extrapolation."""
+    d = served()
+    t = arm_served(d)
+    deliver(d, t, target_y=600.0, target_z=400.0, coasting=True)
+    assert d.state == "armed", "no serve may be detected from coasted samples"
+    assert d.results == []
+    assert d.round_idx == 0, "and no round is consumed"
+
+
+def test_a_ball_that_is_merely_moving_is_not_a_serve():
+    """Below the serve-speed floor a reaction clock would start against a
+    stimulus the keeper cannot read — someone walking the ball back, say."""
+    d = served()
+    t = arm_served(d)
+    deliver(d, t, target_y=600.0, target_z=400.0, speed=800.0)
+    assert d.state == "armed"
+    assert d.results == []
+
+
+def test_a_delivery_moving_away_from_the_goal_is_not_a_serve():
+    d = served()
+    t = arm_served(d)
+    for x in (5000.0, 4000.0, 3000.0, 2000.0):
+        t += 1 / 15
+        d.update(t, keeper(), ball_at(x, 1525.0, 1200.0))
+    assert d.state == "armed", "a ball leaving the goal is not a delivery"
+
+
+def test_a_ball_acquired_behind_the_keeper_leaves_no_reaction_to_measure():
+    """Same defect class as cueing a corner the keeper already occupies: if the
+    delivery is first seen past the keeper there is nothing to react to."""
+    d = served()
+    t = arm_served(d)
+    for x in (5900.0, 6000.0, 6100.0):
+        t += 1 / 15
+        d.update(t, keeper(), ball_at(x, 1525.0, 1200.0))
+    assert d.state == "armed"
+
+
+def test_a_serve_that_never_reaches_the_goal_plane_is_voided():
+    d = served()
+    t = arm_served(d)
+    for i in range(60):
+        t += 1 / 15
+        d.update(t, keeper(), ball_at(1000.0 + i, 1525.0, 1200.0, vx=9000.0))
+        if d.state == "result":
+            break
+    assert last_void(d) == "no_goal_plane_crossing"
+    assert d.results == []
+
+
+def test_the_keeper_must_be_in_the_goal_mouth_to_arm():
+    d = served()
+    t = 100.0
+    d.start(t)
+    for _ in range(20):                       # standing at the far end
+        t += 1 / 15
+        d.update(t, keeper(x=1200.0), None)
+    assert d.state == "set_wait"
+    for _ in range(20):                       # inside the posts, wrong side
+        t += 1 / 15
+        d.update(t, keeper(y_pelvis=2900.0), None)
+    assert d.state == "set_wait"
+
+
+def test_leaving_the_set_position_disarms_but_a_dropout_does_not():
+    """The armed-state rule every drill follows: only POSITIVE evidence of
+    leaving resets it, never a missed packet."""
+    d = served()
+    t = arm_served(d)
+    for _ in range(5):
+        t += 1 / 15
+        d.update(t, None, None)
+    assert d.state == "armed", "a tracking dropout must not disarm"
+    for _ in range(3):
+        t += 1 / 15
+        d.update(t, keeper(x=1000.0), None)
+    assert d.state == "set_wait"
+
+
+def test_a_goal_that_does_not_fit_the_room_is_refused_not_clamped():
+    """A clamped goal would score corners that are not where the tape says.
+
+    The MESSAGE is pinned, not just the exception. A goal wider than the room also
+    spans outside it, so the width check is redundant for correctness — what it
+    uniquely gives the operator is a refusal that names the measurement they got
+    wrong, while standing in the garage with a tape.
+    """
+    with pytest.raises(ValueError, match=r"goal width 4000 mm exceeds the arena"):
+        served(goal_w_mm=4000.0)
+    with pytest.raises(ValueError, match=r"outside the arena width"):
+        served(goal_center_y_mm=200.0)
+    with pytest.raises(ValueError, match=r"positive extent"):
+        served(goal_h_mm=0.0)
+    with pytest.raises(ValueError, match=r"save_radius_mm must be positive"):
+        served(save_radius_mm=0.0)
+
+
+def test_the_segment_test_is_what_makes_a_save_detectable_at_speed():
+    """At 15 Hz a 10 m/s delivery advances ~667 mm per packet, so a
+    point-to-point hand test would miss nearly every genuine save. Compared
+    directly: the hand sits ON the path but far from both endpoints."""
+    a, b = (0.0, 0.0, 0.0), (1000.0, 0.0, 0.0)
+    hand = (500.0, 30.0, 0.0)
+    assert segment_point_distance(a, b, hand) == pytest.approx(30.0)
+    assert min(math.dist(a, hand), math.dist(b, hand)) > 400.0
+
+
+def test_a_plane_crossing_is_only_reported_when_the_segment_straddles_it():
+    """A crossing inferred from two samples on the same side is invented.
+
+    Both directions and both sides, because the straddle test is now the SINGLE
+    gate: the redundant `0 <= frac <= 1` bound was removed after a mutation sweep
+    showed the two were exactly equivalent, so neither could be tested alone.
+    """
+    for a, b in (((0.0, 100.0, 200.0), (400.0, 100.0, 200.0)),      # both before
+                 ((6400.0, 100.0, 200.0), (6800.0, 100.0, 200.0)),  # both past
+                 ((6800.0, 100.0, 200.0), (6400.0, 100.0, 200.0))): # past, receding
+        assert plane_crossing(a, b, 6230.0) is None, (a, b)
+    # A segment ENDING exactly on the plane still crosses it.
+    assert plane_crossing((6000.0, 0.0, 0.0), (6230.0, 0.0, 0.0), 6230.0) is not None
+    y, z, frac = plane_crossing((6000.0, 100.0, 200.0), (6400.0, 300.0, 400.0), 6230.0)
+    assert frac == pytest.approx(0.575)
+    assert y == pytest.approx(215.0)
+    assert z == pytest.approx(315.0)

@@ -109,6 +109,10 @@ def make_drill(board, drill_id, sized=None):
         arena_x_mm=6230.0, arena_y_mm=ARENA_Y_MM, wall_margin_mm=500.0,
         shuttle_center_mm=3115.0, shuttle_half_mm=2000.0,
         hold_s=20.0, work_s=20.0,
+        # The served goal: measured by the operator in production, so the board
+        # takes it from the CLI rather than hiding it in the state machine.
+        goal_x_mm=None, goal_w_mm=2400.0, goal_h_mm=2000.0,
+        goal_center_y_mm=None,
     ))
 
 
@@ -446,6 +450,21 @@ def drive(drill, target, limit=900):
             drill.update(t, pose_full(y=1525.0 + (300.0 if step % 6 < 3 else -300.0)))
         elif drill.kind == "gk_updown":
             drill.update(t, pose_full(z=980.0 if step % 16 < 8 else 330.0))
+        elif drill.kind == "gk_save_served":
+            # In the goal mouth (the set position is geometric here, not a zone),
+            # and once armed a delivery closing on the goal plane — the ball IS
+            # this drill's cue, so no ball means no flight state ever.
+            keeper = pose_full(x=5400.0, y=drill.goal_center_y_mm)
+            if drill.state == "armed" or drill.state == "flight":
+                ball_x = 1000.0 + step * 220.0
+                drill.update(t, keeper, {
+                    "x_mm": min(ball_x, drill.goal_x_mm - 250.0),
+                    "y_mm": 2300.0, "z_mm": 1700.0,
+                    "vx_mm_s": 9000.0, "vy_mm_s": 0.0, "vz_mm_s": 0.0,
+                    "mode": "AIRBORNE", "cams": 3, "coasting": False,
+                })
+            else:
+                drill.update(t, keeper)
         else:
             drill.update(t, pose_full())
     raise AssertionError(f"{drill.kind} never reached {target!r} "
@@ -457,6 +476,7 @@ LIVE_STATES = {
     "shuttle": ["arm", "countdown"],
     "line_hops": ["countdown", "work"],
     "gk_save": ["set_wait", "armed"],
+    "gk_save_served": ["set_wait", "armed", "flight"],
     "gk_updown": ["countdown", "work"],
     "reaction_zones": ["set_wait", "armed", "active"],
     "cmj": ["countdown", "work"],
