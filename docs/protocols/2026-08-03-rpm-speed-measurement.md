@@ -24,11 +24,11 @@ presets, and do not run pose-guided firing at a person.
 
 ## 1b. STOP — a prerequisite found 2026-08-13 blocks every shot below
 
-**Commanding 500 RPM does not deliver 500 RPM.** Measured on the rig: a 300 RPM
-command settled at a plateau the firmware reported as L≈368 / R≈372, peak 399.
-The setpoint map is about **23% high**, so §5's "command 500 RPM, wait for both
-measured wheels between 450 and 550" can never be satisfied — the wheels settle
-near 615 and `blm_bridge` refuses to arm with *"measured L=615 R=618 is outside
+**Commanding 500 RPM does not deliver 500 RPM.** Settled measurement on the rig
+2026-08-14: a 300 RPM command plateaus at **L=392 / R=402**. The setpoint map is
+about **31% high**, so §5's "command 500 RPM, wait for both measured wheels
+between 450 and 550" can never be satisfied — the wheels settle near 655 and
+`blm_bridge` refuses to arm with *"measured L=655 R=670 is outside
 the commanded 500 +/-50 RPM"*.
 
 **That refusal is correct and must not be worked around by widening the band.**
@@ -85,6 +85,18 @@ measured inside the ±10 % arm band.
 **measured** RPM at the shot (`rpm_left_pre_fire` / `rpm_right_pre_fire`), never
 on the commanded number: no open-loop map can know that the ball is loading the
 wheels as it passes through them.
+
+**The plateau needs about 30 seconds.** The first attempt at this figure read
+~23% because it was taken 20 s in while the wheels were still climbing. After
+~30 s the reading holds within ±1 RPM. Never record a plateau from a short
+window — and note that this is exactly why §5 asks for polls spanning two
+seconds *after* the reading enters band.
+
+**Do not start the ladder at 250 RPM.** It maps to PWM 1145/1129, below the
+ESCs' start threshold, and the wheels do not turn at all — for 30 s, with no
+error, because `MIN_RPM_THRESHOLD` is 200 and the firmware accepts the command.
+The usable band starts near a commanded 300. "Commanded and accepted" is not
+evidence of rotation.
 
 ### Measuring true RPM without a tachometer (2026-08-13)
 

@@ -1346,11 +1346,11 @@ def test_the_rpm_band_is_not_the_place_to_absorb_a_firmware_map_error(bridge):
     send(bridge, controller, "reload")
     send(bridge, controller, "aim 0 0 500")
     # The plateau the rig would produce for a 500 command, scaled from the
-    # measured 300 -> 370. Steady, matched, fresh -- and still refused, because
+    # measured 300 -> 397. Steady, matched, fresh -- and still refused, because
     # steady agreement with the WRONG number is not readiness.
-    controller.note_telemetry(615.0, 618.0)
-    controller.note_telemetry(615.0, 618.0)
-    controller.note_telemetry(615.0, 618.0)
+    controller.note_telemetry(655.0, 670.0)
+    controller.note_telemetry(655.0, 670.0)
+    controller.note_telemetry(655.0, 670.0)
     with pytest.raises(bridge.CommandError, match="outside the commanded"):
         send(bridge, controller, "arm")
 

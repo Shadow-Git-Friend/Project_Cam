@@ -328,7 +328,7 @@ Delete the "known residual" warning above from any plan built on it.
 
 ### Two findings from the same run, both feeding roadmap A6
 
-**The RPM command mapping is about 23% high.** Commanding 300 RPM produced a
+**The RPM command mapping is about 23% high.** *(Corrected 2026-08-14: it is ~31%. The reading below was taken 20 s in, while the wheels were still climbing; the settled plateau for a 300 command is L=392 / R=402. Left as written because it is what the run measured — see `.claude/rules/safety.md` for the operative figure.)* Commanding 300 RPM produced a
 plateau of L≈368, R≈372 with a peak of 399 — against a fire gate of 400, which
 the test was designed to stay under. `PWM = RPM·LEFT_SLOPE + LEFT_OFFSET`
 (0.1763 / 1101) does not describe this machine. Commanding 400 to satisfy the
