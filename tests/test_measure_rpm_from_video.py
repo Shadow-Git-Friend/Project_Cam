@@ -197,3 +197,58 @@ def test_the_cli_reports_and_sets_exit_status(vid, tmp_path, capsys):
     bad = synth(tmp_path / "j.mp4", rpm=1500.0, fps=30.0, seconds=4.0)
     assert vid.main([str(bad), "--roi", "{},{},{},{}".format(*ROI),
                      "--expect-rpm", "1500"]) == 1
+
+
+def test_it_reports_the_fundamental_when_a_harmonic_wins_the_spectrum(vid):
+    """The defect that produced a WRONG conclusion on 2026-08-14.
+
+    A real wheel does not present an identical mark on every pass: wobble,
+    lighting and exposure make alternate passes brighter. The signal then
+    repeats exactly every TWO revolutions, so autocorrelation has a taller peak
+    at 2T than at T -- and `argmax` returns half the true rate. On IMG_2534 that
+    read 194.5 RPM against a true ~390, which was then built into a whole
+    (wrong) story about a broken encoder constant.
+
+    The period is the FIRST strong peak, never the tallest one.
+    """
+    fps, true_hz, n = 240.0, 6.5, 4000
+    t = np.arange(n) / fps
+    phase = (true_hz * t) % 1.0
+    pulse = np.exp(-((phase - 0.5) ** 2) / (2 * 0.02 ** 2))
+    # every other revolution is dimmer -> the signal truly repeats at 2T
+    alternate = np.where((np.floor(true_hz * t) % 2) == 0, 1.0, 0.55)
+    signal = 20.0 + 60.0 * pulse * alternate
+
+    hz, strength = vid.autocorrelation_hz(signal, fps)
+    assert abs(hz - true_hz) / true_hz < 0.02, (
+        f"got {hz:.2f} Hz, expected {true_hz} -- {true_hz/2} means the "
+        f"sub-harmonic won again")
+    assert strength > 0.3
+
+
+def test_a_ramped_iphone_clip_is_measured_on_its_slowed_section(vid, tmp_path):
+    """iPhone slo-mo exports at 30 fps with the ramp BAKED IN: the head and tail
+    play at real time and only the middle is slowed. Measuring the whole file
+    mixes two different time bases and the answer is neither."""
+    real, slow = 1.0, 6.0                      # seconds of head/tail, and of middle
+    clip = tmp_path / "ramped.mp4"
+    writer = cv2.VideoWriter(str(clip), cv2.VideoWriter_fourcc(*"mp4v"), 30.0,
+                             (FRAME, FRAME))
+    rpm, cap_fps = 370.0, 240.0
+    def draw(theta):
+        f = np.zeros((FRAME, FRAME, 3), dtype=np.uint8)
+        cv2.circle(f, (int(CENTRE + ORBIT_R*math.cos(theta)),
+                       int(CENTRE + ORBIT_R*math.sin(theta))), DOT_R, (255,)*3, -1)
+        writer.write(f)
+    for i in range(int(30*real)):                       # head: real time at 30 fps
+        draw(2*math.pi*(rpm/60)*(i/30.0))
+    for i in range(int(30*slow)):                       # middle: 240 fps frames
+        draw(2*math.pi*(rpm/60)*(i/cap_fps))
+    for i in range(int(30*real)):
+        draw(2*math.pi*(rpm/60)*(i/30.0))
+    writer.release()
+
+    head = int(30*real)
+    r = vid.measure(clip, roi=ROI, fps_override=cap_fps,
+                    first_frame=head, last_frame=head + int(30*slow) - 1)
+    assert abs(r["rpm"] - rpm) / rpm < 0.03, r["rpm"]

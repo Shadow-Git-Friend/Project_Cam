@@ -85,6 +85,9 @@ METHOD_AGREEMENT = 0.05
 # How far the measurement may sit from the firmware's own reading before the
 # most likely explanation is an alias rather than a calibration error.
 EXPECTED_SANITY_FACTOR = 1.6
+# A peak this tall relative to the global autocorrelation peak counts as a real
+# repeat. The FIRST such peak is the period; see autocorrelation_hz.
+FUNDAMENTAL_FRACTION = 0.75
 
 
 class VideoError(Exception):
@@ -92,7 +95,15 @@ class VideoError(Exception):
 
 
 def brightness_series(path: Path, roi: Optional[tuple[int, int, int, int]],
+                      first_frame: int = 0, last_frame: Optional[int] = None,
                       ) -> tuple[np.ndarray, float, tuple[int, int]]:
+    """Mean ROI brightness per frame, optionally over a frame RANGE.
+
+    The range exists for iPhone slow-motion, which exports at 30 fps with the
+    ramp baked in: the head and tail play at real time and only the middle is
+    slowed. Measuring the whole file mixes two time bases and the answer is
+    neither one.
+    """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise VideoError(f"cannot open {path}")
@@ -100,9 +111,15 @@ def brightness_series(path: Path, roi: Optional[tuple[int, int, int, int]],
     size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
     values = []
+    index = -1
     while True:
         ok, frame = cap.read()
         if not ok:
+            break
+        index += 1
+        if index < first_frame:
+            continue
+        if last_frame is not None and index > last_frame:
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if roi is not None:
@@ -150,11 +167,21 @@ def spectrum_peaks(signal: np.ndarray, fps: float, top: int = 5) -> dict:
 
 def autocorrelation_hz(signal: np.ndarray, fps: float,
                        min_hz: float = 0.5) -> tuple[float, float]:
-    """Rotation rate from the first autocorrelation peak, and its strength.
+    """Rotation rate from the FIRST strong autocorrelation peak, and its height.
 
-    Immune to which harmonic dominates the spectrum: the period is the period
-    whatever the pulse shape. Sub-sample precision by parabolic interpolation
-    around the peak, so the estimate is not quantised to whole frames.
+    Not the tallest peak — the first one. Autocorrelation repeats at every
+    multiple of the period, and a real wheel does not present an identical mark
+    on every pass: wobble, lighting and exposure make alternate passes brighter,
+    so the signal genuinely repeats every TWO revolutions and the peak at 2T can
+    stand taller than the one at T. Taking the tallest then reports HALF the
+    true rate.
+
+    That is not hypothetical. On 2026-08-14 it read 194.5 RPM for a wheel really
+    turning at ~390, and the halved number was built into a confident conclusion
+    that an encoder constant was wrong and the two flywheels ran at a 2:1 ratio.
+    Two better clips later showed the firmware had been right all along.
+
+    Sub-sample precision by parabolic interpolation around the chosen peak.
     """
     x = signal - signal.mean()
     n = len(x)
@@ -165,16 +192,39 @@ def autocorrelation_hz(signal: np.ndarray, fps: float,
         raise VideoError("the signal is flat; see --roi in the help")
     ac = ac / ac[0]
 
-    min_lag = max(2, int(fps / (fps / 2)))          # up to Nyquist
+    min_lag = 2
     max_lag = min(n - 2, int(fps / min_hz))
     if max_lag <= min_lag:
         raise VideoError("the clip is too short to contain one full revolution")
-    window = ac[min_lag:max_lag + 1]
-    lag = int(np.argmax(window)) + min_lag
+
+    # A broad mark leaves a broad autocorrelation lobe at zero. Its descending
+    # shoulder can be taller than every real repeat, so treating it as part of
+    # the peak search turns pulse width into a fictitious 2--3 frame period.
+    # The first valley separates that self-overlap from periodic recurrence.
+    valley = 0
+    while valley < max_lag - 1 and ac[valley + 1] <= ac[valley]:
+        valley += 1
+
+    search_start = max(min_lag, valley + 1)
+    search = ac[search_start:max_lag + 1]
+    threshold = FUNDAMENTAL_FRACTION * search.max()
+    lag = None
+    for candidate in range(search_start, max_lag + 1):
+        if (ac[candidate] >= threshold
+                and ac[candidate] >= ac[candidate - 1]
+                and ac[candidate] >= ac[candidate + 1]):
+            lag = candidate
+            break
+    if lag is None:
+        # Nothing cleared the bar, so report the tallest lag as a raw integer and
+        # let the caller reject it on strength. The parabola below only means
+        # anything at a local maximum; on a slope, or at the window edge, it
+        # extrapolates far outside the three samples it was fitted to.
+        return fps / (int(np.argmax(search)) + search_start), 0.0
 
     y0, y1, y2 = ac[lag - 1], ac[lag], ac[lag + 1]
     denom = y0 - 2 * y1 + y2
-    lag_refined = lag + (0.5 * (y0 - y2) / denom if denom != 0 else 0.0)
+    lag_refined = lag + (0.5 * (y0 - y2) / denom if denom < 0 else 0.0)
     return fps / lag_refined, float(ac[lag])
 
 
@@ -186,8 +236,9 @@ def count_revolutions(signal: np.ndarray) -> float:
 
 
 def measure(path: Path, roi=None, fps_override: Optional[float] = None,
-            expect_rpm: Optional[float] = None) -> dict:
-    signal, container_fps, size = brightness_series(path, roi)
+            expect_rpm: Optional[float] = None, first_frame: int = 0,
+            last_frame: Optional[int] = None) -> dict:
+    signal, container_fps, size = brightness_series(path, roi, first_frame, last_frame)
     fps = fps_override or container_fps
     if not fps or fps <= 0:
         raise VideoError("no usable frame rate; pass --fps with the capture rate")
@@ -210,6 +261,7 @@ def measure(path: Path, roi=None, fps_override: Optional[float] = None,
         "video": str(path), "frames": len(signal), "fps_used": fps,
         "fps_from_container": container_fps, "fps_overridden": fps_override is not None,
         "frame_size": f"{size[0]}x{size[1]}", "roi": roi, "duration_s": round(duration, 3),
+        "first_frame": first_frame, "last_frame": last_frame,
         "rpm": round(rpm_auto, 1), "rpm_peak_count": round(rpm_count, 1),
         "autocorrelation_strength": round(strength, 3),
         "modulation": round(modulation, 3), "expect_rpm": expect_rpm,
@@ -298,6 +350,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="the firmware's own reading for this step. Not treated as "
                          "truth — used only to prove the frame rate is high enough "
                          "that the answer cannot be an alias")
+    ap.add_argument("--first-frame", type=int, default=0,
+                    help="start of the SLOWED section of a ramped slow-motion clip")
+    ap.add_argument("--last-frame", type=int,
+                    help="end of the slowed section (inclusive)")
     ap.add_argument("--json-out", type=Path)
     ap.add_argument("--dump-frame", type=Path, help="write frame 0 as PNG to pick an ROI")
     args = ap.parse_args(argv)
@@ -327,7 +383,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         roi = parts
 
     try:
-        result = measure(args.video, roi, args.fps, args.expect_rpm)
+        result = measure(args.video, roi, args.fps, args.expect_rpm,
+                         args.first_frame, args.last_frame)
     except VideoError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
