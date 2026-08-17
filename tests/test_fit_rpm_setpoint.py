@@ -124,6 +124,55 @@ def test_steps_below_the_firmware_threshold_are_dropped(fit_mod, constants):
     assert result["sides"]["left"]["n_points"] == 3
 
 
+def test_a_step_that_never_span_is_not_a_fit_point(fit_mod, constants):
+    """Commanded above the threshold, but the ESC never started.
+
+    Recorded on the rig 2026-08-14: a 250 command maps to PWM 1145/1129, below
+    the ESCs' start threshold, and both wheels sat still for 30 s while the
+    firmware accepted the command without error. `MIN_RPM_THRESHOLD` is 200, so
+    that step is NOT dropped, and it reached the regression as (0 RPM, PWM
+    1145) -- dragging the left slope from 0.2326 to 0.0598. Under constants like
+    those a 400 command maps back to PWM 1147, below the same start threshold,
+    so the refit would ship a firmware whose wheels silently do not turn.
+
+    A wheel that did not turn measures nothing about the map. The step is also
+    already excluded from the encoder-scale check, which takes only `true > 0`,
+    so including it in the fit means one number is treated as "no reading" for
+    validation and as data for fitting.
+    """
+    spun = ladder(commanded=(300, 350, 400, 450))
+    dead = [{"commanded_rpm": 250, "reported_left": 0.0, "reported_right": 0.0,
+             "true_left": 0.0, "true_right": 0.0}]
+
+    clean = fit_mod.fit(spun, constants)["sides"]["left"]
+    with_dead = fit_mod.fit(dead + spun, constants)["sides"]["left"]
+
+    assert with_dead["n_points"] == clean["n_points"]
+    assert with_dead["new_slope"] == clean["new_slope"]
+    assert with_dead["new_offset"] == clean["new_offset"]
+
+
+def test_a_step_that_never_span_is_reported_not_silently_dropped(
+        fit_mod, constants, capsys):
+    """Which steps did not spin is a finding about the machine, not bookkeeping.
+
+    If five steps are recorded and four are fitted, the printed constants read
+    as though the whole ladder supported them. The dead step is also the most
+    informative one in the session -- it locates the bottom of the usable band,
+    which is the number that tells the operator where to start next time.
+    """
+    dead = [{"commanded_rpm": 250, "reported_left": 0.0, "reported_right": 0.0,
+             "true_left": 0.0, "true_right": 0.0}]
+    result = fit_mod.fit(dead + ladder(commanded=(300, 350, 400, 450)), constants)
+
+    assert result["sides"]["left"]["not_spinning"] == [250]
+
+    fit_mod.report(result)
+    printed = capsys.readouterr().out
+    assert "250" in printed
+    assert "did not spin" in printed
+
+
 def test_too_few_steps_is_refused(fit_mod, constants):
     with pytest.raises(fit_mod.LadderError, match="at least 3"):
         fit_mod.fit(ladder(commanded=(300, 400)), constants)

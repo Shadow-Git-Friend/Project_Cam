@@ -3,11 +3,20 @@
 
 Why this exists
 ---------------
-Measured 2026-08-13: commanding 300 RPM produced a plateau the firmware
-reported as L=368 / R=372. The setpoint map is about 23% high, so commanding
-500 settles near 615 -- outside `blm_bridge`'s +/-10% arm band, which therefore
-refuses to arm and blocks the whole B1 speed calibration. The band is right;
-the map is wrong.
+The commanded RPM is not delivered, and the two wheels do not agree with each
+other. Video-verified 2026-08-17 on IMG_2536, both wheels filmed at one plateau:
+a 400 command delivers a true L=395.5 / R=511.6. The LEFT wheel is within 1.1%
+of its command; the RIGHT is 28% over it, and 29% over the left. So a 500
+command settles outside `blm_bridge`'s +/-10% arm band, which refuses to arm and
+blocks the whole B1 speed calibration. The band is right; the map is wrong.
+
+Two earlier figures for the same fault are superseded but worth keeping straight,
+because each was wrong in an instructive way. "23% high" (2026-08-13, L=368 /
+R=372) was read 20 s in while the wheels were still climbing -- a plateau needs
+~30 s. "31% high" (2026-08-14, a 300 command giving L=392 / R=402) was settled,
+but it puts the two wheels 2.5% apart where video later measured 29%; one of
+those two sessions is not describing the machine that is on the bench now.
+Resolve that before believing any single ladder.
 
 Two things are being solved at once, and the ORDER matters:
 
@@ -35,8 +44,11 @@ Usage
     [{"commanded_rpm": 250, "reported_left": 310, "reported_right": 305,
       "true_left": 308, "true_right": 306}, ...]
 
-`true_*` are the tachometer readings. Omit them and the tool reports the map
-it WOULD fit and refuses to emit constants.
+`true_*` are the independent readings (`measure_rpm_from_video.py`). Omit them
+and the tool reports the map it WOULD fit and refuses to emit constants. Record
+a step the wheel did not turn for as `0`, not by leaving it out: the tool drops
+it from the regression and reports it, because it locates the bottom of the
+usable band.
 """
 from __future__ import annotations
 
@@ -129,7 +141,7 @@ def fit(steps: list[dict], constants: dict) -> dict:
     result = {"n_steps": len(steps), "sides": {}}
     for side in ("left", "right"):
         slope_old, offset_old = constants[side]
-        pwms, trues = [], []
+        pwms, trues, not_spinning = [], [], []
         for s in steps:
             true = s.get(f"true_{side}")
             # A step below the firmware threshold produces PWM 1000 whatever the
@@ -137,13 +149,23 @@ def fit(steps: list[dict], constants: dict) -> dict:
             # would drag the fit toward a point the map does not control.
             if true is None or s["commanded_rpm"] < threshold:
                 continue
+            # Nor does a step the ESC never started. A 250 command clears
+            # MIN_RPM_THRESHOLD but maps to PWM 1145/1129, under the ESCs' start
+            # threshold, and on 2026-08-14 both wheels sat still for 30 s while
+            # the firmware accepted it. Regressed as (0 RPM, that PWM) it pulled
+            # the left slope from 0.2326 to 0.0598, which maps a 400 command
+            # back below the start threshold -- a refit that stops the machine.
+            if float(true) <= 0:
+                not_spinning.append(s["commanded_rpm"])
+                continue
             pwms.append(commanded_pwm(s["commanded_rpm"], slope_old, offset_old,
                                       threshold))
             trues.append(float(true))
 
         scale = encoder_scale(steps, side)
         entry = {"old_slope": slope_old, "old_offset": offset_old,
-                 "encoder_scale": scale, "n_points": len(trues)}
+                 "encoder_scale": scale, "n_points": len(trues),
+                 "not_spinning": not_spinning}
 
         if scale is None:
             entry["refused"] = ("no tachometer readings for this wheel; the "
@@ -181,6 +203,10 @@ def report(result: dict) -> None:
             print(f"  encoder scale:    reported/true = {scale['mean_ratio']:.3f} "
                   f"[{scale['min_ratio']:.3f}..{scale['max_ratio']:.3f}] "
                   f"n={scale['n']}  {verdict}")
+        if e["not_spinning"]:
+            commands = ", ".join(f"{c:g}" for c in e["not_spinning"])
+            print(f"  did not spin:     {commands} — dropped from the fit. The "
+                  f"usable band starts above the highest of these")
         if "refused" in e:
             print(f"  NO CONSTANTS:     {e['refused']}")
         else:
