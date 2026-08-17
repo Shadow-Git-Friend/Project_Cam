@@ -86,8 +86,10 @@ METHOD_AGREEMENT = 0.05
 # most likely explanation is an alias rather than a calibration error.
 EXPECTED_SANITY_FACTOR = 1.6
 # A peak this tall relative to the global autocorrelation peak counts as a real
-# repeat. The FIRST such peak is the period; see autocorrelation_hz.
-FUNDAMENTAL_FRACTION = 0.75
+# repeat. The FIRST such peak is the period; see autocorrelation_hz. The real
+# IMG_2545 fundamental is only 0.58 of its alternate-pass peak, while IMG_2536's
+# earlier lighting harmonics stay below 0.53, so 0.55 separates both clips.
+FUNDAMENTAL_FRACTION = 0.55
 
 
 class VideoError(Exception):
