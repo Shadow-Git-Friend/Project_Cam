@@ -3,20 +3,20 @@
 
 Why this exists
 ---------------
-The commanded RPM is not delivered, and the two wheels do not agree with each
-other. Video-verified 2026-08-17 on IMG_2536, both wheels filmed at one plateau:
-a 400 command delivers a true L=395.5 / R=511.6. The LEFT wheel is within 1.1%
-of its command; the RIGHT is 28% over it, and 29% over the left. So a 500
-command settles outside `blm_bridge`'s +/-10% arm band, which refuses to arm and
-blocks the whole B1 speed calibration. The band is right; the map is wrong.
+This is a contingency tool for a future setpoint failure, not a prerequisite
+for the current B1 speed calibration. Independent phone video resolved the
+2026-08-13/14 suspicion on 2026-08-17: on IMG_2536 the firmware reported
+L=392/R=509 while video measured L=395.5/R=511.6, ratios of 0.991/0.995 that
+validate both encoder scales. A command of 500 later produced L=456/R=502 inside
+`blm_bridge`'s existing arm band, and IMG_2545 measured the 700--1000 sweep
+within about 3% of command. No `control_15` refit is currently required.
 
-Two earlier figures for the same fault are superseded but worth keeping straight,
-because each was wrong in an instructive way. "23% high" (2026-08-13, L=368 /
-R=372) was read 20 s in while the wheels were still climbing -- a plateau needs
-~30 s. "31% high" (2026-08-14, a 300 command giving L=392 / R=402) was settled,
-but it puts the two wheels 2.5% apart where video later measured 29%; one of
-those two sessions is not describing the machine that is on the bench now.
-Resolve that before believing any single ladder.
+The earlier "23% high" and "31% high" conclusions extrapolated a single bottom-
+range point. The measurements themselves remain useful: command 250 did not
+start either wheel, 300 produced 392/402, and 400 produced 392/509. Together
+with the higher sweep they show a nonlinear, asymmetric lower band rather than
+one global scale error. B1 therefore starts at 500 and still trusts only fresh
+measured RPM, never the command alone.
 
 Two things are being solved at once, and the ORDER matters:
 
@@ -32,8 +32,9 @@ Two things are being solved at once, and the ORDER matters:
    RPM, so regressing PWM on true RPM inverts the relation directly.
 
 This tool does NOT touch ball exit speed. v(RPM) stays a separate model, fitted
-by `fit_rpm_speed.py` and indexed on MEASURED RPM at the shot, because no
-open-loop map can know that the ball is loading the wheels.
+by `fit_rpm_speed.py` and indexed on the commanded RPM stored with the confirmed
+shot. The pre-fire measured pair and its age stay beside that command as audit
+evidence that the wheels satisfied it; no open-loop map can predict ball load.
 
 Usage
 -----

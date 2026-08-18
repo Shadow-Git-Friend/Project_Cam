@@ -101,8 +101,11 @@ def test_a_small_scale_error_is_tolerated(fit_mod, constants):
 
 
 def test_the_refit_makes_the_command_mean_what_it_says(fit_mod, constants):
-    """End to end: feed it the measured 23% overshoot, apply the new constants,
-    and a 500 command must land inside the +/-10% arm band it used to miss."""
+    """A synthetic 23% overshoot is corrected into the +/-10% arm band.
+
+    This fixture exercises the contingency refit; it is not a claim about the
+    current rig, whose global-overshoot premise was disproved on 2026-08-17.
+    """
     result = fit_mod.fit(ladder(), constants)
     left = result["sides"]["left"]
     assert left["r_squared"] > 0.99
@@ -110,9 +113,8 @@ def test_the_refit_makes_the_command_mean_what_it_says(fit_mod, constants):
     new_pwm = fit_mod.commanded_pwm(500, left["new_slope"], left["new_offset"],
                                     constants["min_rpm_threshold"])
     old_slope, old_offset = constants["left"]
-    # Invert the machine's behaviour: it delivered true = cmd*1.233 at the OLD
-    # pwm, i.e. true = (pwm - old_offset)/old_slope / 1.233 * ... -- simpler to
-    # state as: the delivered RPM for a given PWM is linear, so recover it.
+    # Invert the fixture's synthetic behaviour: true = cmd*1.233 at the old PWM.
+    # Its delivered RPM is deliberately linear, so recover it directly.
     delivered = (new_pwm - old_offset) / old_slope * 1.233
     assert abs(delivered - 500) <= 50, f"500 commanded still delivers {delivered:.0f}"
 

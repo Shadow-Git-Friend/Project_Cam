@@ -22,81 +22,61 @@ shots land short or long — it is an unmeasured input to a clearance decision.
 uncommissioned geometry.** Keep the physical exclusion zone, keep the low-energy
 presets, and do not run pose-guided firing at a person.
 
-## 1b. STOP — a prerequisite found 2026-08-13 blocks every shot below
+## 1b. RESOLVED 2026-08-17 — independent video cleared the prerequisite
 
-**Commanding 500 RPM does not deliver 500 RPM.** Settled measurement on the rig
-2026-08-14: a 300 RPM command plateaus at **L=392 / R=402**. The setpoint map is
-about **31% high**, so §5's "command 500 RPM, wait for both measured wheels
-between 450 and 550" can never be satisfied — the wheels settle near 655 and
-`blm_bridge` refuses to arm with *"measured L=655 R=670 is outside
-the commanded 500 +/-50 RPM"*.
+The previous STOP extrapolated one low-range point across the whole setpoint
+map: because a command of 300 plateaued at L=392/R=402, it predicted that 500
+would produce roughly 655 and could never pass the arm band. That extrapolation
+was wrong. The bottom of the range is nonlinear; it is not a global scale error.
 
-**That refusal is correct and must not be worked around by widening the band.**
-The band is the only check that the machine did what it was told, and it is now
-pinned with this reason in `tests/test_blm_bridge.py`. Two further consequences:
-§4's "pass 1 at 500 RPM, the lowest energy above the gate" is false as written —
-it would really be a 615 RPM pass — and the firmware's 400 RPM fire gate is
-crossed by the two wheels about **two seconds apart** during spin-up, so they
-only match once settled.
+The independent phone-video tachometer established the time scale from the
+known slow-motion section and measured:
 
-Run this before §2, and note the ORDER — it is not cosmetic.
+- **IMG_2536, command 400:** firmware L=392/R=509; video L=395.5/R=511.6.
+  Reported/true is 0.991/0.995, validating `PPR_LEFT = 1000` and
+  `PPR_RIGHT = 2000` rather than suggesting a common encoder error.
+- **IMG_2544, command 500:** firmware L=456/R=502. The left video's
+  autocorrelation was about 456 but its independent crossing count was noisy,
+  so that side is supporting evidence rather than a standalone accepted reading;
+  the right video was accepted at about 510. The firmware pair is inside the
+  commanded 500 ±50 band and differs by 46 RPM, below the 75 RPM spread limit.
+- **IMG_2545, slowed 120-fps section:** true L/R were 685.3/719.5 at command
+  700, 796.7/804.5 at 800, 898.8/906.7 at 900, and 1026.3/1029.9 at 1000.
+  Every value is within about 3% of its command. The 600 step was in the 30-fps
+  real-time head and had only about three frames per revolution, so it is not an
+  independent reading and is not claimed as one.
 
-**Step 1 — verify the encoder scale with an INDEPENDENT instrument.**
-`PPR_LEFT = 1000` and `PPR_RIGHT = 2000` in the firmware, a factor of two apart.
-That is self-consistent with both wheels reporting ~370 at the same plateau (if
-the encoders were identical hardware, one would have to read double the other),
-but a *common* error in both is invisible in that comparison. Fit reflective
-tape to each tyre and read true RPM with an independent true-RPM reading (phone slow-motion video, see below) at every ladder
-step below.
+**B1 therefore has no setpoint-refit or `control_15` prerequisite.** Continue
+with commissioned `control_14` and §2. The 500 plateau has demonstrated that the
+numeric arm window is reachable, but the next session must still prove the
+whole live predicate: fresh readings, at least three separate in-band arrivals
+spanning two seconds, no gap over two seconds, and wheel spread no more than
+75 RPM within the protocol's spin-up deadline. Yesterday's plateau is never an
+arm for today's shot.
 
-Skipping this is the expensive mistake: refitting the map against the firmware's
-own RPM makes command, report and model all agree **while all three are wrong**,
-and nothing downstream can detect it.
+**Do not widen or bypass that predicate.** A future out-of-band plateau means
+stop and investigate. `scripts/fit_rpm_setpoint.py` remains the contingency
+tool: any real refit still needs at least three independent video measurements,
+must verify reported/true before fitting, and must be followed by a new firmware
+identity plus a complete no-fire ladder. Refitting against firmware RPM alone
+would still make a bad encoder and a bad map agree with each other.
 
-**Step 2 — the ladder, no fire.** Machine empty, zone clear, through the
-sanctioned console only (`blm_bridge` — do not add a second serial writer):
+The lower-band observations remain valid and define where not to operate:
+command 250 did not turn either wheel, command 300 produced 392/402, and command
+400 produced 392/509. Do not use commands below 500 for B1. A command being
+accepted is not evidence of rotation, and either wheel merely crossing the
+firmware's 400 RPM fire threshold is not evidence of a stable pair.
 
-```
-wheels 250      # then 300, 350, 400, 450
-info            # poll until the plateau is steady; record L and R,
-                # and read the tachometer at that same moment
-wheels 0
-```
+The 30- and 45-second holds used in the diagnostic ladders were measurement
+windows, not a replacement for the readiness gate. For a shot, §5's explicit
+arrival window and deadline are authoritative. After `stop`, wait for the fresh
+`safe_to_approach` verdict; measured runs have taken roughly 20–30 seconds to
+coast to true zero.
 
-Record each step as `{"commanded_rpm": …, "reported_left": …, "reported_right": …,
-"true_left": …, "true_right": …}`. Allow ~15 s per step to settle, and remember
-that **`stop` needs about 20 s to bring the wheels to rest** — it removes drive,
-it does not brake. Steps below `MIN_RPM_THRESHOLD` (200) are ignored by the fit
-because the firmware forces PWM to 1000 there.
-
-**Step 3 — refit and reflash.**
-
-```bash
-./venv/bin/python scripts/fit_rpm_setpoint.py ladder.json
-```
-
-It refuses to emit constants when reported/true falls outside 1 ± 0.05, which is
-what makes step 1 unskippable. Apply the constants it prints, ship as
-`control_15` with its own honest identity, add it to
-`blm_bridge.COMMISSIONED_FIRMWARE`, and re-run the ladder to confirm commanded ≈
-measured inside the ±10 % arm band.
-
-**Step 4 — only then start §2.** Note that v(RPM) itself stays indexed on
-**measured** RPM at the shot (`rpm_left_pre_fire` / `rpm_right_pre_fire`), never
-on the commanded number: no open-loop map can know that the ball is loading the
-wheels as it passes through them.
-
-**The plateau needs about 30 seconds.** The first attempt at this figure read
-~23% because it was taken 20 s in while the wheels were still climbing. After
-~30 s the reading holds within ±1 RPM. Never record a plateau from a short
-window — and note that this is exactly why §5 asks for polls spanning two
-seconds *after* the reading enters band.
-
-**Do not start the ladder at 250 RPM.** It maps to PWM 1145/1129, below the
-ESCs' start threshold, and the wheels do not turn at all — for 30 s, with no
-error, because `MIN_RPM_THRESHOLD` is 200 and the firmware accepts the command.
-The usable band starts near a commanded 300. "Commanded and accepted" is not
-evidence of rotation.
+The v(RPM) model remains indexed by the **commanded RPM stored with the confirmed
+shot**, because that is the input the launcher can reproduce. Preserve
+`rpm_left_pre_fire`, `rpm_right_pre_fire`, and their sample age alongside it as
+the audit evidence that the wheels actually satisfied the command before fire.
 
 ### Measuring true RPM without a tachometer (2026-08-13)
 

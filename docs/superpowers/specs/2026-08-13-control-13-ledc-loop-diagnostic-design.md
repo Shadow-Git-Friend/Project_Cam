@@ -328,13 +328,20 @@ Delete the "known residual" warning above from any plan built on it.
 
 ### Two findings from the same run, both feeding roadmap A6
 
-**The RPM command mapping is about 23% high.** *(Corrected 2026-08-14: it is ~31%. The reading below was taken 20 s in, while the wheels were still climbing; the settled plateau for a 300 command is L=392 / R=402. Left as written because it is what the run measured — see `.claude/rules/safety.md` for the operative figure.)* Commanding 300 RPM produced a
+**This run appeared to show the RPM command mapping about 23% high.** *(Historical
+measurement, corrected twice: the settled 2026-08-14 command-300 plateau was
+L=392/R=402, but independent video and the 2026-08-17 higher ladder showed that
+neither percentage describes the whole map. The bottom range is nonlinear;
+500 reaches the unchanged arm band and 700–1000 track within about 3%. Left as
+written below because it is what this diagnostic run measured — see
+`.claude/rules/safety.md` for the operative interpretation.)* Commanding 300 RPM produced a
 plateau of L≈368, R≈372 with a peak of 399 — against a fire gate of 400, which
-the test was designed to stay under. `PWM = RPM·LEFT_SLOPE + LEFT_OFFSET`
-(0.1763 / 1101) does not describe this machine. Commanding 400 to satisfy the
-gate would deliver roughly 530, and the trajectory evaluator uses the commanded
-number. So before v(RPM) can mean anything, the **RPM setpoint itself** needs
-recalibrating, not just its conversion to m/s.
+the test was designed to stay under. From `PWM = RPM·LEFT_SLOPE + LEFT_OFFSET`
+(0.1763 / 1101), the run was initially extrapolated to predict that commanding
+400 would deliver roughly 530. The higher ladder later disproved that linear
+extrapolation. The conclusion drawn at the time — that the **whole RPM setpoint**
+needed recalibrating before v(RPM) — was superseded on 2026-08-17; the low-range
+hazard it exposed remains real.
 
 **Left and right diverge during spin-up and converge at plateau.** At 6.2 s the
 readings were L=3, R=125; the right wheel leads by roughly two seconds before

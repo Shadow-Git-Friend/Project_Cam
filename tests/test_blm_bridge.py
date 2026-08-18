@@ -1326,15 +1326,15 @@ def test_firmware_identity_is_parsed_from_boot_and_info(
 
 
 def test_the_rpm_band_is_not_the_place_to_absorb_a_firmware_map_error(bridge):
-    """Measured 2026-08-13: commanding 300 RPM delivers a plateau near 370.
+    """A future map error must fail here instead of redefining readiness.
 
-    The setpoint map (`PWM = RPM*SLOPE + OFFSET` in the firmware) is about 23%
-    high, so commanding 500 settles near 615 and this gate refuses to arm --
-    correctly, because the machine is not doing what it was told. The tempting
-    "fix" is to widen the band until 615 counts as 500, which would delete the
-    only check that the command means anything. The real fix is to refit the
-    firmware map (and to verify the encoder scale FIRST, or the refit bakes a
-    lying encoder into the map and every number agrees while being wrong).
+    The 655/670 plateau below is a deliberate counterexample, not the current
+    rig: independent video on 2026-08-17 showed that extrapolating one nonlinear
+    low-range point to predict 500 was wrong, and the real 500 plateau reaches
+    the unchanged band. The tempting response to any actual miss would still be
+    to widen the band until a wrong delivery counts as the command, deleting the
+    only check that the command means anything. The fix is to investigate and,
+    if supported by an independent tachometer ladder, refit the firmware map.
 
     So the constants are pinned with their reason, not just their behaviour.
     """
@@ -1345,9 +1345,8 @@ def test_the_rpm_band_is_not_the_place_to_absorb_a_firmware_map_error(bridge):
     controller, _, _, _ = make(bridge)
     send(bridge, controller, "reload")
     send(bridge, controller, "aim 0 0 500")
-    # The plateau the rig would produce for a 500 command, scaled from the
-    # measured 300 -> 397. Steady, matched, fresh -- and still refused, because
-    # steady agreement with the WRONG number is not readiness.
+    # Synthetic wrong plateau: steady, matched and fresh must still be refused,
+    # because agreement with the wrong number is not readiness.
     controller.note_telemetry(655.0, 670.0)
     controller.note_telemetry(655.0, 670.0)
     controller.note_telemetry(655.0, 670.0)
