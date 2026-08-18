@@ -1,7 +1,7 @@
 # control_15 Closed-Loop Flywheel RPM Design
 
 **Date:** 2026-08-18  
-**Status:** approved design, implementation not started  
+**Status:** direction approved; implementation not started
 **Branch:** `feature/fixed-yaw-rpm-calibration`
 
 ## Problem
@@ -42,27 +42,41 @@ For every command in the operational firing range 400..1200 RPM:
 - a zero command still produces a confirmed physical 0/0 RPM stop.
 
 The algorithm applies to every value in the range, including the desktop
-slider's 10 RPM increments. Hardware commissioning samples 400, 500, 600, ...,
-1200 RPM in both directions and repeats 500 RPM after the hot ladder. Commands
-below 400 remain outside the commissioned firing range. A zero target means
-stop; 1..199 retains the existing forced-idle behaviour; 200..399 uses the same
+slider's 10 RPM increments. Core hardware commissioning samples 400, 500, 600,
+..., 1000 RPM in both directions and repeats 500 RPM after the hot ladder.
+The machine has never been operated above 1000 RPM, so 1100 and 1200 are not
+routine ladder steps: each is a separately authorised escalation after the
+complete core ladder passes. Commands below 400 remain outside the commissioned
+firing range. A zero target means stop; 1..199 retains the existing forced-idle
+behaviour; 200..399 uses the same
 controller but remains no-fire and uncommissioned until a separate physical
-minimum-speed study proves that the ESCs can sustain it. The existing 400 RPM
-feeder gate remains unchanged. A raw target outside 0..1200 is rejected without
-changing the current target and emits `ERR: RPM RANGE` rather than being
-silently clamped into a different command.
+minimum-speed study proves that the ESCs can sustain it. Closed-loop behaviour
+at 250 RPM is nevertheless predictable enough to test: the measured dead
+command maps to L/R PWM `1145/1129`, while the first observed spinning command
+at 300 maps to `1153/1138`. With `MAX_TRIM_US = 30`, a persistent positive error
+can raise the 250 destinations to `1175/1159`, above both observed spinning
+PWMs. The prediction is therefore that 250 will now start; 250 and 300 are
+explicit low-range prediction checks, not silently undefined inputs. If a wheel
+starts, the result establishes a candidate lower sustainable boundary; if it
+does not, `NO_START` is the required result. Neither outcome commissions firing
+below 400. The existing 400 RPM feeder gate remains unchanged. A raw target
+outside 0..1200 is rejected without changing the current target and emits
+`ERR: RPM RANGE` rather than being silently clamped into a different command.
 
 ## Non-goals
 
 - Do not weaken the host's freshness, stability, spread, reload, ARM, or FIRE
-  refusals.
+  refusals. In particular, retain the commanded +/-10% band with its 50 RPM
+  floor, the 75 RPM left/right spread limit, and the 400 RPM ARM/FIRE gate in
+  `blm_bridge.py`.
 - Do not use a higher command as a substitute for a failed lower command.
 - Do not change encoder PPR constants; independent video measured reported/true
   ratios of 0.991/0.995 on 2026-08-17.
 - Do not fire a ball while controller gains are being commissioned.
 - Do not repair or compensate YAW lost motion in this change.
 - Do not create the RPM-to-km/h ball model until wheel regulation is accepted.
-- Do not edit the deployed `control_14_full.ino`; it is the rollback artifact.
+- Do not edit deployed `control_12_full.ino`, `control_13_full.ino`, or
+  `control_14_full.ino`; they are immutable rollback artifacts.
 
 ## Considered approaches
 
@@ -89,9 +103,32 @@ is rejected.
 ## Firmware architecture
 
 `control_15_full.ino` starts as an exact copy of `control_14_full.ino` with a new
-identity. The command grammar, feeder state machine, stepper behaviour, encoder
+identity. Existing commands remain compatible; the only grammar addition is an
+RPM-only `wheels <left_rpm> <right_rpm>` command needed to regulate without
+touching either aim target. The feeder state machine, stepper behaviour, encoder
 PPR, BLE/USB transport, continuous `L:<rpm> R:<rpm>` telemetry, 1000 us idle
-duty, and mechanical limits remain unchanged.
+duty, and mechanical limits otherwise remain unchanged.
+
+### Wheel-only command boundary
+
+In `control_14`, the host's `wheels 500` intent becomes serial
+`set 0 0 500 500`, which calls both `vertStepper.moveTo()` and
+`horzStepper.moveTo()` even though the operator intended only RPM. That violates
+the fixed-YAW ladder's requirement that no YAW command be emitted after boot.
+
+`control_15` therefore accepts:
+
+```text
+wheels <left_rpm> <right_rpm>
+```
+
+It validates both targets as finite values in 0..1200, updates only flywheel
+controller state, and never reads or writes pitch/yaw targets or calls any
+stepper method. The existing combined `set v h wl wr` remains for backward
+compatibility outside commissioning. For a recognised `control_15` candidate,
+the bridge maps its operator-level `wheels <rpm>` intent to
+`wheels <rpm> <rpm>` on serial; `control_13` and `control_14` retain their
+existing combined-set mapping.
 
 Each wheel owns the following controller state:
 
@@ -112,12 +149,15 @@ The controller runs only when a new 200 ms encoder measurement is available.
 For wheel `w`:
 
 ```text
-base_w       = int(target_w * slope_w + offset_w)
-error_w      = target_w - measured_w
-integral_w  += Ki_w * error_w * dt
-trim_w       = clamp(Kp_w * error_w + integral_w,
-                     -MAX_TRIM_US, +MAX_TRIM_US)
-desiredPWM_w = clamp(base_w + trim_w, 1000, 1800)
+ramp_caught_w  = abs(desiredPWM_w - currentPWM_w) <= RAMP_STEP_US
+base_w         = int(target_w * slope_w + offset_w)
+error_w        = target_w - measured_w
+proportional_w = Kp_w * error_w
+if ramp_caught_w and saturation_allows_integration_w:
+    integral_w += Ki_w * error_w * dt
+trim_w         = clamp(proportional_w + integral_w,
+                       -MAX_TRIM_US, +MAX_TRIM_US)
+desiredPWM_w   = clamp(base_w + trim_w, 1000, 1800)
 ```
 
 Initial candidate constants are deliberately conservative and independently
@@ -129,29 +169,76 @@ LEFT_KI = RIGHT_KI = 0.08 us/(RPM*s)
 MAX_TRIM_US = 30 us
 ```
 
+The trim bound has measured numerical margin; it is not a placeholder for
+trial-and-error increases. Using the existing feed-forward slopes as the local
+plant inverse, 30 us corresponds to approximately:
+
+```text
+left authority  = 30 / 0.1763 = 170.2 RPM
+right authority = 30 / 0.1670 = 179.6 RPM
+```
+
+The largest observed setpoint error was the right wheel at command 400,
+measured 509: 109 RPM error requires approximately
+`109 * 0.1670 = 18.203 us` correction. The 30 us limit therefore has
+`30 / 18.203 = 1.65x` authority over the worst measured error. A failed
+candidate is not permission to raise `MAX_TRIM_US`: increasing it requires a
+trace that shows intact encoder feedback, trim saturation in the correcting
+direction, and insufficient authority rather than unstable gains or a wrong
+plant model.
+
 The existing output slew limit remains 5 us every 200 ms. The PI controller
 selects the destination duty; the ramp controls how quickly hardware reaches
 it. Derivative action is omitted because the measured defect is steady-state
 offset and the 200 ms RPM samples already contain quantisation/noise.
 
+The ramp is transport delay inside the loop, not an instantaneous actuator.
+Its rate is `5 us / 0.2 s = 25 us/s`, so delivering an 18 us correction takes
+`18 / 25 = 0.72 s`. At 100 RPM error, an unconstrained integrator with the
+candidate Ki would add `0.08 * 100 * 0.72 = 5.76 us` while the actuator was
+still travelling toward the previous request. Output saturation anti-windup
+does not catch this case because neither the PI destination nor the ESC range
+is saturated.
+
 ### Anti-windup and state transitions
 
-The integral is clamped so the combined trim cannot exceed
-`MAX_TRIM_US`. Integration pauses when an output is saturated and the current
-error would drive it farther into saturation; it resumes when the error drives
-back toward the valid range.
+The proportional term is recomputed on every fresh RPM sample. `desiredPWM_w`
+and `currentPWM_w` in `ramp_caught_w` are the destination and delivered output
+carried into that sample, before the new proportional destination is computed.
+The integral is updated only when the output ramp has caught that destination:
 
-The integral and startup state reset whenever:
+```text
+ramp_caught_w = abs(desiredPWM_w - currentPWM_w) <= RAMP_STEP_US
+```
 
-- a different target RPM is received;
-- target RPM becomes zero;
+When `ramp_caught_w` is false, the integral for that wheel is frozen while the
+proportional term remains active. Once caught, ordinary saturation anti-windup
+also applies: the integral is clamped so the combined trim cannot exceed
+`MAX_TRIM_US`, pauses when a saturated output would be driven farther outward,
+and resumes when the error drives it back toward the valid range.
+
+Target-change reset is evaluated independently for each wheel and is defined
+exactly as:
+
+```text
+large_change_w = (old_target_w > 0) and (new_target_w > 0) and
+                 (abs(new_target_w - old_target_w) > 0.05 * old_target_w)
+```
+
+The integral resets only when:
+
+- that wheel's target transitions between zero and nonzero;
+- `large_change_w` is true;
 - `reload` or `stop` is received;
 - a controller fault is latched;
 - the ESP32 boots.
 
-This prevents correction learned at one speed or supply condition from being
-replayed at another. A new nonzero target always begins from its feed-forward
-base, not from a stale integral.
+For a nonzero change of 5% or less, the integral is preserved because it models
+the current hardware/supply bias, not one exact setpoint. The desktop slider
+therefore retains the learned correction through each 10 RPM step from 500 to
+600, while a direct 500-to-600 command resets it. Startup/encoder-health timing
+uses the same small-change/large-change distinction, so a stream of slider
+updates neither restarts convergence nor postpones a no-start fault forever.
 
 ## Firmware safety behaviour
 
@@ -160,9 +247,10 @@ like a slow wheel and request more PWM. Four limits contain it:
 
 1. Feed-forward remains the primary output and PI trim is bounded to +/-30 us.
 2. Overall PWM remains clamped to the existing 1000..1800 us range.
-3. If a commanded wheel in the firing range fails to produce 100 RPM within
-   15 seconds, both wheel targets are forced to zero and a controller fault is
-   latched.
+3. If a commanded wheel with an active controller target of at least 200 RPM
+   fails to produce 100 RPM within 15 seconds, both wheel targets are forced to
+   zero and a controller fault is latched. This applies to the 250/300
+   prediction checks as well as the firing range.
 4. After a wheel has exceeded 200 RPM, falling below 50 RPM for one second while
    its target remains at least 400 is treated as encoder loss or a mechanical
    stall. Both wheel targets are forced to zero and a fault is latched.
@@ -216,8 +304,10 @@ command.
 ## Host commissioning boundary
 
 `control_15` must not be added to `COMMISSIONED_FIRMWARE` merely because it
-compiles. During candidate testing, the bridge may display its exact raw boot
-record while fire control stays disabled. Host recognition is promoted only
+compiles. The host represents it separately as a recognised candidate so it can
+show the exact identity and select the wheel-only serial command while fire
+control stays disabled. Candidate recognition must not satisfy any commissioned
+or fire-enabled predicate. Promotion to `COMMISSIONED_FIRMWARE` occurs only
 after the complete no-fire ladder, reverse ladder, hot-repeat, coast-down, and
 independent-video checks pass for the exact flashed source/binary hashes.
 
@@ -231,11 +321,15 @@ Implementation is test-first. A dedicated `control_15` contract suite must
 first fail against the absent candidate and then pin:
 
 - `control_12`, `control_13`, and `control_14` hashes remain unchanged;
-- `control_15` has a unique identity and unchanged command grammar;
+- `control_15` has a unique candidate identity, preserves every existing
+  command, and adds exactly one wheel-only command;
+- candidate bridge routing emits `wheels <rpm> <rpm>` without an angle, while
+  control_13/control_14 routing remains byte-for-byte unchanged;
 - both wheels use independent errors, integrals, base PWM, trim, and outputs;
 - control updates consume fresh 200 ms samples rather than loop iterations;
 - trim, integral, PWM, and overspeed limits cannot be bypassed;
-- target changes, zero, reload, stop, and faults reset controller state;
+- zero transitions, nonzero changes greater than 5%, reload, stop, and faults
+  reset controller state, while changes of 5% or less preserve the integral;
 - stop and reload still target 1000 us idle duty;
 - feeder motion remains impossible under a controller fault;
 - compact telemetry remains parser-compatible;
@@ -253,24 +347,90 @@ The exact candidate must compile with Arduino-ESP32 core 3.3.7 for
 `esp32:esp32:esp32`, using the Arduino IDE 2.3.8 bundled CLI already used for
 `control_14`. Compiler output, size, source hash, and binary hash are retained.
 
+## Tuning iteration budget and evidence
+
+Controller tuning is limited to four flashed candidates. One iteration begins
+when a new `control_15` source hash is flashed and includes compilation, flash,
+boot/zero verification, the complete required no-fire ladder for that stage,
+and true-zero shutdown. A compile failure that never reaches the board is a
+software failure but does not consume a hardware iteration; any changed source
+that is flashed consumes one, even if it faults at the first step.
+
+Every iteration is appended as one structured record to
+`garage_lab_combined/cal/blm/control_15_tuning.jsonl`. Each record contains:
+
+- iteration number 1..4 and wall-clock timestamp;
+- `LEFT_KP`, `LEFT_KI`, `RIGHT_KP`, `RIGHT_KI`, `MAX_TRIM_US`,
+  `RAMP_STEP_US`, and `RAMP_INTERVAL_MS`;
+- SHA-256 of the exact firmware source and flashed binary;
+- Arduino CLI, Arduino-ESP32 core, FQBN, compile result, and binary size;
+- for every step: command, ascending/descending/low-range/hot-repeat stage,
+  10-second mean L/R, maximum absolute L/R deviation in RPM and percent,
+  time-to-band for each wheel and for the pair, controller PWM/trim extrema,
+  fault code, and anomaly note;
+- confirmation that the ball was absent, fire control was disabled, no YAW
+  command was emitted, marks stayed aligned, and shutdown reached fresh 0/0.
+
+`time_to_band_s` is measured from the serial command write to the first sample
+that begins at least two continuous seconds with both wheels inside the +/-2%
+commissioning band. A transient crossing does not count.
+
+After any gain or algorithm change, the next flashed hash starts again at S0
+and the low-range/core ladder; prior steps cannot be carried forward. Upper
+1100/1200 evidence is collected only after that iteration's complete core
+ladder passes and the required operator confirmations are obtained.
+
+After four unsuccessful flashed candidates, stop. Do not compile or flash a
+fifth tuning candidate, do not widen any acceptance band, and do not increase
+trim authority by guesswork. Return the four iteration records, exact failure
+patterns, and rollback state to the user. Four consecutive failures mean the
+controller/plant model must be reconsidered before further hardware authority
+is granted.
+
 ## Hardware commissioning
 
 All controller commissioning is no-fire: ball removed, non-human corridor
 clear, YAW physically fixed at matching marks, fire control disabled, ESTOP
 reachable, and no `reload`, `arm`, `fire`, `center`, or `setzero` command.
+Every nonzero and zero RPM change uses only the wheel-only firmware command;
+there is no `aim`, combined `set`, YAW value, or stepper call anywhere in a
+ladder session. `stop` remains available as the safety action and is also the
+only command used to clear a recorded controller fault after the wheels are
+below its reset threshold; it does not command either aim axis. Serial traces
+are checked for this invariant before acceptance.
 
 For every candidate flash:
 
 1. Confirm exact `SYS: FW control_15 READY`, logical aim 0/0, feeder IDLE,
    `Ball=HIGH`, and fresh wheel 0/0 without physical aim movement.
-2. Run commanded 400, 500, 600, 700, 800, 900, 1000, 1100, and 1200 RPM.
-3. At each step, reject after 15 seconds if the controller has not entered the
-   +/-2% band. Once inside, retain at least 10 seconds of fresh samples.
-4. Command the same ladder in reverse to expose hysteresis and accumulated heat.
-5. Repeat 500 RPM after the reverse ladder; it must meet the same acceptance as
+2. Run 250 RPM as a low-range prediction check. If both wheels start, retain a
+   10-second trace without treating it as fire-range acceptance. If either does
+   not reach 100 RPM in 15 seconds, require the corresponding `NO_START` fault.
+   After a successful trace, command wheel-only zero and wait for true 0/0. After
+   a fault, retain its record, allow the forced ramp-down to reach the reset
+   threshold, send `stop` to clear the latch, and verify fresh true 0/0 before
+   continuing.
+3. Repeat the same prediction check at 300 RPM, again returning to true 0/0.
+   Record whether 250 and 300 start, sustain their commands, or fault; this
+   evidence fixes the new lower physical boundary instead of assuming it.
+4. Run commanded 400, 500, 600, 700, 800, 900, and 1000 RPM.
+5. At each operational step, reject after 15 seconds if the controller has not
+   entered the +/-2% band. Once inside, retain at least 10 seconds of fresh
+   samples.
+6. Command the same operational ladder in reverse to expose hysteresis and
+   accumulated heat.
+7. Repeat 500 RPM after the reverse ladder; it must meet the same acceptance as
    the cold point.
-6. Command zero and wait for true encoder 0/0 before approach or port closure.
-7. Independently measure 500, 800, and 1100 RPM from the slowed section of
+8. Command zero and wait for true encoder 0/0 before approach or port closure.
+9. Review the complete 400..1000 ascending/reverse ladder and hot 500 repeat.
+   If any core point fails, do not command above 1000 RPM.
+10. Obtain a new explicit operator confirmation for the 1100 RPM escalation.
+    Test only 1100 with the same 15-second entry and 10-second plateau criteria,
+    then command zero and wait for true 0/0. A failed 1100 point blocks 1200.
+11. After 1100 passes, obtain a separate explicit operator confirmation for the
+    1200 RPM escalation. Test only 1200 with the same criteria, then command zero
+    and wait for true 0/0. The 1100 confirmation does not authorise 1200.
+12. Independently measure 500, 800, and 1100 RPM from the slowed section of
    phone video. Reported/true must remain within 5% on each wheel, and the video
    estimate must agree with the command within 2%.
 
@@ -288,7 +448,9 @@ fired during this design's acceptance work.
 The work is complete only when the same flashed `control_15` artifact:
 
 - passes all software contracts and the pinned toolchain compile;
-- passes ascending and descending 400..1200 RPM ladders plus the hot 500 repeat;
+- records the predicted start-or-`NO_START` outcome at 250 and 300 RPM;
+- passes the ascending/descending 400..1000 core ladder plus the hot 500 repeat;
+- passes the separately authorised 1100 and then 1200 RPM escalations;
 - passes independent video checks at 500/800/1100;
 - returns both wheels to true zero after STOP;
 - is then explicitly promoted as commissioned in the host with all focused and
