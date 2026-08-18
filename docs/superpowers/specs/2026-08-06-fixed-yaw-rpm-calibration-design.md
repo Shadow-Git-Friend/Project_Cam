@@ -1,16 +1,24 @@
 # Fixed-YAW 500 RPM calibration under known horizontal backlash
 
-**Status:** operator-approved design, 2026-08-06
+**Status:** operator-approved design, 2026-08-06; backlash evidence corrected 2026-08-18
 **Scope:** method A speed measurement at one commanded setpoint, using a non-human backstop
 
 ## Problem
 
-The current BLM has direction-dependent horizontal backlash of roughly 2 degrees.
-The YAW axis is open-loop: the firmware reports its internal step position, not the
-barrel's achieved physical direction. In the no-fire gate, `+5 -> CENTER` appeared
-to return correctly while `-5 -> CENTER` left a small visible offset. The current
-LAUNCHER path sends the firmware's ordinary `center` command and does not compensate
-that mechanical hysteresis.
+The current BLM has direction-dependent horizontal backlash previously measured by
+the operator at roughly 6--7 degrees. The YAW axis is open-loop: the firmware reports
+its internal step position, not the barrel's achieved physical direction. A live
+no-fire check on 2026-08-18 confirmed the consequence: after a physical `0 -> +5`
+move, the reverse `+5 -> 0` command was absorbed by the deadband and the platform did
+not return, even though the firmware acknowledged `H=0.0`. The motor noise therefore
+was not evidence that the commanded angle had been achieved. The older roughly
+2-degree estimate and the claim that `+5 -> CENTER` demonstrated a return were too
+optimistic.
+
+The current LAUNCHER path sends the firmware's ordinary `center` command and does
+not compensate that mechanical hysteresis. An angle acknowledgement proves only
+that the requested step count was accepted; it must never be used as physical YAW
+feedback.
 
 This prevents the session from validating aiming accuracy. It does not prevent a
 speed-only measurement if YAW never moves: horizontal landing distance under a
@@ -53,6 +61,25 @@ Opening the serial link resets the ESP32 and adopts that physical pose as logica
 Firmware `reload` internally commands both aim axes to zero. This is acceptable
 only while their logical targets and internal positions are already zero; any
 visible aim movement during reload is an immediate failed session.
+
+### Recovery after a YAW commissioning move
+
+The generic no-fire YAW return gate remains failed if the physical marks do not
+return; the fixed-YAW procedure must not relabel an open-loop acknowledgement as a
+pass. It instead provides a narrower recovery path for this speed-only measurement:
+
+1. Press `STOP`, close the no-fire console, and remove aim-drive power.
+2. Only while the drive is de-energised, restore the physical YAW reference marks
+   by hand, level PITCH, and mechanically secure the YAW direction.
+3. Open a new session without moving either aim control. The ESP32 boot adopts that
+   verified physical pose as logical `0/0`.
+4. Do not use YAW, `CENTER`, or `SET ZERO` in that session. Do not use another
+   motor command to recover the marks.
+5. Abort immediately if `RELOAD` or any other operation moves either YAW mark.
+
+This recovery does not make YAW positioning commissioned. It isolates YAW from a
+fixed-direction, non-human, speed-only pass; all ordinary aiming remains blocked by
+the unmeasured physical direction.
 
 ## Per-shot sequence
 
