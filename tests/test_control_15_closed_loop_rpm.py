@@ -231,8 +231,9 @@ def run_controller_cpp_harness(tmp_path: Path, main_body: str) -> None:
 
 
 def run_fault_cpp_harness(tmp_path: Path, main_body: str) -> None:
-    """Compile the sketch's real fault state machine with hardware-only shims."""
-    state = block(control_15_source(), "RPM_CONTROLLER_STATE")
+    """Compile the real fault state machine and dispatcher with hardware shims."""
+    source = control_15_source()
+    state = block(source, "RPM_CONTROLLER_STATE")
     harness = tmp_path / "control_15_fault_harness.cpp"
     harness.write_text(
         textwrap.dedent(
@@ -250,6 +251,10 @@ def run_fault_cpp_harness(tmp_path: Path, main_body: str) -> None:
             const double MIN_RPM_THRESHOLD = 200.0;
             const double MIN_FEED_RPM = 400.0;
             const int RAMP_STEP_US = 5;
+            const double LEFT_SLOPE = 0.1763;
+            const int LEFT_OFFSET = 1101;
+            const double RIGHT_SLOPE = 0.1670;
+            const int RIGHT_OFFSET = 1088;
             const int PUSHER_STEP_ENA = 1;
             const int HIGH = 1;
             const int STOP_SPEED = 90;
@@ -293,19 +298,163 @@ def run_fault_cpp_harness(tmp_path: Path, main_body: str) -> None:
             double currentRPM_Right = 0.0;
             int desiredPWM_Left = 1000;
             int desiredPWM_Right = 1000;
+            int currentPWM_Left = 1000;
+            int currentPWM_Right = 1000;
             int currentState = STATE_IDLE;
+            unsigned long fakeNow = 0;
 
             void digitalWrite(int, int) {}
             void sendMsg(const String &) {}
+            unsigned long millis() { return fakeNow; }
             """
         )
         + state
+        + "\nvoid updateMotorPWM() {\n"
+        + update_body(source)
+        + "\n}\n"
         + "\nint main() {\n"
         + textwrap.dedent(main_body)
         + "\n}\n",
         encoding="utf-8",
     )
     executable = tmp_path / "control_15_fault_harness"
+    subprocess.run(
+        [
+            "g++",
+            "-std=c++17",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            str(harness),
+            "-o",
+            str(executable),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run([str(executable)], check=True)
+
+
+def run_queue_cpp_harness(tmp_path: Path, main_body: str) -> None:
+    """Execute the sketch's queue policy against a host-side FreeRTOS mock."""
+    source = control_15_source()
+    queue_state = block(source, "BLE_COMMAND_QUEUE_STATE")
+    enqueue = block(source, "BLE_COMMAND_QUEUE_ENQUEUE_HELPER")
+    drain = block(source, "BLE_COMMAND_QUEUE_DRAIN_HELPER")
+    harness = tmp_path / "control_15_queue_harness.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            """
+            #include <algorithm>
+            #include <cassert>
+            #include <cctype>
+            #include <cstdint>
+            #include <cstring>
+            #include <deque>
+            #include <string>
+            #include <vector>
+
+            using BaseType_t = int;
+            using UBaseType_t = unsigned int;
+            constexpr BaseType_t pdTRUE = 1;
+            constexpr BaseType_t pdFALSE = 0;
+            struct StaticQueue_t {};
+            struct MockQueue {
+              size_t depth = 0;
+              size_t itemSize = 0;
+              std::deque<std::vector<uint8_t>> items;
+            };
+            using QueueHandle_t = MockQueue *;
+
+            QueueHandle_t xQueueCreateStatic(UBaseType_t depth,
+                                             UBaseType_t itemSize,
+                                             uint8_t *, StaticQueue_t *) {
+              auto *queue = new MockQueue;
+              queue->depth = depth;
+              queue->itemSize = itemSize;
+              return queue;
+            }
+            BaseType_t xQueueSendToBack(QueueHandle_t queue, const void *item,
+                                        unsigned int) {
+              if (queue->items.size() >= queue->depth) return pdFALSE;
+              const auto *begin = static_cast<const uint8_t *>(item);
+              queue->items.emplace_back(begin, begin + queue->itemSize);
+              return pdTRUE;
+            }
+            BaseType_t xQueueSendToFront(QueueHandle_t queue, const void *item,
+                                         unsigned int) {
+              if (queue->items.size() >= queue->depth) return pdFALSE;
+              const auto *begin = static_cast<const uint8_t *>(item);
+              queue->items.emplace_front(begin, begin + queue->itemSize);
+              return pdTRUE;
+            }
+            BaseType_t xQueueReceive(QueueHandle_t queue, void *item,
+                                     unsigned int) {
+              if (queue->items.empty()) return pdFALSE;
+              std::memcpy(item, queue->items.front().data(), queue->itemSize);
+              queue->items.pop_front();
+              return pdTRUE;
+            }
+            BaseType_t xQueueReset(QueueHandle_t queue) {
+              queue->items.clear();
+              return pdTRUE;
+            }
+
+            using portMUX_TYPE = int;
+            constexpr portMUX_TYPE portMUX_INITIALIZER_UNLOCKED = 0;
+            #define portENTER_CRITICAL(mux) ((void)(mux))
+            #define portEXIT_CRITICAL(mux) ((void)(mux))
+
+            class String {
+             public:
+              String() = default;
+              String(const char *value) : value_(value) {}
+              size_t length() const { return value_.length(); }
+              const char *c_str() const { return value_.c_str(); }
+              void toCharArray(char *destination, size_t size) const {
+                if (size == 0) return;
+                std::strncpy(destination, value_.c_str(), size - 1);
+                destination[size - 1] = 0;
+              }
+              void trim() {
+                auto keep = [](unsigned char value) {
+                  return !std::isspace(value);
+                };
+                auto first = std::find_if(value_.begin(), value_.end(), keep);
+                auto last = std::find_if(value_.rbegin(), value_.rend(), keep).base();
+                value_ = first < last ? std::string(first, last) : std::string();
+              }
+              bool equalsIgnoreCase(const char *expected) const {
+                std::string other(expected);
+                if (value_.size() != other.size()) return false;
+                for (size_t index = 0; index < value_.size(); ++index) {
+                  if (std::tolower(static_cast<unsigned char>(value_[index])) !=
+                      std::tolower(static_cast<unsigned char>(other[index]))) {
+                    return false;
+                  }
+                }
+                return true;
+              }
+
+             private:
+              std::string value_;
+            };
+            """
+        )
+        + queue_state
+        + enqueue
+        + "\nstd::vector<std::string> processedCommands;\n"
+        + "void processCommand(String command) {\n"
+        + "  processedCommands.emplace_back(command.c_str());\n"
+        + "}\n"
+        + drain
+        + "\nint main() {\n"
+        + textwrap.dedent(main_body)
+        + "\n}\n",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "control_15_queue_harness"
     subprocess.run(
         [
             "g++",
@@ -610,6 +759,76 @@ def test_real_cpp_fault_thresholds_and_target_parser_are_bounded(tmp_path):
     )
 
 
+def test_real_cpp_dispatcher_routes_fresh_samples_and_combines_faults(tmp_path):
+    run_fault_cpp_harness(
+        tmp_path,
+        """
+        resetWheelController(leftController, 1000);
+        resetWheelController(rightController, 1000);
+        leftController.lastTarget = 500.0;
+        rightController.lastTarget = 700.0;
+        targetRPM_Left = 500.0;
+        targetRPM_Right = 700.0;
+        desiredPWM_Left = (int)(targetRPM_Left * LEFT_SLOPE + LEFT_OFFSET);
+        desiredPWM_Right = (int)(targetRPM_Right * RIGHT_SLOPE + RIGHT_OFFSET);
+        currentPWM_Left = desiredPWM_Left;
+        currentPWM_Right = desiredPWM_Right;
+        currentRPM_Left = 400.0;
+        currentRPM_Right = 760.0;
+        rightController.errorRPM = 23.0;
+        rightController.proportionalUs = 4.0;
+        rightController.integralUs = 2.0;
+        desiredPWM_Right += 6;
+        double heldRightP = rightController.proportionalUs;
+        int heldRightDesired = desiredPWM_Right;
+
+        fakeNow = 1200;
+        rpmFreshLeft = true;
+        rpmFreshRight = false;
+        updateMotorPWM();
+        assert(leftController.errorRPM == 100.0);
+        assert(leftController.proportionalUs > 0.0);
+        assert(desiredPWM_Left > leftController.basePWM);
+        assert(rightController.errorRPM == 23.0);
+        assert(rightController.proportionalUs == heldRightP);
+        assert(desiredPWM_Right == heldRightDesired);
+        assert(!rpmFreshLeft && !rpmFreshRight);
+
+        double heldLeftP = leftController.proportionalUs;
+        currentRPM_Right = 760.0;
+        fakeNow = 1400;
+        rpmFreshLeft = false;
+        rpmFreshRight = true;
+        updateMotorPWM();
+        assert(leftController.proportionalUs == heldLeftP);
+        assert(rightController.errorRPM == -60.0);
+        assert(rightController.proportionalUs < 0.0);
+        assert(desiredPWM_Right < rightController.basePWM);
+        assert(!rpmFreshLeft && !rpmFreshRight);
+
+        rpmControllerFault = RPM_FAULT_NONE;
+        resetWheelController(leftController, 2000);
+        resetWheelController(rightController, 2000);
+        leftController.lastTarget = 500.0;
+        rightController.lastTarget = 700.0;
+        targetRPM_Left = 500.0;
+        targetRPM_Right = 700.0;
+        currentRPM_Left = OVERSPEED_RPM + 1.0;
+        currentRPM_Right = OVERSPEED_RPM + 2.0;
+        fakeNow = 2200;
+        rpmFreshLeft = true;
+        rpmFreshRight = true;
+        updateMotorPWM();
+        assert((rpmControllerFault & RPM_FAULT_OVERSPEED_L) != 0);
+        assert((rpmControllerFault & RPM_FAULT_OVERSPEED_R) != 0);
+        assert(targetRPM_Left == 0.0);
+        assert(targetRPM_Right == 0.0);
+        assert(desiredPWM_Left == PWM_MIN_US);
+        assert(desiredPWM_Right == PWM_MIN_US);
+        """,
+    )
+
+
 def test_invalid_wheel_tokens_return_before_target_mutation():
     source = control_15_source()
     validation = block(source, "SET_TARGET_VALIDATION")
@@ -647,8 +866,57 @@ def test_ble_callback_queues_commands_and_main_loop_owns_actuator_state():
     ]
     assert "processCommand(bleInputBuffer)" not in callback
     assert "enqueueBleCommand(bleInputBuffer)" in callback
+    assert "xQueueCreateStatic" in source
+    assert "while (true) delay(1000);" in source
     assert "xQueueSendToFront" in source
     assert "processOneQueuedBleCommand();" in source
+
+
+def test_stop_discards_every_older_ble_command_even_when_queue_is_full(tmp_path):
+    run_queue_cpp_harness(
+        tmp_path,
+        """
+        StaticQueue_t harnessQueueControl;
+        uint8_t harnessQueueStorage[
+            BLE_COMMAND_QUEUE_DEPTH * sizeof(QueuedBleCommand)] = {};
+        bleCommandQueue = xQueueCreateStatic(
+            BLE_COMMAND_QUEUE_DEPTH, sizeof(QueuedBleCommand),
+            harnessQueueStorage, &harnessQueueControl);
+
+        assert(enqueueBleCommand(String("set 0 0 500 500")));
+        assert(enqueueBleCommand(String("shoot")));
+        assert(enqueueBleCommand(String("stop")));
+        assert(bleCommandQueue->items.size() == 1);
+        processOneQueuedBleCommand();
+        assert(processedCommands.size() == 1);
+        assert(processedCommands[0] == "stop");
+        processOneQueuedBleCommand();
+        assert(processedCommands.size() == 1);
+
+        processedCommands.clear();
+        for (UBaseType_t index = 0; index < BLE_COMMAND_QUEUE_DEPTH; ++index) {
+          assert(enqueueBleCommand(String("set 0 0 600 600")));
+        }
+        assert(enqueueBleCommand(String("stop")));
+        assert(bleCommandQueue->items.size() == 1);
+        processOneQueuedBleCommand();
+        assert(processedCommands.size() == 1);
+        assert(processedCommands[0] == "stop");
+
+        processedCommands.clear();
+        assert(enqueueBleCommand(String("shoot")));
+        QueuedBleCommand inFlight = {};
+        assert(xQueueReceive(bleCommandQueue, &inFlight, 0) == pdTRUE);
+        assert(enqueueBleCommand(String("stop")));
+        assert(inFlight.epoch != currentBleCommandEpoch());
+        assert(xQueueSendToFront(bleCommandQueue, &inFlight, 0) == pdTRUE);
+        processOneQueuedBleCommand();
+        assert(processedCommands.empty());
+        processOneQueuedBleCommand();
+        assert(processedCommands.size() == 1);
+        assert(processedCommands[0] == "stop");
+        """,
+    )
 
 
 def test_candidate_is_not_commissioned_and_host_gates_are_unchanged():

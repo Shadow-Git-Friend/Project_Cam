@@ -146,10 +146,16 @@ const size_t BLE_COMMAND_MAX_CHARS = 95;
 const UBaseType_t BLE_COMMAND_QUEUE_DEPTH = 16;
 
 struct QueuedBleCommand {
+  uint32_t epoch;
   char text[BLE_COMMAND_MAX_CHARS + 1];
 };
 
+StaticQueue_t bleCommandQueueControl;
+uint8_t bleCommandQueueStorage[
+    BLE_COMMAND_QUEUE_DEPTH * sizeof(QueuedBleCommand)];
 QueueHandle_t bleCommandQueue = NULL;
+portMUX_TYPE bleCommandEpochMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t bleCommandEpoch = 0;
 // --- CONTROL_15 BLE_COMMAND_QUEUE_STATE END ---
 // --- CONTROL_15 RPM_CONTROLLER_STATE BEGIN ---
 const double LEFT_KP = 0.12;
@@ -387,6 +393,13 @@ bool clearRpmFaultIfSafe(bool freshLeft, bool freshRight,
 }
 // --- CONTROL_15 RPM_CONTROLLER_STATE END ---
 // --- CONTROL_15 BLE_COMMAND_QUEUE_ENQUEUE_HELPER BEGIN ---
+uint32_t currentBleCommandEpoch() {
+  portENTER_CRITICAL(&bleCommandEpochMux);
+  uint32_t epoch = bleCommandEpoch;
+  portEXIT_CRITICAL(&bleCommandEpochMux);
+  return epoch;
+}
+
 bool enqueueBleCommand(const String &command) {
   if (bleCommandQueue == NULL || command.length() > BLE_COMMAND_MAX_CHARS) {
     return false;
@@ -398,13 +411,13 @@ bool enqueueBleCommand(const String &command) {
   normalized.trim();
 
   if (normalized.equalsIgnoreCase("stop")) {
-    if (xQueueSendToFront(bleCommandQueue, &queued, 0) == pdTRUE) return true;
-
-    // A saturated UI queue must never make the safety action unreachable.
-    QueuedBleCommand discarded;
-    xQueueReceive(bleCommandQueue, &discarded, 0);
+    portENTER_CRITICAL(&bleCommandEpochMux);
+    queued.epoch = ++bleCommandEpoch;
+    portEXIT_CRITICAL(&bleCommandEpochMux);
+    xQueueReset(bleCommandQueue);
     return xQueueSendToFront(bleCommandQueue, &queued, 0) == pdTRUE;
   }
+  queued.epoch = currentBleCommandEpoch();
   return xQueueSendToBack(bleCommandQueue, &queued, 0) == pdTRUE;
 }
 // --- CONTROL_15 BLE_COMMAND_QUEUE_ENQUEUE_HELPER END ---
@@ -756,6 +769,7 @@ void processOneQueuedBleCommand() {
     if (bleCommandQueue == NULL) return;
     QueuedBleCommand queued = {};
     if (xQueueReceive(bleCommandQueue, &queued, 0) == pdTRUE) {
+        if (queued.epoch != currentBleCommandEpoch()) return;
         processCommand(String(queued.text));
     }
 }
@@ -787,10 +801,12 @@ void setup() {
   Serial.begin(921600);
   Serial.println("SYS: FW control_15 READY");
   // --- CONTROL_15 BLE_COMMAND_QUEUE_SETUP BEGIN ---
-  bleCommandQueue = xQueueCreate(BLE_COMMAND_QUEUE_DEPTH,
-                                 sizeof(QueuedBleCommand));
+  bleCommandQueue = xQueueCreateStatic(
+      BLE_COMMAND_QUEUE_DEPTH, sizeof(QueuedBleCommand),
+      bleCommandQueueStorage, &bleCommandQueueControl);
   if (bleCommandQueue == NULL) {
     Serial.println("SYS: BLE COMMAND QUEUE INIT FAILED");
+    while (true) delay(1000);
   }
   // --- CONTROL_15 BLE_COMMAND_QUEUE_SETUP END ---
 
