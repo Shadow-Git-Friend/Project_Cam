@@ -1025,7 +1025,15 @@ void loop() {
   // --- STEPPER EXECUTION ---
   vertStepper.run();
   horzStepper.run();
-  pusherStepper.run(); 
+  // --- CONTROL_15 PUSHER_FAULT_INTERLOCK BEGIN ---
+  if (rpmControllerFault == RPM_FAULT_NONE) {
+    pusherStepper.run();
+  } else {
+    pusherStepper.setCurrentPosition(0);
+    pusherStepper.moveTo(0);
+    digitalWrite(PUSHER_STEP_ENA, HIGH);
+  }
+  // --- CONTROL_15 PUSHER_FAULT_INTERLOCK END ---
 
   // --- TELEMETRY ---
   static unsigned long lastTelem = 0;

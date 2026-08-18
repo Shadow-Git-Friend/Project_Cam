@@ -54,6 +54,7 @@ BLOCK_NAMES = (
     "INFO_CONTROLLER_DIAGNOSTIC",
     "RPM_FRESH_SAMPLE_UPDATE",
     "SHOOTING_FAULT_GATE",
+    "PUSHER_FAULT_INTERLOCK",
     "BLE_COMMAND_QUEUE_ENQUEUE",
     "BLE_COMMAND_QUEUE_SETUP",
     "BLE_COMMAND_QUEUE_DRAIN_HELPER",
@@ -62,6 +63,7 @@ BLOCK_NAMES = (
 
 BLOCK_REPLACEMENTS = {
     "BLE_COMMAND_QUEUE_ENQUEUE": "            processCommand(bleInputBuffer);\n",
+    "PUSHER_FAULT_INTERLOCK": "  pusherStepper.run(); \n",
 }
 
 MARKER = re.compile(
@@ -473,6 +475,64 @@ def run_queue_cpp_harness(tmp_path: Path, main_body: str) -> None:
     subprocess.run([str(executable)], check=True)
 
 
+def run_pusher_interlock_cpp_harness(tmp_path: Path, main_body: str) -> None:
+    """Execute the sketch's final pusher pulse gate with a stepper spy."""
+    interlock = block(control_15_source(), "PUSHER_FAULT_INTERLOCK")
+    harness = tmp_path / "control_15_pusher_interlock_harness.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            """
+            #include <cassert>
+            #include <cstdint>
+
+            constexpr uint8_t RPM_FAULT_NONE = 0;
+            constexpr int PUSHER_STEP_ENA = 15;
+            constexpr int HIGH = 1;
+            uint8_t rpmControllerFault = RPM_FAULT_NONE;
+            int lastEnable = -1;
+
+            struct StepperSpy {
+              int runCalls = 0;
+              int setPositionCalls = 0;
+              int moveToCalls = 0;
+              void run() { ++runCalls; }
+              void setCurrentPosition(long) { ++setPositionCalls; }
+              void moveTo(long) { ++moveToCalls; }
+            } pusherStepper;
+
+            void digitalWrite(int pin, int value) {
+              assert(pin == PUSHER_STEP_ENA);
+              lastEnable = value;
+            }
+
+            void executePusherStep() {
+            """
+        )
+        + interlock
+        + "\n}\nint main() {\n"
+        + textwrap.dedent(main_body)
+        + "\n}\n",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "control_15_pusher_interlock_harness"
+    subprocess.run(
+        [
+            "g++",
+            "-std=c++17",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            str(harness),
+            "-o",
+            str(executable),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run([str(executable)], check=True)
+
+
 def load_bridge():
     spec = importlib.util.spec_from_file_location("control15_bridge", BRIDGE)
     assert spec and spec.loader
@@ -703,6 +763,25 @@ def test_real_cpp_fault_clears_after_independent_post_stop_zero_samples(tmp_path
         cleared = clearRpmFaultIfSafe(false, true, 1200);
         assert(cleared);
         assert(rpmControllerFault == RPM_FAULT_NONE);
+        """,
+    )
+
+
+def test_fault_blocks_the_final_pusher_step_for_every_command_path(tmp_path):
+    run_pusher_interlock_cpp_harness(
+        tmp_path,
+        """
+        executePusherStep();
+        assert(pusherStepper.runCalls == 1);
+        assert(pusherStepper.setPositionCalls == 0);
+        assert(pusherStepper.moveToCalls == 0);
+
+        rpmControllerFault = 1;
+        executePusherStep();
+        assert(pusherStepper.runCalls == 1);
+        assert(pusherStepper.setPositionCalls == 1);
+        assert(pusherStepper.moveToCalls == 1);
+        assert(lastEnable == HIGH);
         """,
     )
 
