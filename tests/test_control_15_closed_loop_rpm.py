@@ -276,3 +276,23 @@ def test_candidate_is_not_commissioned_and_host_gates_are_unchanged():
     assert "RPM_BAND_FLOOR = 50.0" in bridge
     assert "RPM_SPREAD_MAX = 75.0" in bridge
     assert "RPM_MIN_FIRE = 400" in bridge
+
+
+def test_feed_forward_alone_retains_measured_static_error():
+    from scripts.simulate_control_15_rpm import simulate_pair
+
+    result = simulate_pair(target_rpm=500.0, closed_loop=False, duration_s=35.0)
+    assert abs(result.left.final_rpm - 500.0) >= 25.0
+    assert abs(result.right.final_rpm - 500.0) >= 25.0
+
+
+def test_pi_converges_without_crossing_trim_pwm_or_overspeed_bounds():
+    from scripts.simulate_control_15_rpm import simulate_pair
+
+    result = simulate_pair(target_rpm=500.0, closed_loop=True, duration_s=45.0)
+    for wheel in (result.left, result.right):
+        assert abs(wheel.final_rpm - 500.0) <= 5.0
+        assert wheel.max_abs_trim_us <= 30.0
+        assert 1000 <= wheel.min_pwm <= wheel.max_pwm <= 1800
+        assert wheel.max_rpm < 1300.0
+        assert wheel.integrated_while_ramping == 0
