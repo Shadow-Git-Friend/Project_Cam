@@ -22,6 +22,10 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+// --- CONTROL_15 BLE_COMMAND_QUEUE_INCLUDE BEGIN ---
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+// --- CONTROL_15 BLE_COMMAND_QUEUE_INCLUDE END ---
 
 // ==========================================
 // 1. CONFIGURATION
@@ -137,6 +141,16 @@ const int STOP_SPEED = 90;  // Dispenser stop
 
 float pusherMaxSpeed = 5000.0; 
 float pusherAccel = 2000.0;
+// --- CONTROL_15 BLE_COMMAND_QUEUE_STATE BEGIN ---
+const size_t BLE_COMMAND_MAX_CHARS = 95;
+const UBaseType_t BLE_COMMAND_QUEUE_DEPTH = 16;
+
+struct QueuedBleCommand {
+  char text[BLE_COMMAND_MAX_CHARS + 1];
+};
+
+QueueHandle_t bleCommandQueue = NULL;
+// --- CONTROL_15 BLE_COMMAND_QUEUE_STATE END ---
 // --- CONTROL_15 RPM_CONTROLLER_STATE BEGIN ---
 const double LEFT_KP = 0.12;
 const double RIGHT_KP = 0.12;
@@ -179,6 +193,8 @@ enum RpmFault : uint8_t {
 
 uint8_t rpmControllerFault = RPM_FAULT_NONE;
 bool rpmFaultStopRequested = false;
+bool rpmFaultLeftZeroConfirmed = false;
+bool rpmFaultRightZeroConfirmed = false;
 bool rpmFreshLeft = false;
 bool rpmFreshRight = false;
 
@@ -239,12 +255,7 @@ void updateWheelController(WheelControllerState &state,
 
   state.basePWM = constrain((int)(targetRPM * slope + offset),
                             PWM_MIN_US, PWM_MAX_US);
-  if (!fresh) {
-    // A command updates feed-forward immediately. P is based only on a fresh
-    // encoder sample; I is retained across nonzero changes of 5% or less.
-    state.errorRPM = 0.0;
-    state.proportionalUs = 0.0;
-  } else {
+  if (fresh) {
     double dt = state.lastSampleMs == 0
         ? 0.2 : (now - state.lastSampleMs) / 1000.0;
     state.lastSampleMs = now;
@@ -270,6 +281,8 @@ void updateWheelController(WheelControllerState &state,
     }
   }
 
+  // The encoder timers are independent. Holding the last P/I estimate keeps a
+  // sample from one wheel from silently changing the other wheel's output.
   state.trimUs = constrain(state.proportionalUs + state.integralUs,
                            -MAX_TRIM_US, MAX_TRIM_US);
   desiredPWM = constrain(state.basePWM + (int)lround(state.trimUs),
@@ -336,6 +349,8 @@ void latchRpmFault(uint8_t faults, unsigned long now) {
 
   rpmControllerFault = faults;
   rpmFaultStopRequested = false;
+  rpmFaultLeftZeroConfirmed = false;
+  rpmFaultRightZeroConfirmed = false;
   targetRPM_Left = 0.0;
   targetRPM_Right = 0.0;
   desiredPWM_Left = PWM_MIN_US;
@@ -356,11 +371,14 @@ void latchRpmFault(uint8_t faults, unsigned long now) {
 bool clearRpmFaultIfSafe(bool freshLeft, bool freshRight,
                          unsigned long now) {
   if (rpmControllerFault == RPM_FAULT_NONE || !rpmFaultStopRequested) return false;
-  if (!(freshLeft && freshRight)) return false;
-  if (!(currentRPM_Left < 50.0 && currentRPM_Right < 50.0)) return false;
+  if (freshLeft) rpmFaultLeftZeroConfirmed = currentRPM_Left < 50.0;
+  if (freshRight) rpmFaultRightZeroConfirmed = currentRPM_Right < 50.0;
+  if (!(rpmFaultLeftZeroConfirmed && rpmFaultRightZeroConfirmed)) return false;
 
   rpmControllerFault = RPM_FAULT_NONE;
   rpmFaultStopRequested = false;
+  rpmFaultLeftZeroConfirmed = false;
+  rpmFaultRightZeroConfirmed = false;
   resetWheelController(leftController, now);
   resetWheelController(rightController, now);
   leftController.lastTarget = targetRPM_Left;
@@ -368,6 +386,28 @@ bool clearRpmFaultIfSafe(bool freshLeft, bool freshRight,
   return true;
 }
 // --- CONTROL_15 RPM_CONTROLLER_STATE END ---
+// --- CONTROL_15 BLE_COMMAND_QUEUE_ENQUEUE_HELPER BEGIN ---
+bool enqueueBleCommand(const String &command) {
+  if (bleCommandQueue == NULL || command.length() > BLE_COMMAND_MAX_CHARS) {
+    return false;
+  }
+
+  QueuedBleCommand queued = {};
+  command.toCharArray(queued.text, sizeof(queued.text));
+  String normalized = command;
+  normalized.trim();
+
+  if (normalized.equalsIgnoreCase("stop")) {
+    if (xQueueSendToFront(bleCommandQueue, &queued, 0) == pdTRUE) return true;
+
+    // A saturated UI queue must never make the safety action unreachable.
+    QueuedBleCommand discarded;
+    xQueueReceive(bleCommandQueue, &discarded, 0);
+    return xQueueSendToFront(bleCommandQueue, &queued, 0) == pdTRUE;
+  }
+  return xQueueSendToBack(bleCommandQueue, &queued, 0) == pdTRUE;
+}
+// --- CONTROL_15 BLE_COMMAND_QUEUE_ENQUEUE_HELPER END ---
 
 // ==========================================
 // 3. BLE CALLBACKS & HELPERS
@@ -627,7 +667,11 @@ void processCommand(String cmd) {
         resetWheelController(rightController, millis());
         leftController.lastTarget = 0.0;
         rightController.lastTarget = 0.0;
-        if (rpmControllerFault != RPM_FAULT_NONE) rpmFaultStopRequested = true;
+        if (rpmControllerFault != RPM_FAULT_NONE) {
+          rpmFaultStopRequested = true;
+          rpmFaultLeftZeroConfirmed = false;
+          rpmFaultRightZeroConfirmed = false;
+        }
         // --- CONTROL_15 STOP_TARGET_TRANSITION END ---
         updateMotorPWM();
         
@@ -701,12 +745,21 @@ void processCommand(String cmd) {
         snprintf(buf7, sizeof(buf7),
                 "INFO | CTRL: PL=%d PR=%d IL=%.2f IR=%.2f FAULT=%s",
                 currentPWM_Left, currentPWM_Right,
-                leftController.integralUs, rightController.integralUs,
+                leftController.trimUs, rightController.trimUs,
                 rpmFaultName.c_str());
         sendMsg(String(buf7));
         // --- CONTROL_15 INFO_CONTROLLER_DIAGNOSTIC END ---
     }
 }
+// --- CONTROL_15 BLE_COMMAND_QUEUE_DRAIN_HELPER BEGIN ---
+void processOneQueuedBleCommand() {
+    if (bleCommandQueue == NULL) return;
+    QueuedBleCommand queued = {};
+    if (xQueueReceive(bleCommandQueue, &queued, 0) == pdTRUE) {
+        processCommand(String(queued.text));
+    }
+}
+// --- CONTROL_15 BLE_COMMAND_QUEUE_DRAIN_HELPER END ---
 
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
@@ -715,7 +768,9 @@ class MyCallbacks: public BLECharacteristicCallbacks {
         for (int i = 0; i < rxValue.length(); i++) {
           char c = rxValue[i];
           if (c == '\n') {
-            processCommand(bleInputBuffer);
+            // --- CONTROL_15 BLE_COMMAND_QUEUE_ENQUEUE BEGIN ---
+            enqueueBleCommand(bleInputBuffer);
+            // --- CONTROL_15 BLE_COMMAND_QUEUE_ENQUEUE END ---
             bleInputBuffer = ""; 
           } else if (c != '\r') {
             bleInputBuffer += c; 
@@ -731,6 +786,13 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 void setup() {
   Serial.begin(921600);
   Serial.println("SYS: FW control_15 READY");
+  // --- CONTROL_15 BLE_COMMAND_QUEUE_SETUP BEGIN ---
+  bleCommandQueue = xQueueCreate(BLE_COMMAND_QUEUE_DEPTH,
+                                 sizeof(QueuedBleCommand));
+  if (bleCommandQueue == NULL) {
+    Serial.println("SYS: BLE COMMAND QUEUE INIT FAILED");
+  }
+  // --- CONTROL_15 BLE_COMMAND_QUEUE_SETUP END ---
 
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
@@ -805,6 +867,9 @@ void setup() {
 // 6. MAIN LOOP
 // ==========================================
 void loop() {
+  // --- CONTROL_15 BLE_COMMAND_QUEUE_DRAIN BEGIN ---
+  processOneQueuedBleCommand();
+  // --- CONTROL_15 BLE_COMMAND_QUEUE_DRAIN END ---
   // --- REAL-TIME RPM TRACKING ---
   double tempL = getRPM(encLeft, PPR_LEFT, tLeft, cLeft);
   if (tempL != -1) currentRPM_Left = tempL;

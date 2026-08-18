@@ -9,6 +9,8 @@ simulation and the pinned Arduino compile are separate gates.
 import hashlib
 import importlib.util
 import re
+import subprocess
+import textwrap
 from collections import Counter
 from pathlib import Path
 
@@ -40,6 +42,9 @@ EXPECTED_PREFIXES = {
 }
 
 BLOCK_NAMES = (
+    "BLE_COMMAND_QUEUE_INCLUDE",
+    "BLE_COMMAND_QUEUE_STATE",
+    "BLE_COMMAND_QUEUE_ENQUEUE_HELPER",
     "RPM_CONTROLLER_STATE",
     "SET_TARGET_VALIDATION",
     "SET_TARGET_TRANSITION",
@@ -49,7 +54,15 @@ BLOCK_NAMES = (
     "INFO_CONTROLLER_DIAGNOSTIC",
     "RPM_FRESH_SAMPLE_UPDATE",
     "SHOOTING_FAULT_GATE",
+    "BLE_COMMAND_QUEUE_ENQUEUE",
+    "BLE_COMMAND_QUEUE_SETUP",
+    "BLE_COMMAND_QUEUE_DRAIN_HELPER",
+    "BLE_COMMAND_QUEUE_DRAIN",
 )
+
+BLOCK_REPLACEMENTS = {
+    "BLE_COMMAND_QUEUE_ENQUEUE": "            processCommand(bleInputBuffer);\n",
+}
 
 MARKER = re.compile(
     r"^[ \t]*// --- CONTROL_15 (?P<name>[A-Z_]+) "
@@ -111,8 +124,8 @@ def remove_controller_blocks(source: str) -> str:
     assert not stack, "unclosed controller block"
     counts = Counter(name for _, _, name in pairs)
     assert counts == Counter(BLOCK_NAMES), f"controller block set drifted: {counts}"
-    for start, end, _ in reversed(pairs):
-        source = source[:start] + source[end:]
+    for start, end, name in reversed(pairs):
+        source = source[:start] + BLOCK_REPLACEMENTS.get(name, "") + source[end:]
     return source
 
 
@@ -122,7 +135,21 @@ def project_to_control_14(candidate: str) -> str:
     new_start, new_end = function_body_span(projected, "updateMotorPWM")
     old_start, old_end = function_body_span(old, "updateMotorPWM")
     projected = projected[:new_start] + old[old_start:old_end] + projected[new_end:]
-    return projected.replace("control_15", "control_14")
+    identity_rewrites = (
+        (
+            'const char* FIRMWARE_ID = "control_15";',
+            'const char* FIRMWARE_ID = "control_14";',
+        ),
+        (
+            'Serial.println("SYS: FW control_15 READY");',
+            'Serial.println("SYS: FW control_14 READY");',
+        ),
+    )
+    for candidate_identity, deployed_identity in identity_rewrites:
+        assert projected.count(candidate_identity) == 1
+        projected = projected.replace(candidate_identity, deployed_identity, 1)
+    assert "control_15" not in projected
+    return projected
 
 
 def block(source: str, name: str) -> str:
@@ -139,6 +166,162 @@ def block(source: str, name: str) -> str:
 def update_body(source: str) -> str:
     start, end = function_body_span(source, "updateMotorPWM")
     return source[start:end]
+
+
+def run_controller_cpp_harness(tmp_path: Path, main_body: str) -> None:
+    """Compile the real controller helper from the sketch, not a Python copy."""
+    state = block(control_15_source(), "RPM_CONTROLLER_STATE")
+    controller_math = state[: state.index("void appendRpmFaultName")]
+    harness = tmp_path / "control_15_controller_harness.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            """
+            #include <cassert>
+            #include <cmath>
+            #include <cstdint>
+            #include <cstdlib>
+            #include <string>
+
+            using std::fabs;
+            using std::isfinite;
+            using std::lround;
+
+            const double MIN_RPM_THRESHOLD = 200.0;
+            const double MIN_FEED_RPM = 400.0;
+            const int RAMP_STEP_US = 5;
+
+            template <typename T>
+            T constrain(T value, T low, T high) {
+              return value < low ? low : (value > high ? high : value);
+            }
+
+            class String {
+             public:
+              explicit String(const char *value) : value_(value) {}
+              const char *c_str() const { return value_.c_str(); }
+
+             private:
+              std::string value_;
+            };
+            """
+        )
+        + controller_math
+        + "\nint main() {\n"
+        + textwrap.dedent(main_body)
+        + "\n}\n",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "control_15_controller_harness"
+    subprocess.run(
+        [
+            "g++",
+            "-std=c++17",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            str(harness),
+            "-o",
+            str(executable),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run([str(executable)], check=True)
+
+
+def run_fault_cpp_harness(tmp_path: Path, main_body: str) -> None:
+    """Compile the sketch's real fault state machine with hardware-only shims."""
+    state = block(control_15_source(), "RPM_CONTROLLER_STATE")
+    harness = tmp_path / "control_15_fault_harness.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            """
+            #include <cassert>
+            #include <cmath>
+            #include <cstdint>
+            #include <cstdlib>
+            #include <string>
+
+            using std::fabs;
+            using std::isfinite;
+            using std::lround;
+
+            const double MIN_RPM_THRESHOLD = 200.0;
+            const double MIN_FEED_RPM = 400.0;
+            const int RAMP_STEP_US = 5;
+            const int PUSHER_STEP_ENA = 1;
+            const int HIGH = 1;
+            const int STOP_SPEED = 90;
+            const int STATE_IDLE = 0;
+
+            template <typename T>
+            T constrain(T value, T low, T high) {
+              return value < low ? low : (value > high ? high : value);
+            }
+
+            class String {
+             public:
+              String() = default;
+              String(const char *value) : value_(value) {}
+              explicit String(std::string value) : value_(std::move(value)) {}
+              const char *c_str() const { return value_.c_str(); }
+              size_t length() const { return value_.length(); }
+              String &operator+=(const char *value) {
+                value_ += value;
+                return *this;
+              }
+              friend String operator+(const String &left, const String &right) {
+                return String(left.value_ + right.value_);
+              }
+
+             private:
+              std::string value_;
+            };
+
+            struct StepperShim {
+              void setCurrentPosition(long) {}
+              void moveTo(long) {}
+            } pusherStepper;
+            struct ServoShim {
+              void write(int) {}
+            } feederServo;
+
+            double targetRPM_Left = 0.0;
+            double targetRPM_Right = 0.0;
+            double currentRPM_Left = 0.0;
+            double currentRPM_Right = 0.0;
+            int desiredPWM_Left = 1000;
+            int desiredPWM_Right = 1000;
+            int currentState = STATE_IDLE;
+
+            void digitalWrite(int, int) {}
+            void sendMsg(const String &) {}
+            """
+        )
+        + state
+        + "\nint main() {\n"
+        + textwrap.dedent(main_body)
+        + "\n}\n",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "control_15_fault_harness"
+    subprocess.run(
+        [
+            "g++",
+            "-std=c++17",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            str(harness),
+            "-o",
+            str(executable),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run([str(executable)], check=True)
 
 
 def load_bridge():
@@ -185,6 +368,17 @@ def test_projection_rejects_marker_drift():
         )
 
 
+def test_projection_rejects_unmarked_control_15_text():
+    candidate = control_15_source()
+    mutant = candidate.replace(
+        "ESC RAMP PACING (control_14)",
+        "ESC RAMP PACING (control_15)",
+        1,
+    )
+    with pytest.raises(AssertionError):
+        project_to_control_14(mutant)
+
+
 def test_each_wheel_has_independent_state_error_base_trim_and_output():
     source = control_15_source()
     state = block(source, "RPM_CONTROLLER_STATE")
@@ -213,6 +407,89 @@ def test_integrator_freezes_until_ramp_catches_but_p_stays_live():
     caught = state.index("fabs(desiredPWM - currentPWM) <= RAMP_STEP_US")
     integrate = state.index("state.integralUs = candidateIntegral", caught)
     assert caught < integrate
+
+
+def test_real_cpp_controller_keeps_each_wheels_p_until_its_next_sample(tmp_path):
+    run_controller_cpp_harness(
+        tmp_path,
+        """
+        WheelControllerState state;
+        noteTargetTransition(state, 500.0, 1000);
+        int desiredPWM = PWM_MIN_US;
+
+        updateWheelController(state, 500.0, 0.0, 0.1763, 1101,
+                              0.12, 0.08, PWM_MIN_US, desiredPWM,
+                              false, 1000);
+        int currentPWM = desiredPWM;
+
+        updateWheelController(state, 500.0, 400.0, 0.1763, 1101,
+                              0.12, 0.08, currentPWM, desiredPWM,
+                              true, 1200);
+        assert(state.errorRPM == 100.0);
+        assert(state.proportionalUs > 0.0);
+        double sampledP = state.proportionalUs;
+        int sampledDesired = desiredPWM;
+
+        updateWheelController(state, 500.0, 999.0, 0.1763, 1101,
+                              0.12, 0.08, currentPWM, desiredPWM,
+                              false, 1201);
+        assert(state.proportionalUs == sampledP);
+        assert(desiredPWM == sampledDesired);
+
+        resetWheelController(state, 1400);
+        state.lastTarget = 500.0;
+        desiredPWM = (int)(500.0 * 0.1763 + 1101);
+        currentPWM = desiredPWM;
+        updateWheelController(state, 500.0, 600.0, 0.1763, 1101,
+                              0.12, 0.08, currentPWM, desiredPWM,
+                              true, 1600);
+        assert(state.errorRPM == -100.0);
+        assert(state.proportionalUs < 0.0);
+        assert(desiredPWM < state.basePWM);
+        """,
+    )
+
+
+def test_real_cpp_controller_enforces_reset_ramp_trim_and_pwm_bounds(tmp_path):
+    run_controller_cpp_harness(
+        tmp_path,
+        """
+        WheelControllerState state;
+        state.lastTarget = 500.0;
+        state.integralUs = 7.0;
+
+        noteTargetTransition(state, 525.0, 1000);
+        assert(state.integralUs == 7.0);
+        noteTargetTransition(state, 551.25, 1200);
+        assert(state.integralUs == 7.0);
+        noteTargetTransition(state, 580.0, 1400);
+        assert(state.integralUs == 0.0);
+
+        state.integralUs = 7.0;
+        noteTargetTransition(state, 0.0, 1600);
+        assert(state.integralUs == 0.0);
+
+        resetWheelController(state, 1800);
+        state.lastTarget = 1200.0;
+        state.integralUs = 5.0;
+        int desiredPWM = 1800;
+        updateWheelController(state, 1200.0, 0.0, 1.0, 1790,
+                              0.12, 0.08, 1000, desiredPWM,
+                              true, 2000);
+        assert(state.integralUs == 5.0);
+        assert(state.trimUs == MAX_TRIM_US);
+        assert(desiredPWM == PWM_MAX_US);
+
+        resetWheelController(state, 2200);
+        state.lastTarget = 1200.0;
+        desiredPWM = PWM_MIN_US;
+        updateWheelController(state, 1200.0, 10000.0, 0.0, 1000,
+                              0.12, 0.08, PWM_MIN_US, desiredPWM,
+                              true, 2400);
+        assert(state.trimUs == -MAX_TRIM_US);
+        assert(desiredPWM == PWM_MIN_US);
+        """,
+    )
 
 
 def test_target_reset_policy_is_strictly_greater_than_five_percent():
@@ -253,9 +530,94 @@ def test_fault_latch_blocks_pusher_and_needs_stop_plus_fresh_zero():
     assert "rpmControllerFault != RPM_FAULT_NONE" in shoot_state
     assert "pusherStepper.moveTo(0)" in shoot_state
     assert "rpmFaultStopRequested" in state
-    assert "freshLeft && freshRight" in state
+    assert "rpmFaultLeftZeroConfirmed" in state
+    assert "rpmFaultRightZeroConfirmed" in state
+    assert "if (freshLeft)" in state
+    assert "if (freshRight)" in state
     assert "currentRPM_Left < 50.0" in state
     assert "currentRPM_Right < 50.0" in state
+
+
+def test_real_cpp_fault_clears_after_independent_post_stop_zero_samples(tmp_path):
+    run_fault_cpp_harness(
+        tmp_path,
+        """
+        rpmControllerFault = RPM_FAULT_NO_START_L;
+        rpmFaultStopRequested = true;
+        currentRPM_Left = 0.0;
+        currentRPM_Right = 0.0;
+
+        bool cleared = clearRpmFaultIfSafe(true, false, 1000);
+        assert(!cleared);
+        assert(rpmControllerFault != RPM_FAULT_NONE);
+
+        cleared = clearRpmFaultIfSafe(false, true, 1200);
+        assert(cleared);
+        assert(rpmControllerFault == RPM_FAULT_NONE);
+        """,
+    )
+
+
+def test_real_cpp_fault_thresholds_and_target_parser_are_bounded(tmp_path):
+    run_fault_cpp_harness(
+        tmp_path,
+        """
+        double parsed = 0.0;
+        assert(parseWheelRpm(String("1200"), parsed));
+        assert(parsed == 1200.0);
+        assert(!parseWheelRpm(String("1200.1"), parsed));
+        assert(!parseWheelRpm(String("-1"), parsed));
+        assert(!parseWheelRpm(String("nan"), parsed));
+        assert(!parseWheelRpm(String("500junk"), parsed));
+        assert(std::string(formatRpmFault(
+            RPM_FAULT_NO_START_L | RPM_FAULT_NO_START_R).c_str())
+            == "NO_START_L+NO_START_R");
+
+        WheelControllerState state;
+        resetWheelController(state, 1000);
+        uint8_t faults = evaluateWheelFault(
+            state, 250.0, 0.0, true, 15999,
+            RPM_FAULT_NO_START_L, RPM_FAULT_ENCODER_LOSS_L,
+            RPM_FAULT_OVERSPEED_L);
+        assert(faults == RPM_FAULT_NONE);
+        faults = evaluateWheelFault(
+            state, 250.0, 0.0, true, 16000,
+            RPM_FAULT_NO_START_L, RPM_FAULT_ENCODER_LOSS_L,
+            RPM_FAULT_OVERSPEED_L);
+        assert((faults & RPM_FAULT_NO_START_L) != 0);
+
+        resetWheelController(state, 20000);
+        faults = evaluateWheelFault(
+            state, 0.0, 1300.1, true, 20200,
+            RPM_FAULT_NO_START_L, RPM_FAULT_ENCODER_LOSS_L,
+            RPM_FAULT_OVERSPEED_L);
+        assert((faults & RPM_FAULT_OVERSPEED_L) != 0);
+
+        resetWheelController(state, 21000);
+        state.started = true;
+        state.exceeded200 = true;
+        faults = evaluateWheelFault(
+            state, 400.0, 49.0, true, 21200,
+            RPM_FAULT_NO_START_L, RPM_FAULT_ENCODER_LOSS_L,
+            RPM_FAULT_OVERSPEED_L);
+        assert(faults == RPM_FAULT_NONE);
+        faults = evaluateWheelFault(
+            state, 400.0, 49.0, true, 22200,
+            RPM_FAULT_NO_START_L, RPM_FAULT_ENCODER_LOSS_L,
+            RPM_FAULT_OVERSPEED_L);
+        assert((faults & RPM_FAULT_ENCODER_LOSS_L) != 0);
+        """,
+    )
+
+
+def test_invalid_wheel_tokens_return_before_target_mutation():
+    source = control_15_source()
+    validation = block(source, "SET_TARGET_VALIDATION")
+    assert 'sendMsg("ERR: RPM RANGE")' in validation
+    assert "return;" in validation
+    validation_end = source.index("// --- CONTROL_15 SET_TARGET_VALIDATION END ---")
+    assert source.index("targetRPM_Left = wlStr.toDouble();") > validation_end
+    assert source.index("targetRPM_Right = wrStr.toDouble();") > validation_end
 
 
 def test_compact_telemetry_stays_parser_compatible():
@@ -266,6 +628,27 @@ def test_compact_telemetry_stays_parser_compatible():
     )
     bridge = load_bridge()
     assert bridge.parse_telemetry("L:500 R:500") == (500.0, 500.0)
+
+
+def test_info_reports_actual_bounded_trim_not_only_integral_state():
+    diagnostic = block(control_15_source(), "INFO_CONTROLLER_DIAGNOSTIC")
+    assert "leftController.trimUs" in diagnostic
+    assert "rightController.trimUs" in diagnostic
+    assert "leftController.integralUs" not in diagnostic
+    assert "rightController.integralUs" not in diagnostic
+
+
+def test_ble_callback_queues_commands_and_main_loop_owns_actuator_state():
+    source = control_15_source()
+    callback = source[
+        source.index("class MyCallbacks") : source.index(
+            "// ==========================================\n// 5. SETUP"
+        )
+    ]
+    assert "processCommand(bleInputBuffer)" not in callback
+    assert "enqueueBleCommand(bleInputBuffer)" in callback
+    assert "xQueueSendToFront" in source
+    assert "processOneQueuedBleCommand();" in source
 
 
 def test_candidate_is_not_commissioned_and_host_gates_are_unchanged():
@@ -296,3 +679,29 @@ def test_pi_converges_without_crossing_trim_pwm_or_overspeed_bounds():
         assert 1000 <= wheel.min_pwm <= wheel.max_pwm <= 1800
         assert wheel.max_rpm < 1300.0
         assert wheel.integrated_while_ramping == 0
+
+
+def test_simulation_constants_match_the_firmware_contract():
+    from scripts import simulate_control_15_rpm as simulation
+
+    state = block(control_15_source(), "RPM_CONTROLLER_STATE")
+    source = control_15_source()
+    expected = {
+        "LEFT_KP": simulation.KP,
+        "RIGHT_KP": simulation.KP,
+        "LEFT_KI": simulation.KI,
+        "RIGHT_KI": simulation.KI,
+        "MAX_TRIM_US": simulation.MAX_TRIM_US,
+        "PWM_MIN_US": simulation.PWM_MIN_US,
+        "PWM_MAX_US": simulation.PWM_MAX_US,
+        "OVERSPEED_RPM": simulation.OVERSPEED_RPM,
+        "LEFT_SLOPE": simulation.LEFT_SLOPE,
+        "RIGHT_SLOPE": simulation.RIGHT_SLOPE,
+        "LEFT_OFFSET": simulation.LEFT_OFFSET,
+        "RIGHT_OFFSET": simulation.RIGHT_OFFSET,
+        "RAMP_STEP_US": simulation.RAMP_STEP_US,
+    }
+    for name, value in expected.items():
+        match = re.search(rf"\b{name}\s*=\s*([-+]?[0-9]+(?:\.[0-9]+)?)", state + source)
+        assert match, name
+        assert float(match.group(1)) == value
