@@ -103,32 +103,11 @@ is rejected.
 ## Firmware architecture
 
 `control_15_full.ino` starts as an exact copy of `control_14_full.ino` with a new
-identity. Existing commands remain compatible; the only grammar addition is an
-RPM-only `wheels <left_rpm> <right_rpm>` command needed to regulate without
-touching either aim target. The feeder state machine, stepper behaviour, encoder
-PPR, BLE/USB transport, continuous `L:<rpm> R:<rpm>` telemetry, 1000 us idle
-duty, and mechanical limits otherwise remain unchanged.
-
-### Wheel-only command boundary
-
-In `control_14`, the host's `wheels 500` intent becomes serial
-`set 0 0 500 500`, which calls both `vertStepper.moveTo()` and
-`horzStepper.moveTo()` even though the operator intended only RPM. That violates
-the fixed-YAW ladder's requirement that no YAW command be emitted after boot.
-
-`control_15` therefore accepts:
-
-```text
-wheels <left_rpm> <right_rpm>
-```
-
-It validates both targets as finite values in 0..1200, updates only flywheel
-controller state, and never reads or writes pitch/yaw targets or calls any
-stepper method. The existing combined `set v h wl wr` remains for backward
-compatibility outside commissioning. For a recognised `control_15` candidate,
-the bridge maps its operator-level `wheels <rpm>` intent to
-`wheels <rpm> <rpm>` on serial; `control_13` and `control_14` retain their
-existing combined-set mapping.
+identity. Its public command grammar remains exactly equal to `control_14`;
+closed-loop regulation adds no exact token or prefix. The feeder state machine,
+stepper behaviour, encoder PPR, BLE/USB transport, continuous
+`L:<rpm> R:<rpm>` telemetry, 1000 us idle duty, and mechanical limits remain
+unchanged.
 
 Each wheel owns the following controller state:
 
@@ -304,10 +283,8 @@ command.
 ## Host commissioning boundary
 
 `control_15` must not be added to `COMMISSIONED_FIRMWARE` merely because it
-compiles. The host represents it separately as a recognised candidate so it can
-show the exact identity and select the wheel-only serial command while fire
-control stays disabled. Candidate recognition must not satisfy any commissioned
-or fire-enabled predicate. Promotion to `COMMISSIONED_FIRMWARE` occurs only
+compiles. During candidate testing, the bridge may display its exact raw boot
+record while fire control stays disabled. Host recognition is promoted only
 after the complete no-fire ladder, reverse ladder, hot-repeat, coast-down, and
 independent-video checks pass for the exact flashed source/binary hashes.
 
@@ -321,10 +298,8 @@ Implementation is test-first. A dedicated `control_15` contract suite must
 first fail against the absent candidate and then pin:
 
 - `control_12`, `control_13`, and `control_14` hashes remain unchanged;
-- `control_15` has a unique candidate identity, preserves every existing
-  command, and adds exactly one wheel-only command;
-- candidate bridge routing emits `wheels <rpm> <rpm>` without an angle, while
-  control_13/control_14 routing remains byte-for-byte unchanged;
+- `control_15` has a unique identity and its extracted exact-token/prefix command
+  sets equal `control_14` and the existing explicitly pinned vocabulary;
 - both wheels use independent errors, integrals, base PWM, trim, and outputs;
 - control updates consume fresh 200 ms samples rather than loop iterations;
 - trim, integral, PWM, and overspeed limits cannot be bypassed;
@@ -334,8 +309,16 @@ first fail against the absent candidate and then pin:
 - feeder motion remains impossible under a controller fault;
 - compact telemetry remains parser-compatible;
 - the INFO controller record exposes both PWM values, both trims, and fault;
-- reverting the closed-loop additions and identity reproduces `control_14`
-  except where the new controller necessarily replaces `updateMotorPWM`.
+- the source projection normalises only the firmware identity, replaces exactly
+  the parsed body of `updateMotorPWM()` with its `control_14` body, and removes
+  only explicitly delimited, test-whitelisted `control_15` blocks for controller
+  state/constants, target-transition hooks, fresh-sample updates, fault hooks,
+  and INFO diagnostics; the result must equal `control_14` byte for byte;
+- the projection requires exactly one `updateMotorPWM()` definition and rejects
+  a missing, duplicated, nested, or unknown controller-block marker. There is no
+  exemption based on a filename, a function-name substring, or the phrase
+  "controller work": any byte outside the normalised identity, the exactly
+  parsed function body, and the named blocks fails the projection.
 
 A deterministic plant simulation uses the measured approximate gains implied
 by the existing maps, adds per-wheel bias and supply disturbance, and verifies
@@ -368,8 +351,9 @@ Every iteration is appended as one structured record to
   10-second mean L/R, maximum absolute L/R deviation in RPM and percent,
   time-to-band for each wheel and for the pair, controller PWM/trim extrema,
   fault code, and anomaly note;
-- confirmation that the ball was absent, fire control was disabled, no YAW
-  command was emitted, marks stayed aligned, and shutdown reached fresh 0/0.
+- confirmation that the ball was absent, fire control was disabled, no YAW,
+  `aim`, `center`, or `setzero` operator intent was issued, logical YAW remained
+  at the session baseline, marks stayed aligned, and shutdown reached fresh 0/0.
 
 `time_to_band_s` is measured from the serial command write to the first sample
 that begins at least two continuous seconds with both wheels inside the +/-2%
@@ -392,12 +376,18 @@ is granted.
 All controller commissioning is no-fire: ball removed, non-human corridor
 clear, YAW physically fixed at matching marks, fire control disabled, ESTOP
 reachable, and no `reload`, `arm`, `fire`, `center`, or `setzero` command.
-Every nonzero and zero RPM change uses only the wheel-only firmware command;
-there is no `aim`, combined `set`, YAW value, or stepper call anywhere in a
-ladder session. `stop` remains available as the safety action and is also the
-only command used to clear a recorded controller fault after the wheels are
-below its reset threshold; it does not command either aim axis. Serial traces
-are checked for this invariant before acceptance.
+Every planned RPM change uses the existing host `wheels <rpm>` intent and its
+unchanged combined `set <pitch> <yaw> <rpm> <rpm>` serial mapping. Commissioning
+begins with the aligned physical YAW mark adopted as logical zero; because no
+later intent changes that zero, each combined set repeats
+`horzStepper.moveTo(0)` with zero distance to go and emits no step. This is the
+same boundary exercised by the 2026-08-18 ladders. Any nonzero stored YAW,
+YAW/aim intent, or visible mark movement aborts the session. A stronger
+session-baseline YAW gate belongs in the host serial writer as a separate task,
+not in `control_15` firmware. `stop` remains available as the safety action and
+is also the only command used to clear a recorded controller fault after the
+wheels are below its reset threshold. Serial traces are checked for these
+invariants before acceptance.
 
 For every candidate flash:
 
@@ -406,10 +396,10 @@ For every candidate flash:
 2. Run 250 RPM as a low-range prediction check. If both wheels start, retain a
    10-second trace without treating it as fire-range acceptance. If either does
    not reach 100 RPM in 15 seconds, require the corresponding `NO_START` fault.
-   After a successful trace, command wheel-only zero and wait for true 0/0. After
-   a fault, retain its record, allow the forced ramp-down to reach the reset
-   threshold, send `stop` to clear the latch, and verify fresh true 0/0 before
-   continuing.
+   After a successful trace, send the existing host `wheels 0` intent and wait
+   for true 0/0. After a fault, retain its record, allow the forced ramp-down to
+   reach the reset threshold, send `stop` to clear the latch, and verify fresh
+   true 0/0 before continuing.
 3. Repeat the same prediction check at 300 RPM, again returning to true 0/0.
    Record whether 250 and 300 start, sustain their commands, or fault; this
    evidence fixes the new lower physical boundary instead of assuming it.
