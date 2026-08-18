@@ -81,7 +81,21 @@ All scripts that read serial MUST filter:
 - **There is NO position feedback on either aim axis (measured 2026-08-06).** `info`'s `Ang: V=…/H=…` reports the firmware's OWN internal ramp, not a measurement: commanded 25° and it read 25.0° after 1.2 s, and it reads the commanded value just the same while the barrel is physically jammed against a hard stop. Consequences: (a) never quote a polled angle as the achieved aim — confirm by eye; (b) a stalled axis is invisible in software, so a mechanical limit must be enforced BEFORE the command, not detected after; (c) the trajectory/clearance evaluator assumes the commanded angle was achieved, which is an unverified assumption and belongs in the same review as the speed uncertainty.
 - **Pitch has a fixed PHYSICAL feeder stop but a movable LOGICAL zero.** With the barrel level and that position adopted as zero, the conservative envelope is `[0°, +30°]`: below it the barrel meets the ball-feeder housing. After `setzero` at a commanded pitch `p`, those same physical endpoints must be translated into the new frame (`[old_min−p, old_max−p]`) and intersected with the firmware's `±30°` bound; restoring a hardcoded `[0, 30]` after every re-zero deletes legitimate downward travel. `blm_bridge.py` owns this live envelope, `limits <min> <max>` lets the operator redeclare it after a manual move, and the LAUNCHER slider reads it from bridge status. Every declared envelope must contain zero. Yaw stays symmetric `±30°`. **After any jam: de-energise before freeing the barrel by hand, then `setzero` and redeclare measured travel — an open-loop axis driven into a stop has lost its reference.**
 - `set` beyond ±30 → ESP32 reboot (mitigated by Python-side clamp)
-- Horizontal stepper backlash on small `set→0→set` sequences (no movement until threshold exceeded)
+- **Horizontal YAW has unlocalised direction-reversal lost motion, not a validated
+  compensation constant (observed 2026-08-18).** The operator previously estimated
+  6--7 degrees; in the live no-fire gate a physical `0→+5°` move followed by
+  `+5°→0` produced motor noise but no physical return while open-loop telemetry
+  acknowledged `H=0.0`. Do not call that normal worm-gear backlash and do not
+  compensate it in software before the mechanical chain is inspected and the
+  post-repair residual is measured. Ordinary YAW aiming remains uncommissioned.
+  The deferred fixed-YAW speed pass is narrower: restore and mark the physical
+  direction with drive power removed before boot, then issue no YAW, `center`, or
+  `setzero`; any mark movement aborts the pass.
+- **`reload` does not home both aim axes to exact zero.** In `control_14`, YAW gets
+  `horzStepper.moveTo(0)` and therefore stays fixed only while boot zero still
+  matches the physical mark. PITCH gets `vertStepper.moveTo(7)`: 7 steps at
+  `STEPS_PER_DEG_VERT = 166.67` is about `+0.042°`. Record this systematic offset
+  in horizontal Method A rather than describing the post-reload pose as exact zero.
 - Ball exit velocity at 800 RPM uncalibrated — pitch accuracy degrades at higher RPMs (ballistic solver assumes fixed 10 m/s)
 - **Multi-person firing-line gate (implemented 2026-07-13, NOT live-commissioned):** the viewer now publishes `project_cam.firing_line.v1` all-person snapshots and the pose-driven launcher paths re-evaluate a fail-closed ballistic-corridor gate immediately before `shoot`. Missing/stale/malformed/ambiguous data, an unlocalized secondary, or a primary ID/epoch change blocks and disarms. Unit tests are green; this is not permission for multi-person firing. Keep multi-person actuation disabled until the staged live gates in `docs/superpowers/specs/2026-07-15-garage-pilot-product-design.md` pass.
 - **Primary-person hazard remains separate:** the corridor gate deliberately ignores the primary athlete. Pose-guided firing additionally requires an approved target/catch-envelope policy, prohibited body regions, minimum range, and energy limits. Face ID labels are identification hints only — never a fire-authorization signal.

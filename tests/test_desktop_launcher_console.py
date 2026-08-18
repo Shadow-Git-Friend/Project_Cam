@@ -34,6 +34,9 @@ LAUNCHER_VIEW = DESKTOP / "src/views/LauncherView.tsx"
 BRIDGE = ROOT / "garage_lab_combined/scripts/blm_bridge.py"
 DRILL_WRAPPER = ROOT / "Parallel_working/run_training_drill.sh"
 RPM_PROTOCOL = ROOT / "docs/protocols/2026-08-03-rpm-speed-measurement.md"
+FIXED_YAW_DESIGN = (
+    ROOT / "docs/superpowers/specs/2026-08-06-fixed-yaw-rpm-calibration-design.md"
+)
 
 
 @pytest.fixture(scope="module")
@@ -706,3 +709,17 @@ def test_the_fixed_yaw_500_rpm_pass_pins_gates_and_claim_boundary():
         "automatic firing at a person",
     ):
         assert required in section, required
+
+
+def test_fixed_yaw_speed_pass_records_lost_motion_without_software_compensation():
+    design = FIXED_YAW_DESIGN.read_text(encoding="utf-8")
+    section = fixed_yaw_500_section()
+    for required in (
+        "6--7 degrees",
+        "lost motion",
+        "must not be compensated in software",
+        "mechanical diagnosis is deferred",
+        "7 steps",
+        "0.042",
+    ):
+        assert required in design + section, required

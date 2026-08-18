@@ -162,7 +162,22 @@ the declared mechanical envelope without spinning the flywheels:
 
 Any unexpected motion, no motion, contact with the feeder, or flywheel movement
 is a failed gate. Press **STOP**, remove drive power, and do not continue to a
-shot matrix.
+normal aiming shot matrix.
+
+The 2026-08-18 no-fire check did fail this generic YAW-return gate: after a real
+`0 -> +5°` move, the reverse `+5° -> 0` command produced motor noise but no
+physical return while the open-loop firmware still acknowledged `H=0.0`. The
+previously estimated 6--7 degrees is therefore recorded as unlocalised **lost
+motion**, not normal worm-gear backlash. It must not be compensated in software
+before the mechanical cause is found and the residual is remeasured.
+
+That result keeps ordinary aiming uncommissioned. The separately scoped fixed-YAW
+speed-only pass below is a narrow exception, not a reinterpretation of the failed
+gate: close the no-fire console, remove drive power, restore the physical reference
+marks, and let the next boot adopt that fixed pose as logical `0/0`. On the
+operator's 2026-08-18 decision, the mechanical diagnosis is deferred until after
+this fixed-direction measurement. Any subsequent YAW-mark movement still ends the
+pass immediately.
 
 ## 3. Two methods, and why you run both
 
@@ -231,23 +246,27 @@ link, so USB re-enumeration from `ttyUSB0` to `ttyUSB1` does not change the choi
 
 #### Fixed-YAW 500 RPM speed-only pass
 
-This temporary pass is allowed with the current horizontal backlash only because
-YAW is physically fixed before the serial link opens. Mark the fixed base and
-rotating platform, keep the observed flight corridor clear by at least ±25 cm,
-and do not use **YAW**, **CENTER**, or **SET ZERO** during the session. This pass
-does not validate aiming accuracy and cannot authorize pose-guided, human-adjacent,
-or automatic firing at a person.
+This temporary pass is allowed while the unlocalised horizontal lost motion is
+deferred only because YAW is physically fixed before the serial link opens. With
+drive power removed, restore matching marks on the fixed base and rotating
+platform; then keep the observed flight corridor clear by at least ±25 cm and do not use **YAW**, **CENTER**, or **SET ZERO** during the session. This pass does not validate aiming accuracy and cannot authorize pose-guided, human-adjacent, or automatic firing at a person.
 
-Complete the no-fire gate above. Close the aim-only console, enable **ENABLE FIRE
-CONTROL**, reopen it, and confirm logical pitch/yaw `0/0` without moving either
-aim control.
+Complete every non-YAW part of the no-fire gate above. Keep the failed YAW return
+recorded rather than repeating it or calling it a pass; close the aim-only console,
+restore the physical YAW marks with drive power removed, enable **ENABLE FIRE
+CONTROL**, reopen it, and confirm logical pitch/yaw `0/0` without moving either aim
+control.
 
 For each of five shots with the same ball:
 
 1. Press **RELOAD** with wheel command zero and the ball in the vertical lift.
-   RELOAD is not optional bookkeeping: the firmware homes both aim axes and zeroes
-   the wheel targets, so it is what puts the machine into a known state, and the
-   console refuses to **ARM** without one since the last shot. `NEXT` names this.
+   RELOAD is not optional bookkeeping: it zeroes the wheel targets, sends
+   `horzStepper.moveTo(0)`, and the console refuses to **ARM** without one since
+   the last shot. YAW stays physically fixed only because boot adopted the aligned
+   marks as logical zero and no later YAW command has broken that relationship.
+   PITCH is not commanded to exact zero: `vertStepper.moveTo(7)` is 7 steps, or
+   about `+0.042°` at `STEPS_PER_DEG_VERT = 166.67`. Keep that known offset in the
+   measurement notes. `NEXT` names the required reload.
 2. Press **POLL FIRMWARE**. Require feeder `IDLE`, `Ball=LOW`, logical aim `0/0`,
    and unchanged physical YAW marks. Any visible aim motion fails the session. The
    console parses the ball switch into `BALL SWITCH` and warns when it disagrees
@@ -311,10 +330,10 @@ For each of five shots with the same ball:
    launcher can be told to reproduce.
 
 Press **STOP** and reject the shot if a person enters, a YAW mark moves, `RELOAD`
-moves an aim axis, spin-up misses its deadline or stability window, `Ball=LOW` or
-feeder `IDLE` is absent, the video misses first contact, or any unexpected contact,
-motion, noise, or smell occurs. Repeat only after understanding the cause and
-rerunning every gate.
+causes any YAW movement or visible PITCH movement beyond its known 7-step settle,
+spin-up misses its deadline or stability window, `Ball=LOW` or feeder `IDLE` is
+absent, the video misses first contact, or any unexpected contact, motion, noise or
+smell occurs. Repeat only after understanding the cause and rerunning every gate.
 
 Five valid 500 RPM shots establish only the fixed-direction speed sample and its
 spread; do not press **WRITE v(RPM) MODEL** yet.
@@ -368,9 +387,11 @@ cannot inform a clearance margin.
 
 ## 7. Acceptance
 
-- [ ] The no-fire commissioning gate passes: small PITCH/YAW moves are visible,
-      CENTER returns to the new SET ZERO position, wheels remain at zero, and
-      closing the console produces no aim movement.
+- [ ] Ordinary aiming remains blocked until the generic no-fire commissioning gate
+      passes, including a physical YAW return to its reference mark. For the
+      fixed-YAW speed-only exception, the failed return is recorded, the reference
+      marks are restored with drive power removed before the new serial session,
+      and the marks remain unchanged through every `RELOAD` and shot.
 - [ ] `garage_lab_combined/cal/blm/rpm_speed_model.json` exists and contains
       `fit_rmse_mps` and `n_shots`.
 - [ ] Method A and method B agree within 10 % at 800 RPM.
