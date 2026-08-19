@@ -20,6 +20,21 @@ This project controls a physical ball launching machine. Incorrect commands can 
 - `info` extended with limit switch states + live config
 - Strict command matching via `cmd.toLowerCase()` — exact tokens only
 
+## Candidate Firmware (control_15_full.ino, software-only 2026-08-19)
+- `control_15` is **not deployed and not commissioned**. Its current exact source
+  SHA-256 is `2a09dfe3f743fe983362bbe51d2cb06097d23f8e5951a255ab28883b0ad74f15`;
+  the retained application binary SHA-256 is
+  `7c0515129ff4c4f869eb69d1c7654d83a9856b82c26bb0dcb1131575d0b08d9e`.
+  The software gate passed 1,225 tests with 3 skips and the pinned core 3.3.7
+  compile, but no serial port was opened and no board was flashed. Hardware
+  tuning remains 0/4. Do not add it to `COMMISSIONED_FIRMWARE` or treat a clean
+  build as hardware acceptance.
+- The first authorised hardware iteration remains no-ball, no-fire and no-YAW.
+  It begins only after the outstanding YAW lost-motion observation below is
+  recorded unambiguously, then requires exact boot identity, fresh 0/0 and the
+  complete 400..1000 ladder. The 1100 and 1200 steps are separate escalations,
+  each requiring its own later operator approval.
+
 ## Safety Gates (enforced by launcher_runtime_from_udp.py + live_aim_test.py)
 - Zone check: target must be within valid arena zone (from GT CSV bounds)
 - Confidence gate: minimum cameras (`--udp-target-cams-min 3`) and confidence (`--udp-target-conf-min 0.45`)
@@ -90,7 +105,12 @@ All scripts that read serial MUST filter:
   post-repair residual is measured. Ordinary YAW aiming remains uncommissioned.
   The deferred fixed-YAW speed pass is narrower: restore and mark the physical
   direction with drive power removed before boot, then issue no YAW, `center`, or
-  `setzero`; any mark movement aborts the pass.
+  `setzero`; any mark movement aborts the pass. A 2026-08-19 follow-up again
+  reported roughly 6--7 degrees of movement, but did not distinguish platform
+  travel from travel of the marked motor shaft. At the 50:1 ratio those are not
+  interchangeable observations. Keep localisation OPEN and do not call the
+  check passed until both travels are separately recorded during the same
+  unpowered reversal.
 - **`reload` does not home both aim axes to exact zero.** In `control_14`, YAW gets
   `horzStepper.moveTo(0)` and therefore stays fixed only while boot zero still
   matches the physical mark. PITCH gets `vertStepper.moveTo(7)`: 7 steps at
