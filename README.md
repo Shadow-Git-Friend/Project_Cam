@@ -4,10 +4,10 @@
 ball tracking, with predictive targeting and a safety-gated robotic launcher.**
 
 YOLO / YOLO-Pose · OpenCV · SVD triangulation · Kalman prediction · TensorRT ·
-multi-person tracking · local Face ID · 9 training drills · native coach app
+multi-person tracking · local Face ID · 10 training drills · native coach app
 (Tauri + React + Rust) · FastAPI service · Prometheus monitoring · Docker ·
 reproducible 4-cam vs 6-cam benchmarks · model registry with a three-layer
-licence audit · CI accuracy gate · 823 hardware-free tests.
+licence audit · CI accuracy gate · 1202 hardware-free tests.
 
 > **6 cameras are the target direction. The validated 4-camera `arena_fixed`
 > arena is the fallback** until the 6-camera capture/calibration/static-3D gates
@@ -15,6 +15,30 @@ licence audit · CI accuracy gate · 823 hardware-free tests.
 > 4-camera; 6-camera accuracy is not yet measured.
 
 MSc Thesis — ECE, Nazarbayev University.
+
+### Repository history
+
+`main`'s history begins on **2026-08-04**, when the live system was moved into a
+clean tree and re-initialised. That is deliberate, not a lost repository: a 51 GB
+working tree had accumulated eleven months of sediment, and a retired 4-camera
+recording sat beside the current 6-camera rig looking equally current — a pose
+benchmark got run against the wrong calibration before anyone noticed. The move
+made one tree authoritative and every exclusion explicit
+([docs/WHAT_IS_NOT_HERE.md](docs/WHAT_IS_NOT_HERE.md)).
+
+Everything older — the full 103-commit history, including the 4-camera
+calibration, the retired recordings and the earlier CI/Docker triage — is
+preserved at tag and branch **`archive/heavy-tree-20260804`**. Nothing was
+discarded; it is simply no longer the working tree.
+
+```bash
+git log archive/heavy-tree-20260804          # the pre-2026-08-04 history
+git show archive/heavy-tree-20260804:<path>  # any file as it was
+```
+
+Model weights and TensorRT engines (~520 MB) are intentionally untracked; see
+[docs/model_card.md](docs/model_card.md) for provenance and the three-layer
+licence verdicts.
 
 ---
 
@@ -26,7 +50,7 @@ UDP target broadcast → **safety-gated** launcher. A parallel **aim-only** API 
 Prometheus monitoring layer makes the same core observable and integrable.
 
 On top of that core: cross-view **multi-person** association with stable IDs and
-optional **local Face ID** labels, **9 coach-facing training drills** scored from
+optional **local Face ID** labels, **10 coach-facing training drills** scored from
 pose alone, and a native **Control Center** that supervises runs and writes
 durable session evidence.
 
@@ -208,7 +232,7 @@ Query it with `ModelRegistry.commercial_blockers()`, `GET /v1/models`, or
 ## Safety
 The launcher runtime is the **only** component that can fire, behind zone /
 confidence / camera-count / stability / angle-clamp / RPM gates plus ESTOP. The
-API, edge demo, Control Center and all nine drills are architecturally incapable
+API, edge demo, Control Center and all ten drills are architecturally incapable
 of firing (tested — the drill wrapper may not reference `--shoot-enabled`,
 `live_aim_test`, or a serial device, and no desktop launch profile actuates).
 See [docs/safety_boundaries.md](docs/safety_boundaries.md).
@@ -258,7 +282,7 @@ configs/models.yaml     # model registry/provenance + licence verdicts
 benchmarks/             # reproducible benchmark suite (--dry-run)
 deploy/                 # prometheus + grafana
 apps/                   # edge_stream_demo, athlete_assessment runners
-tests/                  # hardware-free pytest suite (823 tests, 66 files)
+tests/                  # hardware-free pytest suite (1202 tests, 78 files)
 docs/                   # architecture, cards, safety, performance, monitoring
 docs/reports/           # technical system report + fact-check ledger
 docs/thesis_archive/    # thesis / defense history kept out of the root
